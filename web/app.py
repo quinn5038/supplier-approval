@@ -105,6 +105,17 @@ def _run_pipeline_for_one(todo_id: str):
             _update("fetch_failed", status="error", error=f"拉取失败（exit={r1.returncode}）：{r1.stderr[:500]}")
             return
 
+        # 2026-09-04 保密合规改造：下载完成后自动脱敏（与 textin_pipeline.py 集成一致）
+        _update("正在本地脱敏敏感材料（身份证/财报）...")
+        try:
+            from desensitize import desensitize_dir
+            desensitize_dir(BASE_DIR / "files_cache" / str(todo_id),
+                            BASE_DIR / "files_cache_desens" / str(todo_id))
+        except ImportError:
+            pass  # 脱敏模块未装时跳过（不阻塞）
+        except Exception as e:
+            print(f"[desens] 脱敏失败（不阻塞流程）：{e}")
+
         _update("正在 OCR 识别证件文件（TextIn）...")
         r2 = subprocess.run(
             [PYTHON_EXE, str(BASE_DIR / "textin_pipeline.py")],
