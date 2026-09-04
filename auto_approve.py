@@ -1367,6 +1367,9 @@ def run():
                 "tax_credit_rating_ok": "tax_credit" in classified_materials,
                 "has_financial_report": has_financial_report,
                 "has_inspection_cert": "inspection_cert" in classified_materials,
+                # 2026-09-04 保密合规改造：财报敏感不发 AI，由企查查公查数据判定
+                # A08 规则改 check_type=qichacha，qcc_finance_ok 由 enhance_checklist_with_qcc 阶段写入
+                "qcc_finance_ok": False,
                 # 生产许可证条件检查
                 "needs_production_license": needs_license,
                 "production_license_reason": license_reason,
@@ -1680,9 +1683,91 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                                f"（股东：{sh_desc}{ctrl_desc}）；"
                                f"身份证有效期仍需人工核验")
 
-        # ---- A08 资金财务状况：不用企查查数据（业务 9/1确认：年报数据普遍过期）----
-        # 财报三指标一律核验供应商上传的经审计财报（TextIn解析，见 stage3）
-        # elif cid == "A08": 保持 pending，由 TextIn 结果增强
+        # ---- A08 资金财务状况（2026-09-04 保密合规改造）----
+        # 改走企查查财务数据（公开披露），不再依赖 TextIn 解析供应商上传的财报（敏感数据）
+        elif cid == "A08":
+            financial = qcc.get("financial") or {}
+            # 适配企查查多种数据形态：
+            #   {"搜索结果": "未发现任何记录"} → 非上市公司常见
+            #   {"财务数据信息": [{"报告期": ..., "指标详情": {"分析数据": {"偿还能力": {资产负债率, 流动比率, ...}}}}]}
+            #   {"资产负债率": ..., "流动比率": ..., "经营性现金流": ...} → 扁平指标
+            no_data = (
+                not financial
+                or "搜索结果" in financial
+                or "财务数据信息" not in financial
+            )
+            if no_data:
+                c["status"] = "manual"
+                c["detail"] = ("企查查未查到上年度财报数据（非上市公司常见，公开披露数据有限），"
+                               "已按保密合规要求不再 OCR 解析上传财报；转人工要求供应商补交经审计财报")
+                qcc_issues.append("A08 财报：企查查无数据，转人工要求补交")
+            else:
+                # 提取嵌套指标——取最新报告期（财务数据信息[0]）
+                info_list = financial.get("财务数据信息") or []
+                if not info_list:
+                    c["status"] = "manual"
+                    c["detail"] = "企查查财报数据为空，转人工要求供应商补交"
+                    qcc_issues.append("A08 财报：企查查数据为空，转人工要求补交")
+                else:
+                    # 取最新报告期（按报告期字符串倒序）
+                    try:
+                        latest = max(info_list, key=lambda x: x.get("报告期", ""))
+                    except Exception:
+                        latest = info_list[0]
+                    indicators = (
+                        latest.get("指标详情", {})
+                        .get("分析数据", {})
+                    )
+                    # 三项指标
+                    debt_ratio = indicators.get("资产负债率") or indicators.get("负债率")
+                    liq_ratio = indicators.get("流动比率")
+                    ocf = indicators.get("经营性现金流") or indicators.get("经营活动现金流净额")
+
+                    # 保护：若三项指标全是空（企查查披露等级"指标稀少"），按无数据转人工
+                    if (not debt_ratio or debt_ratio == "") and (not liq_ratio or liq_ratio == "") and (not ocf or ocf == ""):
+                        c["status"] = "manual"
+                        c["detail"] = (f"企查查财报披露不完整（{latest.get('报告期', '?')}，"
+                                       f"披露等级：{latest.get('披露等级', '稀少')}），"
+                                       "转人工要求供应商补交经审计财报")
+                        qcc_issues.append(f"A08 财报：企查查数据披露稀少（{latest.get('报告期', '?')}），转人工要求补交")
+                    else:
+                        # 计算指标
+                        ratio_issues = []
+                        if debt_ratio not in (None, ""):
+                            try:
+                                dr = float(str(debt_ratio).rstrip("%"))
+                                if dr > 65:
+                                    ratio_issues.append(f"资产负债率{dr:.1f}%超阈值65%")
+                            except (ValueError, TypeError):
+                                pass
+                        if liq_ratio not in (None, ""):
+                            try:
+                                lr = float(liq_ratio)
+                                if lr < 100:
+                                    ratio_issues.append(f"流动比率{lr:.1f}%不足100%")
+                            except (ValueError, TypeError):
+                                pass
+                        if ocf not in (None, ""):
+                            try:
+                                ocf_val = float(str(ocf).replace(",", ""))
+                                if ocf_val <= 0:
+                                    ratio_issues.append(f"经营性现金流{ocf_val:g}为负或零")
+                            except (ValueError, TypeError):
+                                pass
+
+                        if ratio_issues:
+                            c["status"] = "manual"
+                            c["detail"] = f"企查查财报数据（{latest.get('报告期', '?')}）指标不符：" + "；".join(ratio_issues)
+                            qcc_issues.append("A08 财报：" + "；".join(ratio_issues))
+                        else:
+                            c["status"] = "pass"
+                            c["detail"] = (
+                                f"企查查财报指标核算通过（{latest.get('报告期', '?')}）："
+                                f"资产负债率{debt_ratio or 'N/A'}、"
+                                f"流动比率{liq_ratio or 'N/A'}、"
+                                f"经营性现金流{ocf or 'N/A'}"
+                            )
+                            c["qcc_finance_ok"] = True
 
         # ---- A10 商业信誉：企查查登记状态辅助天眼查 ----
         elif cid == "A10" and reg:

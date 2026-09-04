@@ -66,11 +66,14 @@ DOC_TYPES = [
 ]
 
 # 文件名关键词 → 材料类型（files_cache 手动放置时分类用）
+# 2026-09-04 保密合规改造：以下两类文件**保留分类**（用于识别材料是否上传），
+# 但 OCR 调用返回空（extract_legal_person_id / extract_financial_report 已废弃）。
+# 详见 docs/保密合规改造方案.md
 FILENAME_KEYWORDS = [
     (("营业执照", "执照"), {"business_license"}),
-    (("身份证",), {"legal_person_id"}),
+    (("身份证",), {"legal_person_id"}),                  # 保留分类，OCR 禁用
     # 审计/审记（错别字）优先于纳税：供应商常把审计报告和纳税申报混在一起命名
-    (("财务", "审计", "审记", "财报"), {"financial_report"}),
+    (("财务", "审计", "审记", "财报"), {"financial_report"}),  # 保留分类，OCR 禁用
     (("纳税", "信用等级", "信用评价"), {"tax_credit"}),
     (("质量管理体系", "9001"), {"iso9001"}),
     (("环境", "14001"), {"iso14001"}),
@@ -321,8 +324,17 @@ def extract_business_license(text, supplier):
 
 
 def extract_legal_person_id(text, supplier):
-    """法人身份证 → 姓名比对+效期"""
-    t = _pre(text)
+    """[已废弃 2026-09-04] 法人身份证 → 姓名比对+效期
+
+    按保密合规要求：法人身份证是敏感证件，不再发给 AI 处理。
+    A02 法人身份证明改为仅校验材料是否上传，OCR 识别禁用。
+
+    函数保留为兼容旧调用，实际被 extract() 调用时直接返回 None。
+    详见 docs/保密合规改造方案.md
+    """
+    log.warning("[DEPRECATED] extract_legal_person_id 已废弃——按保密合规要求 "
+                "A02 不再做身份证 OCR 识别，仅校验材料是否上传")
+    return {"fields": {}, "checks": {}, "issues": [], "_deprecated": True}
     n = _norm(t)
     fields = {}
     m = re.search(r"姓\s*名\s*[:：]?\s*([\u4e00-\u9fa5·]{2,15}?)"
@@ -422,8 +434,21 @@ def _num(s):
 
 
 def extract_financial_report(text):
-    """财报 → 资产负债率≤65% / 流动比率≥100% / 经营现金流>0"""
-    n = _norm(_pre(text))
+    """[已废弃 2026-09-04] 财报 → 资产负债率≤65% / 流动比率≥100% / 经营现金流>0
+
+    按保密合规要求：未公开披露的财报数据不能发给 AI 处理。
+    A08 上年度审计财报改走企查查财务数据接口（公开披露）：
+      - 资产负债表 → 资产负债率
+      - 利润表 → 经营情况辅助判断
+      - 现金流量表 → 经营性现金流
+    企查查无数据（非上市公司常见）→ 转人工要求供应商补交。
+
+    函数保留为兼容旧调用，实际被 extract() 调用时直接返回 None。
+    详见 docs/保密合规改造方案.md
+    """
+    log.warning("[DEPRECATED] extract_financial_report 已废弃——按保密合规要求 "
+                "A08 财报改走企查查（公查信息），不发 AI 处理")
+    return {"fields": {}, "checks": {}, "issues": [], "_deprecated": True}
     fields, checks, issues = {}, {}, []
 
     def find_item(label, alt=None):
