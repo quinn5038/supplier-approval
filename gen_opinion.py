@@ -54,7 +54,7 @@ HARD_FAIL_KEYWORDS = [
     "非经审计", "纳税申报表", "概括式", "缺少",
 ]
 
-# 各审核项对应"应补材料"的具体描述（Quinn 9/3 要求：审批意见写具体清单）
+# 各审核项对应"应补材料"的具体描述（9/3 要求：审批意见写具体清单）
 # ISO 三项 (C1_02/03/04) 合并为一条
 SUPPLEMENT_TEMPLATES = {
     "A01":  "营业执照副本（须含统一社会信用代码及完整经营范围明细）",
@@ -280,7 +280,7 @@ def build_opinion(tid, s2, textin, cache):
             lines.append(f"  {i}. {q}")
         lines.append("")
 
-    # 最终建议（具体审批意见格式，Quinn 9/3 要求）
+    # 最终建议（具体审批意见格式，9/3 要求）
     lines.append(f"{take_sec()}、审批意见")
     if suggest_action == "退回":
         # 按材料类别汇总应补材料，ISO 三项合并为一条

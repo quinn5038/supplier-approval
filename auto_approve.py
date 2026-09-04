@@ -503,7 +503,7 @@ def load_rules():
 # ============================================================
 # 材料分类引擎（基于资质文件列表）
 # ============================================================
-# Quinn确认的附件名称 → 材料类型映射
+# 业务确认的附件名称 → 材料类型映射
 # 供应商上传的文件按 fileinfoTypeName 分类，但有时会传到"错误"位置
 # 所以需要 fileinfoTypeName + fileName + fileDesc 三结合判断
 FILEINFO_TYPE_MAP = {
@@ -607,7 +607,7 @@ KEYWORD_MAP = [
 ]
 
 
-# 经营范围关键词 → 是否需要生产许可/强制认证证明（Quinn确认用关键词匹配，无需兜底）
+# 经营范围关键词 → 是否需要生产许可/强制认证证明（业务确认用关键词匹配，无需兜底）
 # 3C强制认证产品目录（电线电缆/开关/灯具/电机/电池/充电器/家电/玩具/安全玻璃/汽车零部件等）
 CCC_SCOPE_KEYWORDS = [
     "电线", "电缆", "开关", "灯具", "照明", "电机", "电池", "充电器",
@@ -700,7 +700,7 @@ def classify_uploaded_materials(file_list):
 
 def _ensure_inspection_fields(supplier, entry=None):
     """补全 is_inspection / has_inspection_cert 字段（兼容旧 cache）。
-    Quinn 9/3 新增 A13 检验检测资质，旧 cache 无此字段时按规则重新判定。"""
+    9/3 新增 A13 检验检测资质，旧 cache 无此字段时按规则重新判定。"""
     if supplier.get("is_inspection") is None or "is_inspection" not in supplier:
         name = supplier.get("name", "")
         scope = supplier.get("busi_scope", "") or ""
@@ -722,7 +722,7 @@ def _ensure_inspection_fields(supplier, entry=None):
 
 def build_checklist(supplier, rules_list):
     """
-    Quinn 8/31确认的统一检查流程：
+    业务 8/31确认的统一检查流程：
     全部检查项跑完（齐全性+准确性），统一收集问题，最后一次性生成意见。
     不做"缺一项就立即退回"。
 
@@ -848,7 +848,7 @@ def check_auto_rules(supplier, rules_list):
 
 # ============================================================
 # 审批意见生成（v3 两阶段：齐全性→准确性）
-# Quinn要求：缺材料→提醒补充；材料有误→提醒什么样的材料才是正确的
+# 业务要求：缺材料→提醒补充；材料有误→提醒什么样的材料才是正确的
 # ============================================================
 # 每个material审查项对应的"正确材料"描述（缺/传错时都提醒这个）
 MATERIAL_REQUIREMENTS = {
@@ -871,7 +871,7 @@ MATERIAL_REQUIREMENTS = {
 def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, verify_items,
                         type_desc=""):
     """
-    生成审批意见（v4统一汇总逻辑，Quinn 8/31确认）
+    生成审批意见（v4统一汇总逻辑，业务 8/31确认）
 
     全部检查跑完后统一调用：
     - 有问题（auto不达标）或缺材料 → 一条退回意见，统一列出全部需补充/更正项
@@ -968,7 +968,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
         opinion = "\n".join(opinion_parts)
         return opinion, "manual"
 
-    # ---- 全部通过 → 建议同意（Quinn确认：初期不自动通过，需人工核实）----
+    # ---- 全部通过 → 建议同意（业务确认：初期不自动通过，需人工核实）----
     opinion = ("建议同意。该供应商材料齐全、各项核验通过。"
                "（初期设置：需人工核实后再执行通过操作）")
     return opinion, "recommend"
@@ -1252,7 +1252,7 @@ def run():
                 continue
 
             # 3. 查询供应商基本信息（三种审批类型都查）
-            # Quinn确认：三种审核流程一样，都能看到基本信息
+            # 业务确认：三种审核流程一样，都能看到基本信息
             # 参数规律：P0704(合作意向)=tempOrFormalFlag1, P0701/P0702=tempOrFormalFlag0
             time.sleep(REQ_INTERVAL)   # scpma 请求间隔，防WAF限流
             base_info = query_supplier_base_info(sup_info_apply_id, bill_type)
@@ -1314,7 +1314,7 @@ def run():
             # 经营范围判断是否需要生产许可证/强制认证（C1_05条件检查）
             needs_license, license_reason = needs_production_license_by_scope(base_bo.get("busiScope", ""))
             if not is_manufacturer:
-                # 贸易商不需要生产许可证（Quinn确认：一般只有生产商、厂家才需要）
+                # 贸易商不需要生产许可证（业务确认：一般只有生产商、厂家才需要）
                 needs_license = False
                 license_reason = ""
 
@@ -1436,7 +1436,7 @@ def run():
                 _record_progress(todo_id, sname, decision)
                 continue
 
-            # ---- 分流2：港澳台供应商 → 转人工（Quinn 8/31确认）----
+            # ---- 分流2：港澳台供应商 → 转人工（业务 8/31确认）----
             if is_hmt:
                 opinion = "转人工复核。港澳台地区供应商需人工审批。"
                 decision = "manual"
@@ -1481,7 +1481,7 @@ def run():
                     f"  [{c['status']}] {c['id']} {c['name']} — {c['detail']}" for c in checklist))
 
             # ---- 执行审批操作（初期：只执行退回；通过/转人工均不自动执行）----
-            # Quinn 8/31确认：初期不设置自动通过项，全达标也需人工核实
+            # 业务 8/31确认：初期不设置自动通过项，全达标也需人工核实
             if decision == "recommend":
                 # 建议同意 → 输出意见供人工核实，不执行任何操作
                 log.info(f"[建议同意·待人工核实] {sname} (todoId={todo_id})")
@@ -1549,7 +1549,7 @@ ZHONGJIAO_KEYWORDS = (
     "疏浚", "航道局",
 )
 
-# 财务指标阈值（Quinn 9/1确认：资产负债率≤65%、流动比率≥100%、现金流>0，不符转人工）
+# 财务指标阈值（业务 9/1确认：资产负债率≤65%、流动比率≥100%、现金流>0，不符转人工）
 # 数据来源：供应商上传的经审计财报（TextIn解析），不用企查查财务数据（普遍过期）
 FIN_RATIO_LIMITS = {"资产负债率": 65.0, "流动比率": 100.0}
 
@@ -1598,7 +1598,7 @@ def _find_metric(obj, keyword):
 def enhance_checklist_with_qcc(checklist, supplier, qcc):
     """
     企查查核验结果合并进核查清单（阶段2）。
-    保守原则（Quinn 8/31确认）：企查查发现的问题一律转人工核实，不直接退回。
+    保守原则（业务 8/31确认）：企查查发现的问题一律转人工核实，不直接退回。
 
     qcc 结构（qcc_results.json 每条）:
       reg_info: 工商登记信息dict（企业名称/统一社会信用代码/法定代表人/注册资本/登记状态...）
@@ -1608,7 +1608,7 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
       financial: 财务数据dict 或 {"搜索结果": "未发现任何记录"}
 
     更新 A01(执照核验)/A02(股权穿透)/A10(商业信誉) 三项，
-    A08 财务指标不用企查查（年报数据过期，Quinn 9/1确认），由 TextIn 解析上传财报（阶段3）。
+    A08 财务指标不用企查查（年报数据过期，业务 9/1确认），由 TextIn 解析上传财报（阶段3）。
     返回 (checklist, qcc_issues) — qcc_issues 为需人工核实的问题列表
     """
     reg = qcc.get("reg_info") or {}
@@ -1672,7 +1672,7 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                                f"（股东：{sh_desc}{ctrl_desc}）；"
                                f"身份证有效期仍需人工核验")
 
-        # ---- A08 资金财务状况：不用企查查数据（Quinn 9/1确认：年报数据普遍过期）----
+        # ---- A08 资金财务状况：不用企查查数据（业务 9/1确认：年报数据普遍过期）----
         # 财报三指标一律核验供应商上传的经审计财报（TextIn解析，见 stage3）
         # elif cid == "A08": 保持 pending，由 TextIn 结果增强
 
@@ -1695,7 +1695,7 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
 
 
 # ============================================================
-# TextIn OCR 解析结果 → 核查清单增强（Quinn 9/2 接入）
+# TextIn OCR 解析结果 → 核查清单增强（业务 9/2 接入）
 # ============================================================
 # doc_type → checklist 项名关键词（按 name 含任意关键词匹配）
 _TEXTIN_DOC_TYPE_KEYWORDS = {

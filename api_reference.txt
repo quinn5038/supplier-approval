@@ -84,8 +84,8 @@
   "actInstName": "【二级单位】供应商审批岗",
   "workItemId": "29046508",
   "workItemStatus": 0,
-  "currentOperUserId": "10001996245@103495",
-  "currentOperUserDeptId": "10349500058",
+  "currentOperUserId": "<your_oper_user_id>",
+  "currentOperUserDeptId": "<your_dept_id>",
   "agentId": "<AGENT_ID>",
   "purSupFlag": "pur",
   "baseAppId": 100126
@@ -96,7 +96,7 @@
 # POST https://scpma.iccec.cn/apis/scpma/smc/qrySupBaseInfo
 # Body:
 {
-  "supinfoId": "2776840270128402432",
+  "supinfoId": "<your_supinfo_id>",
   "dataSourceFlag": 1,
   "agentId": "<AGENT_ID>",
   "purSupFlag": "pur",
@@ -108,7 +108,7 @@
 # POST https://scpma.iccec.cn/apis/scpma/smc/qrySupQualification
 # Body:
 {
-  "supinfoId": "2776840270128402432",
+  "supinfoId": "<your_supinfo_id>",
   "businessBillType": "P0704",
   "tempOrFormalFlag": 1,
   "agentId": "<AGENT_ID>",
@@ -126,7 +126,7 @@
 # POST https://scpma.iccec.cn/apis/scpma/oss/filePreview
 # Body:
 {
-  "uploadId": "10082325474",
+  "uploadId": "<your_upload_id>",
   "agentId": "<AGENT_ID>",
   "purSupFlag": "pur",
   "baseAppId": 100126
@@ -142,7 +142,7 @@
 # POST https://scpma.iccec.cn/apis/scpma/smc/qrySupAuditDetail
 # Body:
 {
-  "supinfoId": "2776840270128402432",
+  "supinfoId": "<your_supinfo_id>",
   "supAuditId": "<your_business_bill_id>",
   "businessBillType": "P0704",
   "agentId": "<AGENT_ID>",
@@ -178,8 +178,8 @@
   "businessBillId": "<your_business_bill_id>",
   "businessCode": "P07",
   "businessBillType": "P0704",
-  "currentOperUserId": "10001996245@103495",
-  "currentOperUserDeptId": "10349500058",
+  "currentOperUserId": "<your_oper_user_id>",
+  "currentOperUserDeptId": "<your_dept_id>",
   "orgId": "1063972",
   "appId": "100032",
   "agentId": "<AGENT_ID>",
@@ -204,10 +204,10 @@
   "participantList": [
     {
       "isMultiWorkItem": "0",
-      "joinOrgName": "河北灿昌交通设施有限公司",
-      "name": "河北灿昌交通设施有限公司",
+      "joinOrgName": "<participant_org_name>",
+      "name": "<participant_org_name>",
       "activityDefID": "startActivity",
-      "id": "10002596522@1063972#106397200001",
+      "id": "<participant_user_id>",
       "workItemID": "0",
       "activityInstID": "0",
       "typeCode": "emp"
