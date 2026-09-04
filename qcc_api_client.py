@@ -1,19 +1,30 @@
 """
-企查查 API 独立客户端（不依赖 WorkBuddy 连接器）
-================================================
+企业信息接口 独立客户端（不依赖 WorkBuddy 连接器）
+==================================================
 被 auto_approve.py 的 enhance_checklist_with_qcc 调用。
 当前为接入骨架（13个函数 stub），等 Quinn 提供 QCC_APP_KEY/QCC_SECRET_KEY 后填实。
 
-接入清单（共13个接口）：
-- 第一档10个核心合规（A10 商业信誉硬拦截项）：verify/baseinfo/holder/inverst/staff
-                                + dishonest/zhixinginfo/consumptionRestriction/baseinfo-illegal/illegalinfo
-- 第二档3个围标串标（多家供应商关联排查）：shortPath/investtree/humanholding
+接口实际归属（2026-09-04 Quinn 给的接口文档扫描确认）：
+- 域名：https://ai-dataapi.ccccltd.cn  ← CCC=中国交建，港湾是中交子公司
+- 这不是企查查公开 API，是中交系内部接口
+- 鉴权方式：AppId + Timespan（Unix秒）+ Token=MD5(AppId+Timespan+secretKey).upper()
+- 响应码：200 成功 / 300000 无数据 / 300002 账号失效 / 300006 余额不足 / 300011 此IP无权限
+
+接入清单（共13个接口，按 Quinn 9/4 反馈：先做第一档+第二档围标串标留后续版本）：
+- 第一档10个核心合规（A10 商业信誉硬拦截项）：
+    工商: ic/verify/2.0, ic/baseinfoV3/2.0
+    股东法人: ic/holder/2.0, ic/inverst/2.0, ic/staff/2.0
+    司法风险: jr/dishonest/2.0 (人员), jr/consumptionRestriction/2.0, jr/endCase, jr/bankruptcy/2.0
+    经营违法: hi/abnormal/2.0, mr/illegalinfo (税收违法 mr/taxContravention/2.0)
+- 第一档扩展（财务三表，对应保密改造后 A08 财报合规）：
+    cb/ic/balanceSheet/2.0, cb/ic/incomeStatement/2.0, cb/ic/cashFlow/2.0
+- 第二档3个围标串标（Quinn 决定先不做）：rela/shortPath/2.0, v3/investtree/ten, ic/humanholding/2.0
 
 设计原则：
 1. 失败返回空 dict/list，不抛异常 → enhance_checklist_with_qcc 走"数据缺失→人工复核"路径，不误判
-2. 缓存机制：每次调用结果追加到 qcc_results.json，避免重复请求耗配额
+2. 缓存机制：每次调用结果追加到 qcc_api_cache.json，避免重复请求耗配额
 3. 配额预警：每日调用量 >80% 阈值时 log.warning
-4. 签名机制：md5(timestamp + appkey + secretkey)，与企查查开放平台规范一致
+4. 签名机制：MD5(AppId + Timespan + secretKey).upper()，与接口文档一致
 """
 import os
 import time
@@ -35,7 +46,8 @@ log = logging.getLogger(__name__)
 # ============================================================
 QCC_APP_KEY  = os.getenv("QCC_APP_KEY", "")
 QCC_SECRET   = os.getenv("QCC_SECRET_KEY", "")
-QCC_BASE_URL = os.getenv("QCC_BASE_URL", "https://api.qcc.com")  # 实际域名看申请到的通道
+# 接口实际域名（中国交建系接口，非企查查公开 API）
+QCC_BASE_URL = os.getenv("QCC_BASE_URL", "https://ai-dataapi.ccccltd.cn")
 QCC_TIMEOUT  = int(os.getenv("QCC_TIMEOUT", "15"))
 
 # 配额预警阈值（每日调用量百分比）
@@ -50,18 +62,26 @@ _CALL_COUNT_FILE = Path(__file__).parent / "qcc_call_count.json"
 # 内部工具
 # ============================================================
 def _sign(timestamp: str) -> str:
-    """企查查签名：md5(timestamp + appkey + secretkey)"""
-    raw = f"{timestamp}{QCC_APP_KEY}{QCC_SECRET}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    """中交系接口签名：MD5(AppId + Timespan + secretKey).upper()
+
+    注意：与企查查公开 API 不同，是中交系内部约定。
+    secretKey 由系统提供，不参与 HTTP 传输（仅用于 token 计算）。
+    """
+    raw = f"{QCC_APP_KEY}{timestamp}{QCC_SECRET}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest().upper()
 
 
 def _headers() -> dict:
-    """生成请求头（apicode + timestamp + sign）"""
+    """生成请求头（AppId + Timespan + Token）
+
+    按接口文档 9/4 扫描：三个 header 字段名是 AppId/Timespan/Token，
+    不是企查查公开 API 的 apicode/timestamp/sign。
+    """
     ts = str(int(time.time()))
     return {
-        "apicode": QCC_APP_KEY,
-        "timestamp": ts,
-        "sign": _sign(ts),
+        "AppId": QCC_APP_KEY,
+        "Timespan": ts,
+        "Token": _sign(ts),
         "Content-Type": "application/json",
     }
 
@@ -117,9 +137,9 @@ def _cache_set(supplier_name: str, key: str, value):
         log.warning(f"[QCC] 缓存写入失败：{e}")
 
 
-def _get(path: str, params: dict, supplier_name: str = "", cache_key: str = "") -> dict:
+def _post(path: str, body: dict, supplier_name: str = "", cache_key: str = "") -> dict:
     """
-    统一调用入口
+    统一 POST 调用入口（接口文档全是 POST 方法）
     - cache_key 非空则优先读缓存
     - 失败返回空 dict，不抛异常
     """
@@ -141,16 +161,16 @@ def _get(path: str, params: dict, supplier_name: str = "", cache_key: str = "") 
         return {}
     try:
         url = QCC_BASE_URL + path
-        log.info(f"[QCC] GET {path} supplier={supplier_name}")
-        r = requests.get(url, headers=_headers(), params=params, timeout=QCC_TIMEOUT)
+        log.info(f"[QCC] POST {path} supplier={supplier_name}")
+        r = requests.post(url, headers=_headers(), json=body, timeout=QCC_TIMEOUT)
         _increment_call_count(path)
         if not r.ok:
             log.warning(f"[QCC] {path} HTTP {r.status_code}: {r.text[:200]}")
             return {}
         result = r.json()
-        # 企查查返回 code=0 是成功，其他是失败
-        if str(result.get("status", "")) not in ("200", "0"):
-            log.warning(f"[QCC] {path} 业务失败：{result.get('message', '')}")
+        # 中交系接口响应：status=200 成功，其他业务失败码（300000/300001/...）
+        if str(result.get("status", "")) != "200":
+            log.warning(f"[QCC] {path} 业务失败 status={result.get('status')} msg={result.get('msg', '')}")
             return {}
         # 写缓存
         if cache_key and supplier_name:
@@ -163,125 +183,104 @@ def _get(path: str, params: dict, supplier_name: str = "", cache_key: str = "") 
 
 # ============================================================
 # 第一档：10个核心合规接口（A10 商业信誉硬拦截项）
+# 按接口文档 9/4 扫描的真实路径调整
 # ============================================================
 def verify_ic(name: str, creditcode: str, legalrep: str) -> dict:
     """1. 工商三要素核验（企业名/统一社会信用代码/法人）→ A01 工商执照核实"""
-    return _get("/webapi/ic/verify/2.0", {
+    return _post("/webapi/ic/verify/2.0", {
         "name": name, "creditCode": creditcode, "legalRep": legalrep
     }, supplier_name=name, cache_key="verify_ic")
 
 
-def baseinfo(name: str) -> dict:
-    """2. 工商基本信息（含主要人员、注册资本、成立日期）→ A01/A02 工商+法人"""
-    return _get("/webapi/ic/baseinfoV3/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="baseinfo")
+def baseinfo(keyword: str) -> dict:
+    """2. 工商基本信息（含主要人员、注册资本、成立日期）→ A01/A02"""
+    return _post("/webapi/cb/cb/ic/2.0", {
+        "keyword": keyword
+    }, supplier_name=keyword, cache_key="baseinfo")
 
 
-def holders(name: str) -> dict:
-    """3. 股东信息 → A03 股东核实"""
-    return _get("/webapi/ic/holder/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="holders")
+def holders(keyword: str) -> dict:
+    """3. 股东信息（工商快照里拿）→ A03 股东核实"""
+    # 工商快照接口已含股东及出资信息（接口文档）
+    return _post("/webapi/ic/snapshot", {
+        "keyword": keyword
+    }, supplier_name=keyword, cache_key="holders")
 
 
-def invest_out(name: str) -> dict:
-    """4. 对外投资 → A03 股东核实（扩展）"""
-    return _get("/webapi/ic/inverst/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="invest_out")
+def staff(keyword: str) -> dict:
+    """4. 主要人员（法人、董事、监事）→ A02 法人核实"""
+    # 主要人员通常在 baseinfo 返回里
+    return baseinfo(keyword)
 
 
-def staff(name: str) -> dict:
-    """5. 主要人员（法人、董事、监事）→ A02 法人核实"""
-    return _get("/webapi/ic/staff/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="staff")
+def dishonest_person(keyword: str, human_name: str = "") -> dict:
+    """5. 失信被执行人（人员）→ A10 硬拦截项"""
+    body = {"name": keyword, "pageNum": 1, "pageSize": 20}
+    if human_name:
+        body["humanName"] = human_name
+    return _post("/webapi/v4/human/dishonest", body,
+                 supplier_name=keyword, cache_key="dishonest")
 
 
-def dishonest(name: str) -> dict:
-    """6. 失信被执行人（A10 硬拦截项）→ A10 商业信誉"""
-    return _get("/webapi/jr/dishonest/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="dishonest")
+def consumption_restriction(keyword: str) -> dict:
+    """6. 限制消费令 → A10 硬拦截项"""
+    return _post("/webapi/jr/consumptionRestriction/2.0", {
+        "keyword": keyword, "pageNum": 1, "pageSize": 20
+    }, supplier_name=keyword, cache_key="consumption_restriction")
 
 
-def zhixinginfo(name: str) -> dict:
-    """7. 被执行人（A10 硬拦截项）→ A10 商业信誉"""
-    return _get("/webapi/jr/zhixinginfo", {
-        "keyword": name
-    }, supplier_name=name, cache_key="zhixinginfo")
+def end_case(keyword: str) -> dict:
+    """7. 终本案件（执行案件终结本次程序）→ A10 扩展"""
+    # 终本案件在接口清单里，需单独查文档确认路径
+    return _post("/webapi/jr/endCase", {
+        "keyword": keyword, "pageNum": 1, "pageSize": 20
+    }, supplier_name=keyword, cache_key="end_case")
 
 
-def consumption_restriction(name: str) -> dict:
-    """8. 限制消费令（A10 硬拦截项）→ A10 商业信誉"""
-    return _get("/webapi/jr/consumptionRestriction", {
-        "keyword": name
-    }, supplier_name=name, cache_key="consumption_restriction")
+def bankruptcy(keyword: str) -> dict:
+    """8. 破产重整 → A10 严重违法"""
+    return _post("/webapi/jr/bankruptcy/2.0", {
+        "keyword": keyword, "pageNum": 1, "pageSize": 20
+    }, supplier_name=keyword, cache_key="bankruptcy")
 
 
-def operation_abnormal(name: str) -> dict:
-    """9. 经营异常名录（A10 硬拦截项）→ A10 商业信誉"""
-    return _get("/webapi/mr/baseinfo/normal", {
-        "keyword": name
-    }, supplier_name=name, cache_key="operation_abnormal")
+def operation_abnormal(keyword: str) -> dict:
+    """9. 经营异常名录 → A10 硬拦截项"""
+    return _post("/webapi/hi/abnormal/2.0", {
+        "keyword": keyword, "pageNum": 1, "pageSize": 20
+    }, supplier_name=keyword, cache_key="operation_abnormal")
 
 
-def illegal_info(name: str) -> dict:
-    """10. 严重违法失信（A10 硬拦截项）→ A10 商业信誉"""
-    return _get("/webapi/mr/illegalinfo", {
-        "keyword": name
-    }, supplier_name=name, cache_key="illegal_info")
-
-
-# ============================================================
-# 第一档扩展（3个，强烈推荐加，演示加分）
-# ============================================================
-def certificate(name: str) -> dict:
-    """11. 资质证书（用于 A04/A05 资质核实）"""
-    return _get("/webapi/m/certificate/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="certificate")
-
-
-def tax_credit(name: str) -> dict:
-    """12. 纳税信用等级（A10 商业信誉扩展）"""
-    return _get("/webapi/m/taxCredit/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="tax_credit")
-
-
-def end_case(name: str) -> dict:
-    """13. 终本案件（A10 扩展）"""
-    return _get("/webapi/jr/endCase", {
-        "keyword": name
-    }, supplier_name=name, cache_key="end_case")
+def tax_contravention(keyword: str) -> dict:
+    """10. 税收违法 → A10 严重违法"""
+    return _post("/webapi/mr/taxContravention/2.0", {
+        "keyword": keyword, "pageNum": 1, "pageSize": 20
+    }, supplier_name=keyword, cache_key="tax_contravention")
 
 
 # ============================================================
-# 第二档：3个围标串标接口（多家供应商关联排查）
+# 第一档扩展（财务三表，对应保密改造后 A08 财报合规）
+# 9/4 保密改造：A08 财报改走企查查公查数据，无数据转人工
 # ============================================================
-def short_path(name_a: str, name_b: str) -> dict:
-    """14. 两家公司最短路径（查共同股东/法人）→ 围标串标识别"""
-    # 注意：此接口需要两个公司名，缓存键特殊
-    cache_key = f"short_path_{hash(name_a)}_{hash(name_b)}"
-    return _get("/webapi/rela/shortPath/2.0", {
-        "name1": name_a, "name2": name_b
-    }, supplier_name=f"{name_a}↔{name_b}", cache_key=cache_key)
+def balance_sheet(keyword: str) -> dict:
+    """11. 资产负债表 → A08 财报（资产负债率计算）"""
+    return _post("/webapi/cb/cb/ic/balanceSheet/2.0", {
+        "keyword": keyword
+    }, supplier_name=keyword, cache_key="balance_sheet")
 
 
-def invest_tree(name: str, depth: int = 10) -> dict:
-    """15. 股权穿透10层（追溯实控人）→ 关联交易识别"""
-    return _get("/webapi/v3/investtree/ten", {
-        "keyword": name, "depth": depth
-    }, supplier_name=name, cache_key=f"invest_tree_{depth}")
+def income_statement(keyword: str) -> dict:
+    """12. 利润表 → A08 财报（辅助判断经营情况）"""
+    return _post("/webapi/cb/cb/ic/incomeStatement/2.0", {
+        "keyword": keyword
+    }, supplier_name=keyword, cache_key="income_statement")
 
 
-def human_holding(name: str) -> dict:
-    """16. 最终受益人（实际控制人）→ 影子股东识别"""
-    return _get("/webapi/ic/humanholding/2.0", {
-        "keyword": name
-    }, supplier_name=name, cache_key="human_holding")
+def cash_flow(keyword: str) -> dict:
+    """13. 现金流量表 → A08 财报（经营性现金流判断）"""
+    return _post("/webapi/cb/cb/ic/cashFlow/2.0", {
+        "keyword": keyword
+    }, supplier_name=keyword, cache_key="cash_flow")
 
 
 # ============================================================
@@ -289,45 +288,37 @@ def human_holding(name: str) -> dict:
 # ============================================================
 def fetch_first_tier(name: str) -> dict:
     """
-    批量拉取第一档全部10个接口数据（单家供应商）
+    批量拉取第一档全部接口数据（单家供应商）
     返回结构对齐 qcc_results.json 现有字段（向后兼容）：
     {
         "reg_info": {...},           # baseinfo 返回
         "accuracy": {...},           # verify_ic 返回
         "shareholders": [...],       # holders 返回
-        "actual_controller": {...},  # human_holding 返回（第二档接口，这里也拉）
-        "dishonest": [...],          # 新增 5 块
+        "actual_controller": {...},  # human_holding 返回（暂未对接）
+        "dishonest": [...],          # 新增 5 块（合规拦截）
         "executed": [...],
         "consumption_restriction": [...],
         "operation_abnormal": [...],
-        "illegal_info": [...]
+        "illegal_info": [...],       # 实际是 tax_contravention
+        "financial": {...}           # 财报三表（A08 财报合规）
     }
     """
     return {
         "reg_info": baseinfo(name),
-        "accuracy": verify_ic(name, "", ""),  # 需要 creditcode/legalrep，从 reg_info 里取
-        "shareholders": holders(name).get("Result", []),
-        "actual_controller": human_holding(name),
-        "dishonest": dishonest(name).get("Result", []),
-        "executed": zhixinginfo(name).get("Result", []),
-        "consumption_restriction": consumption_restriction(name).get("Result", []),
-        "operation_abnormal": operation_abnormal(name).get("Result", []),
-        "illegal_info": illegal_info(name).get("Result", []),
+        "accuracy": verify_ic(name, "", ""),
+        "shareholders": holders(name).get("result", []),
+        "actual_controller": {},  # 围标串标接口，Quinn 决定先不做
+        "dishonest": dishonest_person(name).get("result", []),
+        "executed": [],  # 历史被执行人，需单查
+        "consumption_restriction": consumption_restriction(name).get("result", []),
+        "operation_abnormal": operation_abnormal(name).get("result", []),
+        "illegal_info": tax_contravention(name).get("result", []),
+        "financial": {
+            "balance_sheet": balance_sheet(name),
+            "income_statement": income_statement(name),
+            "cash_flow": cash_flow(name),
+        },
     }
-
-
-def fetch_second_tier_pairs(suppliers: list) -> dict:
-    """
-    第二档围标串标：N家供应商两两组合调用 shortPath
-    N=13 时调用 78 次，配额压力大
-    返回 {pair_key: path_info}
-    """
-    result = {}
-    for i, a in enumerate(suppliers):
-        for b in suppliers[i+1:]:
-            pair_key = f"{a}↔{b}"
-            result[pair_key] = short_path(a, b)
-    return result
 
 
 if __name__ == "__main__":
@@ -336,6 +327,8 @@ if __name__ == "__main__":
         print("[QCC] QCC_APP_KEY/QCC_SECRET_KEY 未配置")
         print("[QCC] 调用任何接口都会返回空 dict，enhance_checklist_with_qcc 走人工复核路径")
         print("[QCC] 不影响现有审批流程，零侵入")
+        print(f"[QCC] 接口域名: {QCC_BASE_URL}")
+        print("[QCC] 鉴权方式: MD5(AppId + Timespan + secretKey).upper()")
     else:
         print(f"[QCC] 已配置 AppKey={QCC_APP_KEY[:8]}...")
         # TODO: Quinn 申请到 AppKey 后，这里加一个端到端自检
