@@ -1538,6 +1538,12 @@ def run():
     if FETCH_ONLY:
         log.info(f"=== fetch-only 结束: 本次新缓存 {len(cache) - skipped if skipped else len(cache)} 家，"
                  f"缓存总计 {len(cache)} 家（{CACHE_FILE.name}）===")
+        # 2026-09-04 修复：fetch-only 模式登录过期时必须以退出码 3 结束，
+        # 否则 webui 误判为成功 → 继续跑 OCR/stage2 → 最终报"无结果"却不说原因
+        if session_expired:
+            sys.exit(3)
+        if waf_blocked:
+            sys.exit(2)
         return
 
     total_done = len(processed) + rejected + reviewed
