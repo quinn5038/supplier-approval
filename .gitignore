@@ -1,0 +1,48 @@
+# .env（真实凭证，禁止提交）
+.env
+.env_R*
+.env.local
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 日志文件
+*.log
+
+# 真实供应商数据缓存（含供应商名称、证件号等敏感信息）
+cache_v*.json
+cache_v*_R*.json
+stage2_results*.json
+textin_results*.json
+qcc_results*.json
+progress_v*.jsonl
+files_cache/
+
+# 备份文件（_R1~_R7 历史版本）
+*_R1.py
+*_R2.py
+*_R3.py
+*_R4.py
+*_R5.py
+*_R6.py
+*_R7.py
+*_R1.yaml
+*_R2.yaml
+*_R3.yaml
+*_R4.yaml
+README_R1.md
+.env.example_R1
+
+# 调试脚本（注意：eval.py 是规则求值器核心代码，不能排除）
+_probe_*.py
+_test_*.py
+debug_*.py
+test_*.py
+
+# 临时输出
+run_v4_*.txt
+preview_*.txt
+preview_*.html
+_supfiles_probe.json

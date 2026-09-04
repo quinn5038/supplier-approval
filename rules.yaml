@@ -1,0 +1,305 @@
+# ============================================================
+# 中国港湾物资装备供应商准入审查规则表 v3
+# 依据：中港采购发〔2025〕161号 · 供应商准入审查核对表（精简版）
+# 更新：2026-08-30 按 Quinn 更新版核对表重写（新增审核信息位置/自动化审核内容列）
+#
+# check_type 说明：
+#   auto       → 脚本用API返回数据直接判断（如注册资本、境外判断）
+#   qichacha   → 需企查查核验（商业信誉/执照真伪/法人关联/ISO交叉核实）
+#                暂用 tycInfo 初判，无数据则进核验清单转人工
+#   material   → 材料齐全性检查（用材料分类结果判断"有没有传"）
+#                缺 → 退回，提醒补充（requirement 描述正确材料）
+#   verify     → 该项的准确性核验点（需材料解析TextIn/企查查，未接入前转人工）
+#   skip       → 不需要审核（核对表明确标注）
+#
+# fail_action 说明：
+#   reject → 不通过直接退回
+#   manual → 不通过转人工
+#
+# 第一部分自动化审核顺序（核对表新增列）：
+#   1=境外判断(B01) 2=商业信誉(A10) 3=法律主体资格(A01)
+#   4=法人身份证明(A02) 5=纳税信用等级(A03) 6=售后服务(A07)
+#   7=资金财务状况(A08) 8=检验检测资质(A13，仅检验检测类供应商)
+# ============================================================
+
+# ---- 第一部分：基本要求（所有供应商必查）----
+
+part_1_basic:
+  # === A. 境内供应商 ===
+  domestic:
+    - id: A01
+      name: 法律主体资格
+      order: 3
+      check_type: material
+      rule: "supplier.get('has_business_license', False) and supplier.get('social_credit_code', '') != ''"
+      requirement: 营业执照副本（须持有统一社会信用代码，且执照信息与基本信息栏的供应商名称、注册资本、法人、经营范围一致）
+      verify: 营业执照真伪（企查查/国家企业信用信息公示系统）；执照字段与基本信息栏（供应商名称、注册资本、法人、经营范围）一致性（Quinn 9/2：经营范围必须比对；新版概括式执照转人工）
+      note: 审核位置=资质证明栏附件+基本信息栏+联系信息栏法人
+
+    - id: A02
+      name: 法人身份证明
+      order: 4
+      check_type: material
+      rule: "supplier.get('has_legal_id_material', False)"
+      requirement: 法人身份证正反面（或护照首页，须在有效期内）
+      verify: 身份证信息与联系信息栏法人一致性；是否在有效期内；企查查股权穿透查询该法人是否与中交有关联
+      note: 审核位置=资质证明栏附件+联系信息栏法人
+
+    - id: A03
+      name: 纳税信用等级
+      order: 5
+      check_type: material
+      rule: "supplier.get('tax_credit_rating_ok', False)"
+      requirement: 纳税信用等级证明（须为国家税务总局网站或信用中国下载的正规文件，C级及以上）
+      verify: 是否国家税务总局网站/信用中国正规文件；是否C级及以上
+      note: 审核位置=资质证明栏附件（需材料解析）
+
+    - id: A07
+      name: 售后服务
+      order: 6
+      check_type: material
+      rule: "supplier.get('is_manufacturer', False) is False or supplier.get('has_after_sales_cert', False)"
+      requirement: 售后服务五星认证或厂家出具的售后服务证明函
+      verify: 机构认证证书看过期；供应商自拟承诺书/证明函看落款时间（Quinn 9/2：落款在3个月内即有效，超过3个月要求重新出具）
+      note: 只有生产厂家/制造商类才需检查；贸易商不需要
+
+    - id: A08
+      name: 资金财务状况
+      order: 7
+      check_type: material
+      rule: "supplier.get('has_financial_report', False)"
+      requirement: 上年度经审计的财报（2026年须提交2025年财报）
+      verify: 财报指标——流动比率≥100%、资产负债率≤65%、经营性现金流>0，任一不符转人工
+      fail_action_if_bad: manual
+      note: 材料缺失→退回补充；有财报但指标不符→转人工（不是退回）
+
+    - id: A10
+      name: 商业信誉
+      order: 2
+      check_type: qichacha
+      rule: "supplier.get('tyc_checked', False) and supplier.get('has_violation_3y', True) is False and supplier.get('is_dishonest', False) is False"
+      fail_action: manual
+      verify: 企查查核验是否为被执行人/在任意惩戒名单上/信用分<500
+      note: tycInfo有数据时自动初判；无数据或存疑→核验清单转人工。A11法律纠纷随本条通过即符合
+
+    - id: A13
+      name: 检验检测资质
+      order: 8
+      check_type: material
+      rule: "supplier.get('has_inspection_cert', False)"
+      requirement: 检验检测机构资质认定证书（CMA 资质认定证书 / CNAS 实验室认可证书等，须在有效期内且覆盖供应商经营范围）
+      verify: 资质证书是否在有效期内；资质认定范围是否覆盖供应商填报的检验检测业务范围；与企查查经营范围交叉核实
+      fail_action: reject
+      note: 仅"检验检测类"供应商适用（公司名或经营范围含"检验""检测""检定""校准""实验室"等关键词）；非检验检测类由 build_checklist 代码条件判断自动 skip；其他类型供应商自动跳过本条（Quinn 9/3 新增）
+
+    # ---- 以下项核对表明确"不需要审核"或"在C、D类再审核" ----
+    - id: A04
+      name: 产品合规
+      check_type: skip
+      note: 在C、D类审查项再审核，满足C、D类即满足本条
+    - id: A05
+      name: 经营场所
+      check_type: skip
+      note: 不需要审核，符合其他所有条件即有经营场所
+    - id: A06
+      name: 产品/服务质量
+      check_type: skip
+      note: 在C、D类审查项再审核
+    - id: A09
+      name: 无恶意拖欠工资
+      check_type: skip
+      note: 不需要审核，符合其他条件基本符合此条
+    - id: A11
+      name: 法律纠纷
+      check_type: skip
+      note: 不需要审核，商业信誉(A10)符合则本条必符合
+    - id: A12
+      name: 系统内入库
+      check_type: skip
+      note: 本条目前可忽略
+
+  # === B. 境外供应商 ===
+  # 核对表v3 + Quinn确认：B01-B09 均为跳过项（国外分流）
+  # 国外分流逻辑在代码里处理（不走规则引擎）：
+  #   审查类型=="注册审批"(P0701) 且 国外供应商 → 自动退回：
+  #     "退回。国外供应商请通过中交海外采购专区进行注册申请。"
+  #   审查类型!="注册审批" 且 国外供应商 → 转人工
+  #   港澳台供应商 → 转人工（Quinn 8/31确认：港澳台公司需人工审批）
+  overseas:
+    - id: B01
+      name: 境外判断
+      order: 1
+      check_type: skip
+      note: 跳过项（国外分流由代码处理），见上
+
+
+# ---- 第二部分：按供应商类型选查 ----
+
+part_2_by_type:
+  # === C-1 境内厂家（5项） ===
+  domestic_manufacturer:
+    - id: C1_01
+      name: 生产能力
+      check_type: auto
+      rule: "supplier.get('registered_capital', 0) >= 500"
+      fail_action: reject
+      note: 审核位置=基本信息栏注册资本，注册资本≥500万（Quinn 8/31确认从200万上调）
+
+    - id: C1_02
+      name: ISO 9001
+      check_type: material
+      rule: "'ISO9001' in supplier.get('certifications', [])"
+      requirement: ISO 9001 质量管理体系认证证书（须为该公司的认证且在有效期内）
+      verify: 是否该公司的认证；是否在有效期内；与企查查内容交叉核实
+
+    - id: C1_03
+      name: ISO 14001
+      check_type: material
+      rule: "'ISO14001' in supplier.get('certifications', [])"
+      requirement: ISO 14001 环境管理体系认证证书（须为该公司的认证且在有效期内）
+      verify: ISO 14001证书是否该公司认证、是否在有效期内、与企查查交叉核实
+
+    - id: C1_04
+      name: ISO 45001
+      check_type: material
+      rule: "'ISO45001' in supplier.get('certifications', [])"
+      requirement: ISO 45001 职业健康安全管理体系认证证书（须为该公司的认证且在有效期内）
+      verify: ISO 45001证书是否该公司认证、是否在有效期内、与企查查交叉核实
+
+    - id: C1_05
+      name: 生产许可证
+      check_type: material
+      rule: "supplier.get('needs_production_license', False) is False or supplier.get('has_production_license', False)"
+      requirement: 生产许可证或强制认证证明（须在有效期内）
+      verify: 证明是否在有效期内
+      note: 通过经营范围关键词判断是否需要提交（电线电缆/开关灯具/电机电池/家电玩具等→3C强制认证；食品化工/农药危化/水泥/压力容器/电梯起重等→生产许可证）；经营范围不涉及则本条自动跳过
+
+  # === C-2 境外厂家（3项） ===
+  # 国外供应商已在B01分流（注册退回/非注册转人工），无需自动化
+  overseas_manufacturer:
+    - id: C2_01
+      name: 生产能力
+      check_type: skip
+      note: 无需自动化（国外供应商已在B01分流）
+    - id: C2_02
+      name: ISO 9001
+      check_type: skip
+      note: 无需自动化
+    - id: C2_03
+      name: 生产许可证
+      check_type: skip
+      note: 无需自动化
+
+  # === D-1 境内贸易商（6项） ===
+  domestic_trader:
+    - id: D1_01
+      name: 经营场所
+      check_type: skip
+      note: 不需要审核，和A部分核查项重复
+    - id: D1_02
+      name: 产品质量
+      check_type: skip
+      note: 不需要审核，和下条检查项重复
+
+    - id: D1_03
+      name: ISO 9001
+      check_type: material
+      rule: "'ISO9001' in supplier.get('certifications', [])"
+      requirement: ISO 9001 质量管理体系认证证书（可上传其代理厂家的认证，须在有效期内）
+      verify: ISO 9001证书（可为代理厂家的）是否在有效期内、与企查查交叉核实
+      note: 贸易商可上传代理厂家的ISO9001（Quinn确认系统里就是这么传的）
+
+    - id: D1_04
+      name: ISO 14001
+      check_type: material
+      rule: "'ISO14001' in supplier.get('certifications', [])"
+      requirement: ISO 14001 环境管理体系认证证书（须为该贸易公司自己的认证且在有效期内）
+      verify: 是否该公司的认证；是否在有效期内；与企查查内容交叉核实
+
+    - id: D1_05
+      name: ISO 45001
+      check_type: material
+      rule: "'ISO45001' in supplier.get('certifications', [])"
+      requirement: ISO 45001 职业健康安全管理体系认证证书（须为该贸易公司自己的认证且在有效期内）
+      verify: ISO 45001证书是否该公司认证、是否在有效期内、与企查查交叉核实
+
+    - id: D1_06
+      name: 授权资质
+      check_type: material
+      rule: "supplier.get('has_authorization', False)"
+      requirement: 产品生产企业的代理协议或产品销售授权资质（授权一方须为该贸易公司且在有效期内）
+      verify: 授权是否在有效期内；认证一方是否为该贸易公司
+
+  # === D-2 境外贸易商（4项） ===
+  # 国外供应商已在B01分流，无需自动化
+  overseas_trader:
+    - id: D2_01
+      name: 授权文件
+      check_type: skip
+      note: 无需自动化（国外供应商已在B01分流）
+    - id: D2_02
+      name: 厂家生产能力
+      check_type: skip
+      note: 无需自动化
+    - id: D2_03
+      name: 厂家ISO 9001
+      check_type: skip
+      note: 无需自动化
+    - id: D2_04
+      name: 厂家生产许可
+      check_type: skip
+      note: 无需自动化
+
+
+# ---- 第三部分：集团独有类别（核对表明确"无需自动化"）----
+# 全部转人工复核
+
+part_3_special_categories:
+  - name: 平台类
+    requirements: 三体系认证；EDI/ICP许可证（第二类）；电商平台软件著作权；电商平台+自营产品
+  - name: 租赁商
+    requirements: 强制使用许可资质；ISO 14001+45001；所租赁货物厂家ISO 9001；维保/现场管理/培训/保障能力
+  - name: 云服务商
+    requirements: ISO 9001+22301；增值电信业务许可证；CSA STAR；等保四级；云安全一级；ITSS一级；可信云
+  - name: 软件服务商
+    requirements: 三体系认证；软件著作权；近三年业绩清单+用户评价；售后运维体系
+  - name: 运输服务商
+    requirements: 道路运输经营许可证；快递需快递经营许可证+全国直营网络
+  - name: 差旅服务商
+    requirements: 国际航协一类客运代理资格（证书号08-3开头）
+  - name: 审计/评估机构
+    requirements: 主审所全国排名前50、参审所前100；国资委备选库/中评协前百家；独立性要求
+  - name: 保险机构
+    requirements: 经纪/公司分别需对应许可证；偿付能力充足率≥100%
+  - name: 投资银行类
+    requirements: 保荐/财务顾问资格；证监会评级B以上；近三年央企项目经验；近三年无监管处罚
+
+
+# ---- 自动化审批决策逻辑（v3，两阶段）----
+
+decision_logic:
+  # 阶段0：分流
+  routing:
+    - "国外供应商+注册审批(P0701) → 自动退回（固定话术：退回。国外供应商请通过中交海外采购专区进行注册申请。）"
+    - "国外供应商+非注册审批 → 转人工"
+    - "港澳台供应商 → 视同境内流程审核"
+    - "集团独有类别（第三部分9类） → 转人工"
+
+  # 阶段1：材料齐全性（缺→退回，提醒补充；传错→提醒正确材料）
+  completeness:
+    - "A01营业执照、A02法人身份证、A03纳税信用证明、A07售后服务（仅生产厂家）、A08上年度审计财报"
+    - "C-1厂家：ISO三认证 + 生产许可证（经营范围涉及强制许可产品时）"
+    - "D-1贸易商：ISO三认证（9001可用厂家的）+ 授权资质"
+    - "缺材料 → 退回，意见按审核顺序列出需补充的材料（含正确材料描述）"
+
+  # 阶段2：材料准确性（现有材料对不对；TextIn/企查查未接入前转人工）
+  accuracy:
+    - "A10商业信誉：企查查查被执行人/惩戒名单/信用分<500（暂用tycInfo初判）"
+    - "A01执照真伪+与基本信息一致性；A02法人一致性+效期+中交关联"
+    - "A03纳税证明正规性+等级；A07售后认证正规性"
+    - "A08财报三指标（流动比率≥100%、资产负债率≤65%、现金流>0），任一不符→转人工；财报数据以供应商上传的经审计报告为准（TextIn解析），不用企查查财务数据（过期）"
+    - "ISO证书：是否该公司+有效期+企查查交叉核实；授权：有效期+授权方"
+    - "任一核验未完成 → 转人工，意见列出待核验点"
+
+  # 全部通过才同意
+  approve: "阶段0无分流 + 阶段1全齐 + 阶段2全部核验通过 → 同意"

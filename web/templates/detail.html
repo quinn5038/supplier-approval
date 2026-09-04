@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>审批详情 - {{ todo_id }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="topbar">
+        <div>
+            <h1>供应商审批详情</h1>
+            <div class="meta">todoId: {{ todo_id }}</div>
+        </div>
+        <div class="actions">
+            <a href="/" class="btn btn-outline" style="text-decoration:none;">返回列表</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div id="alert-area"></div>
+
+        <!-- 进度区 -->
+        <div id="progress-area" style="display:none;">
+            <div class="progress-bar">
+                <div class="step"><span class="spinner"></span><span id="step-text">准备中...</span></div>
+                <div class="hint" id="step-hint">单家供应商处理约 2-3 分钟，请耐心等待</div>
+            </div>
+        </div>
+
+        <!-- 开始按钮 -->
+        <div id="start-area" style="text-align:center; padding:40px 20px;">
+            <p style="margin-bottom:20px; color:var(--color-text-muted);">点击下方按钮开始审批，系统将自动执行：<br>下载材料 → OCR 识别 → 规则判定 → 生成意见</p>
+            <button class="btn btn-success" style="padding:12px 36px; font-size:15px;" onclick="startApprove()">开始审批</button>
+        </div>
+
+        <!-- 报告区 -->
+        <div id="report-area" style="display:none;">
+            <div class="report-section">
+                <h2>供应商材料审查报告</h2>
+                <div id="report-content"></div>
+            </div>
+            <div class="report-section">
+                <h2>最终审批意见（可直接复制）</h2>
+                <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+                    <button class="btn btn-outline" onclick="copyOpinion()">复制全文</button>
+                </div>
+                <div class="opinion-box" id="opinion-content"></div>
+            </div>
+        </div>
+
+        <!-- 错误区 -->
+        <div id="error-area" style="display:none;">
+            <div class="alert alert-danger" id="error-msg"></div>
+            <div style="text-align:center; margin-top:16px;">
+                <button class="btn btn-outline" onclick="location.reload()">重试</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const TODO_ID = "{{ todo_id }}";
+        let pollTimer = null;
+        let opinionText = "";
+
+        // ===== 开始审批 =====
+        async function startApprove() {
+            const btn = event.target;
+            btn.disabled = true; btn.textContent = '已开始...';
+            try {
+                const r = await fetch('/api/approve/' + TODO_ID, { method: 'POST' });
+                if (r.status === 409) {
+                    alert('正在处理中，请勿重复点击');
+                    return;
+                }
+                const data = await r.json();
+                document.getElementById('start-area').style.display = 'none';
+                document.getElementById('progress-area').style.display = 'block';
+                pollStatus();
+            } catch (e) {
+                alert('网络错误：' + e.message);
+                btn.disabled = false; btn.textContent = '开始审批';
+            }
+        }
+
+        // ===== 轮询状态 =====
+        async function pollStatus() {
+            try {
+                const r = await fetch('/api/status/' + TODO_ID);
+                const data = await r.json();
+                document.getElementById('step-text').textContent = data.step || '处理中...';
+
+                if (data.status === 'done') {
+                    clearInterval(pollTimer);
+                    document.getElementById('progress-area').style.display = 'none';
+                    loadReport();
+                } else if (data.status === 'error') {
+                    clearInterval(pollTimer);
+                    document.getElementById('progress-area').style.display = 'none';
+                    document.getElementById('error-area').style.display = 'block';
+                    document.getElementById('error-msg').textContent = '⚠ ' + (data.error || '处理失败');
+                    if (data.step === 'cookie_expired') {
+                        document.getElementById('error-msg').innerHTML +=
+                            '<br><br>请<a href="/">返回列表</a>，点击右上角"更新 Cookie"后重试。';
+                    }
+                }
+            } catch (e) {
+                console.error('状态查询失败:', e);
+            }
+        }
+
+        // ===== 加载报告 =====
+        async function loadReport() {
+            try {
+                const r = await fetch('/api/report/' + TODO_ID);
+                if (!r.ok) {
+                    const err = await r.json();
+                    throw new Error(err.msg || '加载失败');
+                }
+                const data = await r.json();
+                document.getElementById('report-content').innerHTML = data.report_html || '<p>无报告内容</p>';
+                document.getElementById('opinion-content').textContent = data.opinion_text || '';
+                opinionText = data.opinion_text || '';
+                document.getElementById('report-area').style.display = 'block';
+            } catch (e) {
+                document.getElementById('error-area').style.display = 'block';
+                document.getElementById('error-msg').textContent = '⚠ ' + e.message;
+            }
+        }
+
+        // ===== 复制意见 =====
+        function copyOpinion() {
+            if (!opinionText) { alert('意见为空'); return; }
+            navigator.clipboard.writeText(opinionText).then(() => {
+                const btn = event.target;
+                const old = btn.textContent;
+                btn.textContent = '已复制';
+                setTimeout(() => { btn.textContent = old; }, 1500);
+            }).catch(() => {
+                // fallback
+                const ta = document.createElement('textarea');
+                ta.value = opinionText;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                alert('已复制到剪贴板');
+            });
+        }
+
+        // 启动轮询（如果已经开始）
+        pollTimer = setInterval(pollStatus, 2000);
+        // 页面加载时：先查是否已有报告 → 再查是否在处理中
+        (async function init() {
+            try {
+                // 1. 先查是否已有审批结果
+                const rr = await fetch('/api/report/' + TODO_ID);
+                if (rr.ok) {
+                    // 已有结果，直接展示
+                    const data = await rr.json();
+                    document.getElementById('start-area').style.display = 'none';
+                    document.getElementById('report-area').style.display = 'block';
+                    document.getElementById('report-content').innerHTML = data.report_html || '<p>无报告内容</p>';
+                    document.getElementById('opinion-content').textContent = data.opinion_text || '';
+                    opinionText = data.opinion_text || '';
+                    clearInterval(pollTimer);  // 已有结果，停止轮询
+                    return;
+                }
+                // 2. 查是否正在处理中
+                const sr = await fetch('/api/status/' + TODO_ID);
+                const sdata = await sr.json();
+                if (sdata.status === 'running') {
+                    document.getElementById('start-area').style.display = 'none';
+                    document.getElementById('progress-area').style.display = 'block';
+                } else if (sdata.status === 'error') {
+                    document.getElementById('start-area').style.display = 'none';
+                    document.getElementById('error-area').style.display = 'block';
+                    document.getElementById('error-msg').textContent = '⚠ ' + (sdata.error || '处理失败');
+                }
+                // 否则显示开始按钮（默认状态）
+            } catch (e) {
+                console.error('初始化检查失败:', e);
+            }
+        })();
+    </script>
+</body>
+</html>
