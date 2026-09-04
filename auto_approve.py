@@ -71,8 +71,13 @@ except ImportError:
 APP_TOKEN = os.getenv("APP_TOKEN", "")           # asca 域名用
 AGENT_ID  = os.getenv("AGENT_ID", "")             # 请求体里的 agentId（URL 参数 a 的值）
 CODE      = os.getenv("CODE", "")                 # URL 参数 CODE 的值
-SCPMA_COOKIE = os.getenv("SCPMA_COOKIE", "")      # scpma 域名的 session cookie
-SCPMA_AUTH  = os.getenv("SCPMA_AUTH_TOKEN", "")    # scpma 域名的 Authorization 令牌
+# 修复：改为函数动态读取，webui 更新 os.environ 后立即生效（不再需要重启）
+# 之前是模块级常量，import 时读一次锁死，导致 webui 粘贴 cookie 后仍显示过期
+def _scpma_cookie() -> str:
+    return os.getenv("SCPMA_COOKIE", "")
+
+def _scpma_auth() -> str:
+    return os.getenv("SCPMA_AUTH_TOKEN", "")
 
 # 固定参数（从 HAR + cURL 实录确认）
 BASE_APP_ID  = 100126
@@ -132,8 +137,9 @@ def _asca_headers():
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
     }
-    if SCPMA_COOKIE:
-        h["Cookie"] = SCPMA_COOKIE
+    _c = _scpma_cookie()
+    if _c:
+        h["Cookie"] = _c
     return h
 
 
@@ -144,10 +150,12 @@ def _scpma_headers():
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "application/json, text/plain, */*",
     }
-    if SCPMA_COOKIE:
-        h["Cookie"] = SCPMA_COOKIE
-    if SCPMA_AUTH:
-        h["Authorization"] = SCPMA_AUTH
+    _c = _scpma_cookie()
+    if _c:
+        h["Cookie"] = _c
+    _a = _scpma_auth()
+    if _a:
+        h["Authorization"] = _a
     return h
 
 
