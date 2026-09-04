@@ -36,6 +36,9 @@
 
         <!-- 报告区 -->
         <div id="report-area" style="display:none;">
+            <div style="text-align:right; margin-bottom:12px;">
+                <button class="btn btn-outline" onclick="reRunApprove()">重新审批（供应商更新了材料时使用）</button>
+            </div>
             <div class="report-section">
                 <h2>供应商材料审查报告</h2>
                 <div id="report-content"></div>
@@ -80,6 +83,28 @@
             } catch (e) {
                 alert('网络错误：' + e.message);
                 btn.disabled = false; btn.textContent = '开始审批';
+            }
+        }
+
+        // ===== 重新审批（供应商更新了材料时使用）=====
+        async function reRunApprove() {
+            if (!confirm('确认重新审批？系统将重新下载材料并跑完整流水线（约2-3分钟）。')) return;
+            // 隐藏报告区，显示进度区
+            document.getElementById('report-area').style.display = 'none';
+            document.getElementById('error-area').style.display = 'none';
+            document.getElementById('progress-area').style.display = 'block';
+            document.getElementById('step-text').textContent = '正在重新拉取供应商数据...';
+            try {
+                const r = await fetch('/api/approve/' + TODO_ID, { method: 'POST' });
+                if (r.status === 409) {
+                    alert('正在处理中，请勿重复点击');
+                    return;
+                }
+                // 重启轮询
+                if (pollTimer) clearInterval(pollTimer);
+                pollTimer = setInterval(pollStatus, 2000);
+            } catch (e) {
+                alert('网络错误：' + e.message);
             }
         }
 
