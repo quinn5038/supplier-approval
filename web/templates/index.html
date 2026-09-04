@@ -14,7 +14,6 @@
         </div>
         <div class="actions">
             <button class="btn btn-outline" onclick="openCookieModal()">更新 Cookie</button>
-            <a href="https://scpma.iccec.cn" target="_blank" class="btn btn-outline" style="text-decoration:none;">打开审批系统</a>
         </div>
     </div>
 
@@ -82,15 +81,17 @@
             }
             list.innerHTML = items.map(it => `
                 <div class="todo-item">
-                    <div class="info">
-                        <div class="name">${esc(it.name) || '未知供应商'}</div>
-                        <div class="sub">
-                            <span class="badge">${esc(it.billName) || '未分类'}</span>
-                            todoId: ${esc(it.todoId)}
-                            ${it.applyTime ? ' · ' + esc(it.applyTime) : ''}
-                        </div>
+                    <div class="col-name">
+                        <div class="supplier-name">${esc(it.name) || '未知供应商'}</div>
+                        <div class="sub-text">todoId: ${esc(it.todoId)}</div>
                     </div>
-                    <a href="/approve/${esc(it.todoId)}" class="btn btn-success">审批</a>
+                    <div class="col-bill">
+                        <span class="bill-badge">${esc(it.billName) || '未分类'}</span>
+                    </div>
+                    <div class="col-time">${esc(it.applyTimeShort) || '-'}</div>
+                    <div class="col-action">
+                        <a href="/approve/${esc(it.todoId)}" class="btn btn-primary">审批</a>
+                    </div>
                 </div>
             `).join('');
         }
