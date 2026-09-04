@@ -79,7 +79,16 @@
                 list.innerHTML = '<div class="empty"><div class="icon">✓</div><div>暂无待办</div></div>';
                 return;
             }
-            list.innerHTML = items.map(it => `
+            // 表头（与每行的 grid 列宽模板严格一致，保证列对齐）
+            const head = `
+                <div class="todo-table-head">
+                    <div>供应商名称</div>
+                    <div>审批业务</div>
+                    <div>申请时间</div>
+                    <div class="col-head-action">操作</div>
+                </div>
+            `;
+            list.innerHTML = head + items.map(it => `
                 <div class="todo-item">
                     <div class="col-name">
                         <div class="supplier-name">${esc(it.name) || '未知供应商'}</div>
