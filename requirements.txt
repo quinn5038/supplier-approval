@@ -1,0 +1,27 @@
+# Python 依赖清单（参赛版 v1.2）
+#
+# 最小化运行（只需要以下）：
+# - Web UI 与文本解析：FastAPI + Jinja2 + Uvicorn + PyYAML
+# - 脱敏助手（身份证图片）：Pillow
+#
+# 可选依赖（缺库时优雅降级）：
+# - PyMuPDF (fitz)：财报 PDF 脱敏所需，未装时财报 PDF 原样复制 + warning
+# - pdfplumber：财报数据抽取（仅作备用）
+
+# Web 服务
+fastapi>=0.110
+uvicorn[standard]>=0.27
+jinja2>=3.1
+
+# 数据/配置
+PyYAML>=6.0
+
+# 脱敏助手
+Pillow>=10.0
+
+# 可选（财报 PDF 脱敏 + 抽取）
+PyMuPDF>=1.23
+pdfplumber>=0.10
+
+# 标准库自带但列出来方便对照：
+# - json, re, logging, pathlib, urllib, hashlib, threading, subprocess, datetime

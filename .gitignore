@@ -14,6 +14,8 @@ __pycache__/
 # 真实供应商数据缓存（含供应商名称、证件号等敏感信息）
 cache_v*.json
 cache_v*_R*.json
+cache_v*_desens/    # 脱敏后的中间产物（仍可能含少量敏感字段，不入库）
+cache_v*_desens_R*/
 stage2_results*.json
 textin_results*.json
 qcc_results*.json

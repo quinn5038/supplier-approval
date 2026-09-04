@@ -73,7 +73,7 @@ supplier_approval_starter/
 ### 5.1 环境准备
 
 - Python 3.10+
-- pip 依赖：`pip install pyyaml requests python-dotenv fastapi uvicorn jinja2 python-multipart`
+- pip 依赖：`pip install -r requirements.txt`（最小化运行；脱敏助手的财报PDF模块需要 PyMuPDF，缺库时自动降级）
 
 ### 5.2 配置凭证
 
@@ -101,6 +101,21 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 - 首页展示当前待办列表，每家供应商一个"审批"按钮
 - 点击"审批"按钮，系统自动跑完整流水线并展示审查报告 + 审批意见
 - Cookie 过期时点击右上角"更新Cookie"按钮在线更新
+
+### 5.5 离线材料脱敏助手（合规保障）
+
+```bash
+# 把从系统下载的材料（cache_v4/{todoId}/）脱敏后输出到 cache_v4_desens/
+python desensitize.py --src cache_v4 --dst cache_v4_desens
+```
+
+按文件类型分四类处理：
+- 财报 PDF（PyMuPDF）：保留数字表格，打码人名/签字/银行账号
+- 身份证 JPG/PNG（Pillow）：保留国徽页，整片打码人像页（姓名/性别/出生/住址/证号/头像）
+- 营业执照：原样保留（公开信息）
+- 其他（ISO/授权/声明）：原样保留
+
+缺库时优雅降级：PyMuPDF 未装 → 财报 PDF 原样复制 + warning；Pillow 未装 → 身份证原样复制 + warning。**绝不抛异常阻塞流程**。
 
 ## 六、工作流程
 
