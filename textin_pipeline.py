@@ -295,7 +295,7 @@ def extract_business_license(text, supplier):
                 checks["营业期限长期或有效"] = exp >= date.today()
                 if not checks["营业期限长期或有效"]:
                     issues.append(f"营业执照营业期限已到期（{exp}）")
-    # 经营范围：执照 ↔ 系统基本信息栏比对（Quinn 9/2 新增审核要点）
+    # 经营范围：执照 ↔ 系统基本信息栏比对（9/2 新增审核要点）
     m = re.search(r"经营范围\s*[:：]?\s*([^\n]{2,500})", t)
     fields["经营范围"] = m.group(1).strip() if m else None
     f_scope = _norm(fields["经营范围"] or "")
@@ -617,7 +617,7 @@ def extract_generic_cert(text):
 
 def extract_self_statement(text):
     """供应商自拟文件（售后服务承诺书等）→ 落款时间在3个月内即有效
-    （Quinn 9/2 确认：自拟文件不看过期概念，只看落款新鲜度）"""
+    （9/2 确认：自拟文件不看过期概念，只看落款新鲜度）"""
     t = _pre(text)
     fields, checks, issues = {}, {}, []
     # 落款日期：优先取最后一处"日期：xxx"标注，兜底取全文最后一个日期
@@ -861,7 +861,7 @@ def run_parse(only_todo=None):
 
 
 # ============================================================
-# 清理 files_cache/（Quinn 9/2 确认：审批一周后可清理原始文件）
+# 清理 files_cache/（9/2 确认：审批一周后可清理原始文件）
 # ============================================================
 def clean_files_cache(days=7, do_delete=False):
     """列出 files_cache/ 下超过 N 天的 todoId 目录，--go 才真删
@@ -955,7 +955,7 @@ def run_test():
     ok += 1
     print("  [✓] 营业执照·法人不一致检出")
 
-    # 2b. 营业执照·经营范围一致（Quinn 9/2 新增要点）
+    # 2b. 营业执照·经营范围一致（9/2 新增要点）
     lic3 = extract("business_license",
                    "统一社会信用代码: 91110108TESTCODE01\n名称: 测试科技有限公司\n"
                    "法定代表人: 张三\n注册资本: 800万元\n"
@@ -988,7 +988,7 @@ def run_test():
     ok += 1
     print("  [✓] 营业执照·概括式经营范围转人工")
 
-    # 2e. 售后承诺书·落款3个月内通过（Quinn 9/2 确认规则）
+    # 2e. 售后承诺书·落款3个月内通过（9/2 确认规则）
     from datetime import timedelta
     recent = (date.today() - timedelta(days=20)).strftime("%Y年%m月%d日")
     old = (date.today() - timedelta(days=120)).strftime("%Y年%m月%d日")

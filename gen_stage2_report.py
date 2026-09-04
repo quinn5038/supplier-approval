@@ -7,7 +7,7 @@ r"""从 stage2_results.json + textin_results.json 生成供应商材料审查对
 import json, sys, datetime
 from pathlib import Path
 
-# 复用 gen_opinion 的意见生成逻辑（Quinn 9/3：意见表与审查报告整合成一个 HTML）
+# 复用 gen_opinion 的意见生成逻辑（9/3：意见表与审查报告整合成一个 HTML）
 import gen_opinion
 
 BASE = Path(__file__).parent
