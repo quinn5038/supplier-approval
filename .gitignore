@@ -20,20 +20,16 @@ qcc_results*.json
 progress_v*.jsonl
 files_cache/
 
-# 备份文件（_R1~_R7 历史版本）
-*_R1.py
-*_R2.py
-*_R3.py
-*_R4.py
-*_R5.py
-*_R6.py
-*_R7.py
-*_R1.yaml
-*_R2.yaml
-*_R3.yaml
-*_R4.yaml
-README_R1.md
-.env.example_R1
+# 备份文件（_R1~_R99 历史版本，广义匹配所有 _R 后缀的本地副本）
+*_R[0-9].py
+*_R[0-9][0-9].py
+*_R[0-9].yaml
+*_R[0-9][0-9].yaml
+*_R[0-9].md
+*_R[0-9][0-9].md
+*_R[0-9].txt
+*_R[0-9][0-9].txt
+.env.example_R*
 
 # 调试脚本（注意：eval.py 是规则求值器核心代码，不能排除）
 _probe_*.py
