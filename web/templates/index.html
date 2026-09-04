@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ICCEC 供应商智能审批</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="topbar">
+        <div>
+            <h1>ICCEC 供应商智能审批</h1>
+            <div class="meta" id="meta">加载中...</div>
+        </div>
+        <div class="actions">
+            <button class="btn btn-outline" onclick="openCookieModal()">更新 Cookie</button>
+            <a href="https://scpma.iccec.cn" target="_blank" class="btn btn-outline" style="text-decoration:none;">打开审批系统</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div id="alert-area"></div>
+        <div id="todo-list">
+            <div class="empty">
+                <div class="icon">○</div>
+                <div>正在拉取待办列表...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cookie 更新弹窗 -->
+    <div class="modal-overlay" id="cookie-modal">
+        <div class="modal">
+            <h3>更新 Cookie</h3>
+            <div class="hint">
+                1. 浏览器打开 scpma.iccec.cn 并确认已登录<br>
+                2. F12 → Network → 任选一个请求 → 复制请求头里的 Cookie 值<br>
+                3. 粘贴到下方输入框（可选填 Authorization 令牌）
+            </div>
+            <textarea id="cookie-input" placeholder="粘贴 Cookie 字符串（key1=val1; key2=val2; ...）"></textarea>
+            <textarea id="auth-input" placeholder="（可选）粘贴 Authorization 令牌" style="margin-top:8px; min-height:60px;"></textarea>
+            <div class="actions">
+                <button class="btn btn-outline" onclick="closeCookieModal()">取消</button>
+                <button class="btn btn-primary" id="save-cookie-btn" onclick="saveCookie()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ===== 加载待办列表 =====
+        async function loadTodos() {
+            try {
+                const r = await fetch('/api/todos');
+                if (r.status === 401) {
+                    const data = await r.json();
+                    if (data.error === 'cookie_expired') {
+                        showExpiredAlert();
+                        showEmpty('Cookie 已过期，请点击右上角更新');
+                        return;
+                    }
+                }
+                if (!r.ok) {
+                    const data = await r.json();
+                    showErrorAlert(data.msg || '拉取失败');
+                    showEmpty(data.msg || '拉取失败');
+                    return;
+                }
+                const data = await r.json();
+                document.getElementById('meta').textContent = `待办共 ${data.total} 条`;
+                renderTodos(data.items);
+            } catch (e) {
+                showErrorAlert('网络错误：' + e.message);
+                showEmpty('网络错误');
+            }
+        }
+
+        function renderTodos(items) {
+            const list = document.getElementById('todo-list');
+            if (!items || items.length === 0) {
+                list.innerHTML = '<div class="empty"><div class="icon">✓</div><div>暂无待办</div></div>';
+                return;
+            }
+            list.innerHTML = items.map(it => `
+                <div class="todo-item">
+                    <div class="info">
+                        <div class="name">${esc(it.name) || '未知供应商'}</div>
+                        <div class="sub">
+                            <span class="badge">${esc(it.billName) || '未分类'}</span>
+                            todoId: ${esc(it.todoId)}
+                            ${it.applyTime ? ' · ' + esc(it.applyTime) : ''}
+                        </div>
+                    </div>
+                    <a href="/approve/${esc(it.todoId)}" class="btn btn-success">审批</a>
+                </div>
+            `).join('');
+        }
+
+        // ===== Cookie 更新 =====
+        function openCookieModal() {
+            document.getElementById('cookie-modal').classList.add('show');
+        }
+        function closeCookieModal() {
+            document.getElementById('cookie-modal').classList.remove('show');
+        }
+        async function saveCookie() {
+            const cookie = document.getElementById('cookie-input').value.trim();
+            const auth = document.getElementById('auth-input').value.trim();
+            if (!cookie) { alert('请粘贴 Cookie'); return; }
+            const btn = document.getElementById('save-cookie-btn');
+            btn.disabled = true; btn.textContent = '保存中...';
+            try {
+                const r = await fetch('/api/cookie', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'cookie=' + encodeURIComponent(cookie) + '&auth_token=' + encodeURIComponent(auth),
+                });
+                const data = await r.json();
+                if (r.ok) {
+                    closeCookieModal();
+                    alert(data.msg || '已保存');
+                    location.reload();
+                } else {
+                    alert('保存失败：' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('网络错误：' + e.message);
+            } finally {
+                btn.disabled = false; btn.textContent = '保存';
+            }
+        }
+
+        // ===== 提示条 =====
+        function showExpiredAlert() {
+            document.getElementById('alert-area').innerHTML =
+                '<div class="alert alert-warning">⚠ Cookie 已过期，请点击右上角"更新 Cookie"按钮</div>';
+        }
+        function showErrorAlert(msg) {
+            document.getElementById('alert-area').innerHTML =
+                '<div class="alert alert-danger">' + esc(msg) + '</div>';
+        }
+        function showEmpty(msg) {
+            document.getElementById('todo-list').innerHTML =
+                '<div class="empty"><div class="icon">○</div><div>' + esc(msg) + '</div></div>';
+        }
+        function esc(s) {
+            return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        // 启动
+        loadTodos();
+    </script>
+</body>
+</html>

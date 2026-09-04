@@ -1,0 +1,244 @@
+# ICCEC 供应商审批系统 API 参考
+# 基于 HAR 实录，所有接口均为 POST + JSON
+
+# ============================================================
+# 域名架构
+# ============================================================
+# basap.iccec.cn  - 基础应用门户（登录、用户信息、门户详情）
+# asca.iccec.cn   - 待办列表（首页待审批供应商列表）
+# scpma.iccec.cn  - 主应用（供应商详情、资质、审批操作）
+# lscp.iccec.cn   - 配置服务
+
+# ============================================================
+# 认证机制
+# ============================================================
+# 1. asca.iccec.cn 接口:
+#    请求头 APP_TOKEN: <token值>
+#
+# 2. scpma.iccec.cn 接口:
+#    请求头 APP_TOKEN 为空字符串 ""
+#    认证靠浏览器 session cookie（HAR 未显式记录）
+#    脚本中需手动设置 Cookie 头，或通过 Playwright 登录获取
+#
+# 3. 页面 URL 参数:
+#    a=<agentId值>     → 请求体里的 agentId 字段
+#    CODE=<session码>  → 可能是 session 标识
+
+# ============================================================
+# 固定参数（所有 scpma 请求都带）
+# ============================================================
+# agentId:      从环境变量 AGENT_ID 读取
+# purSupFlag:   "pur"（采购方）
+# baseAppId:    100126
+
+# ============================================================
+# 接口列表（按调用顺序）
+# ============================================================
+
+# --- 1. 待办列表 ---
+# POST https://asca.iccec.cn/apis/asca/todo/home/list
+# Headers: APP_TOKEN, Content-Type: application/json
+# Body:
+{
+  "pageNo": 1,
+  "pageSize": 50,
+  "status": 0,             # 0=待办
+  "businessCode": "",      # 可筛选业务类型
+  "businessName": "",      # 可筛选业务名称
+  "agentId": "100005"      # 注意：这里是固定值 "100005"
+}
+# 返回: data.list[] 含 todoId, businessCode 等
+
+# --- 2. 审批请求详情 ---
+# POST https://scpma.iccec.cn/apis/scpma/approve/getReq
+# Body:
+{
+  "todoId": "44510087",     # 从待办列表获取
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+# 返回: businessBillId, procInstId, actInstId, actInstName, taskId/workItemId, supinfoId 等
+
+# --- 3. 待办消息详情 ---
+# POST https://scpma.iccec.cn/apis/scpma/approve/queryTodomsgDetailById
+# Body:
+{
+  "id": "44510087",
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+
+# --- 4. 审批按钮 ---
+# POST https://scpma.iccec.cn/apis/scpma/approve/get/button
+# Body:
+{
+  "todoId": "44510087",
+  "businessAppId": "100032",
+  "businessBillId": "2857645686524968960",
+  "businessCode": "P07",
+  "businessBillTypeCode": "P0704",
+  "procInstId": "12064702",
+  "actInstId": "50808247",
+  "actInstName": "【二级单位】供应商审批岗",
+  "workItemId": "29046508",
+  "workItemStatus": 0,
+  "currentOperUserId": "10001996245@103495",
+  "currentOperUserDeptId": "10349500058",
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+# 返回: 可用操作按钮列表（含 operCode 定义）
+
+# --- 5. 供应商基本信息 ---
+# POST https://scpma.iccec.cn/apis/scpma/smc/qrySupBaseInfo
+# Body:
+{
+  "supinfoId": "2776840270128402432",
+  "dataSourceFlag": 1,
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+# 返回: 公司名称、统一社会信用代码、注册资本、法人、地址等
+
+# --- 6. 资质信息 ---
+# POST https://scpma.iccec.cn/apis/scpma/smc/qrySupQualification
+# Body:
+{
+  "supinfoId": "2776840270128402432",
+  "businessBillType": "P0704",
+  "tempOrFormalFlag": 1,
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+# 返回: 资质类型、证书编号、有效期等
+
+# --- 7. 资质文件列表 ---
+# POST https://scpma.iccec.cn/apis/scpma/smc/qrySupplierQualificationFile
+# Body: 同资质信息
+# 返回: uploadId 列表（用于文件预览/下载）
+
+# --- 8. 文件预览/下载 ---
+# POST https://scpma.iccec.cn/apis/scpma/oss/filePreview
+# Body:
+{
+  "uploadId": "10082325474",
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+# 返回: 文件预览 URL（图片/PDF）
+
+# --- 9. 财务信息 ---
+# POST https://scpma.iccec.cn/apis/scpma/smc/qrySupFinanceInfo
+# Body: 同资质信息（supinfoId + businessBillType）
+# 返回: 注册资本、财报等
+
+# --- 10. 审核详情 ---
+# POST https://scpma.iccec.cn/apis/scpma/smc/qrySupAuditDetail
+# Body:
+{
+  "supinfoId": "2776840270128402432",
+  "supAuditId": "2857645686524968960",
+  "businessBillType": "P0704",
+  "agentId": "<AGENT_ID>",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+
+# --- 11. 其他查询接口（按需调用） ---
+# 联系人:      smc/qrySupplierLinkInfo         Body: {supinfoId, dataSourceFlag:1, ...}
+# 产品信息:    smc/qrySupplierProductInfo       Body: 同上
+# 历史业绩:    smc/qrySupHisPerform             Body: 同上
+# 白名单:      smc/qrySupWhiteListBySupName     Body: {supinfoId, dataSourceFlag:1, supCode:"", ...}
+# 冻结/禁用:   smc/querySupplierFrozenOrDisableStatusList  Body: 同上
+# 评估分数:    smc/qryAssessScoreInfoList       Body: 同上
+# 投标金额:    smc/qrySupBidAmountList          Body: 同上
+# 合作单位:    smc/querySupCooperativeUnitList  Body: {supinfoId, supCode, pageNo:1, pageSize:10, ...}
+# 签约合同:    smc/qrySignContract              Body: 同资质信息
+# 法律风险:    smc/qrySupLegalRisk              Body: 同上
+# 业务风险:    smc/qrySupBusinessRisk           Body: 同上
+# 频繁联系人:  smc/qrySupFrequentContact        Body: 同上
+# 申请备注:    smc/qrySupApplyRemark            Body: 同上
+# 绿色/碳:    smc/qryGreenCarbonInfo           Body: 同上
+# 审批记录:    mtc/qryApprovalRecord            Body: 同上
+# 标签:       smc/getTags                      Body: 同上
+
+# --- 12. 查询可选审批人 ---
+# POST https://scpma.iccec.cn/apis/scpma/mtc/querySelectablePerson
+# Body:
+{
+  "procInstId": "12064702",
+  "actInstId": "50808247",
+  "taskId": "29046508",
+  "businessBillId": "2857645686524968960",
+  "businessCode": "P07",
+  "businessBillType": "P0704",
+  "currentOperUserId": "10001996245@103495",
+  "currentOperUserDeptId": "10349500058",
+  "orgId": "1063972",
+  "appId": "100032",
+  "agentId": "<AGENT_ID>",
+  "selectTypeCode": "1",
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+# 返回: 下一环节可选审批人列表
+
+# --- 13. 审批操作（核心！） ---
+# POST https://scpma.iccec.cn/apis/scpma/mtc/approvalOperate
+# Body:
+{
+  "procInstId": "12064702",
+  "appointLists": [],
+  "actInstId": "50808247",
+  "actInstName": "【二级单位】供应商审批岗",
+  "taskId": "29046508",
+  "opinion": "审批意见文字",
+  "remark": "审批意见文字",
+  "operCode": 3,           # 3=退回（HAR确认）, 1=通过（推测！需验证）
+  "participantList": [
+    {
+      "isMultiWorkItem": "0",
+      "joinOrgName": "河北灿昌交通设施有限公司",
+      "name": "河北灿昌交通设施有限公司",
+      "activityDefID": "startActivity",
+      "id": "10002596522@1063972#106397200001",
+      "workItemID": "0",
+      "activityInstID": "0",
+      "typeCode": "emp"
+    }
+  ],
+  "businessBillId": "2857645686524968960",
+  "businessCode": "P07",
+  "businessBillType": "P0704",
+  "businessAppId": "100032",
+  "orgId": 103495,
+  "agentId": "<AGENT_ID>",
+  "bizState": 0,
+  "isApplyUser": 1,
+  "purSupFlag": "pur",
+  "baseAppId": 100126
+}
+
+# ============================================================
+# 待确认项
+# ============================================================
+# 1. operCode 的值:
+#    - operCode=3 确认是"退回"（HAR 实录）
+#    - operCode=1 推测是"通过"，但未验证！
+#    - 需要在页面上点一次"通过"按钮，抓 HAR 确认
+#
+# 2. scpma 域名的 cookie:
+#    HAR 中 scpma 请求的 APP_TOKEN 为空，Cookie 也未记录
+#    可能是 HttpOnly cookie，浏览器自动发送
+#    脚本中需要手动从浏览器复制 Cookie 头
+#
+# 3. 字段名映射:
+#    rules.yaml 里的字段名（如 registered_capital）需要和
+#    qrySupBaseInfo / qrySupFinanceInfo 返回的 JSON key 对应
+#    当前脚本中的字段名是推测的，需要看实际响应确认
