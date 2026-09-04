@@ -143,6 +143,21 @@ def _run_pipeline_for_one(todo_id: str):
             _update("no_result", status="error", error="stage2 结果文件不存在，可能该供应商被分流跳过")
             return
 
+        # 2026-09-04 修复：done 前校验该 todo 确实有审批结果——
+        # run_stage2 只处理企查查缓存里有数据的供应商，新拉取的供应商没有企查查数据
+        # 会被跳过 → stage2_results.json 里没有该条目 → 前端 report 404 显示
+        # "该供应商暂无审批结果"却不说原因（Quinn 反馈的 bug）
+        try:
+            stage2_data = json.loads(stage2_path.read_text(encoding="utf-8"))
+        except Exception:
+            stage2_data = {}
+        if str(todo_id) not in stage2_data:
+            _update("no_result", status="error",
+                    error=("流水线已跑完，但该供应商未生成审批结果。"
+                           "常见原因：企查查缓存中没有该供应商的数据，规则引擎（阶段2）跳过了它。"
+                           "可先补拉该供应商的企查查数据后重试，或按人工流程处理。"))
+            return
+
         _update("完成", status="done")
     except subprocess.TimeoutExpired:
         _update("timeout", status="error", error="处理超时（>10分钟），请检查网络或重试")
@@ -220,8 +235,21 @@ async def api_todos():
 
 @app.get("/approve/{todo_id}", response_class=HTMLResponse)
 async def approve(request: Request, todo_id: str):
-    """审批详情页"""
-    return templates.TemplateResponse(request, "detail.html", {"todo_id": todo_id})
+    """审批详情页（供应商名称优先取 URL 参数，兜底从 cache_v4.json 读）"""
+    name = request.query_params.get("name", "")
+    if not name:
+        # 兜底：从缓存里读供应商名（拉取过的供应商都有）
+        try:
+            cache_path = BASE_DIR / "cache_v4.json"
+            if cache_path.exists():
+                cache = json.loads(cache_path.read_text(encoding="utf-8"))
+                entry = cache.get(str(todo_id), {})
+                name = entry.get("supplier", {}).get("name", "") \
+                    or entry.get("todo", {}).get("applyUnitName", "")
+        except Exception:
+            pass
+    return templates.TemplateResponse(request, "detail.html",
+                                      {"todo_id": todo_id, "supplier_name": name})
 
 
 @app.post("/api/approve/{todo_id}")
@@ -244,6 +272,14 @@ async def api_status(todo_id: str):
     with _task_lock:
         st = _task_status.get(todo_id, {"status": "idle", "step": "未开始"})
     return st
+
+
+@app.get("/api/status_all")
+async def api_status_all():
+    """批量查询所有审批任务状态（首页恢复各行按钮状态用，只返回轻量字段）"""
+    with _task_lock:
+        return {tid: {"status": st.get("status"), "step": st.get("step")}
+                for tid, st in _task_status.items()}
 
 
 @app.get("/api/report/{todo_id}")

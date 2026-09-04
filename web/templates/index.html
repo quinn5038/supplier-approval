@@ -19,6 +19,26 @@
 
     <div class="container">
         <div id="alert-area"></div>
+
+        <!-- 操作说明卡 -->
+        <div class="guide-card">
+            <div class="guide-title">使用说明</div>
+            <div class="guide-steps">
+                <div class="guide-step">
+                    <span class="guide-num">1</span>
+                    <div><b>更新 Cookie</b><br><span class="guide-desc">浏览器登录 scpma.iccec.cn → F12 复制 Cookie → 点右上角按钮粘贴</span></div>
+                </div>
+                <div class="guide-step">
+                    <span class="guide-num">2</span>
+                    <div><b>后台审批</b><br><span class="guide-desc">点某行的「后台审批」，程序在后台跑（下载材料→脱敏→OCR→规则判定），无需停留本页</span></div>
+                </div>
+                <div class="guide-step">
+                    <span class="guide-num">3</span>
+                    <div><b>查看结果</b><br><span class="guide-desc">跑完后按钮变为蓝色「查看审批结果」，点击进入详情页看审查报告和审批意见</span></div>
+                </div>
+            </div>
+        </div>
+
         <div id="todo-list">
             <div class="empty">
                 <div class="icon">○</div>
@@ -46,6 +66,11 @@
     </div>
 
     <script>
+        // ===== 状态管理 =====
+        let todoItems = [];          // 当前待办列表数据
+        let pollTimer = null;        // 批量轮询定时器
+        const nameById = {};         // todoId → 供应商名称
+
         // ===== 加载待办列表 =====
         async function loadTodos() {
             try {
@@ -66,7 +91,11 @@
                 }
                 const data = await r.json();
                 document.getElementById('meta').textContent = `待办共 ${data.total} 条`;
-                renderTodos(data.items);
+                todoItems = data.items;
+                todoItems.forEach(it => { nameById[it.todoId] = it.name; });
+                renderTodos(todoItems);
+                // 加载后恢复各行审批状态（服务重启会丢失，运行中则续上）
+                await refreshAllStatus();
             } catch (e) {
                 showErrorAlert('网络错误：' + e.message);
                 showEmpty('网络错误');
@@ -89,7 +118,7 @@
                 </div>
             `;
             list.innerHTML = head + items.map(it => `
-                <div class="todo-item">
+                <div class="todo-item" id="row-${esc(it.todoId)}">
                     <div class="col-name">
                         <div class="supplier-name">${esc(it.name) || '未知供应商'}</div>
                         <div class="sub-text">todoId: ${esc(it.todoId)}</div>
@@ -99,10 +128,88 @@
                     </div>
                     <div class="col-time">${esc(it.applyTimeShort) || '-'}</div>
                     <div class="col-action">
-                        <a href="/approve/${esc(it.todoId)}" class="btn btn-primary">审批</a>
+                        <button class="btn btn-primary" id="btn-${esc(it.todoId)}"
+                                onclick="startApprove('${esc(it.todoId)}')">后台审批</button>
                     </div>
                 </div>
             `).join('');
+        }
+
+        // ===== 后台审批：状态机 idle → running → done / error =====
+        async function startApprove(todoId) {
+            const btn = document.getElementById('btn-' + todoId);
+            if (!btn || btn.disabled) return;
+            btn.disabled = true;
+            btn.classList.add('btn-running');
+            btn.innerHTML = '<span class="btn-spinner"></span>审批中';
+            btn.title = '后台处理中，可继续浏览其他供应商';
+            try {
+                const r = await fetch('/api/approve/' + todoId, { method: 'POST' });
+                if (r.status === 409) {
+                    // 已在跑，直接进入轮询
+                } else if (!r.ok) {
+                    throw new Error('启动失败');
+                }
+                ensurePolling();
+            } catch (e) {
+                setBtnError(todoId, '启动失败，点击重试');
+            }
+        }
+
+        // 批量轮询（只要还有 running 的任务就轮询）
+        function ensurePolling() {
+            if (pollTimer) return;
+            pollTimer = setInterval(refreshAllStatus, 3000);
+            refreshAllStatus();
+        }
+
+        async function refreshAllStatus() {
+            try {
+                const r = await fetch('/api/status_all');
+                if (!r.ok) return;
+                const all = await r.json();
+                let hasRunning = false;
+                for (const [tid, st] of Object.entries(all)) {
+                    const btn = document.getElementById('btn-' + tid);
+                    if (!btn) continue;   // 该行不在当前列表（翻页/已处理）
+                    if (st.status === 'running') {
+                        hasRunning = true;
+                        if (!btn.classList.contains('btn-running')) {
+                            btn.disabled = true;
+                            btn.classList.add('btn-running');
+                            btn.innerHTML = '<span class="btn-spinner"></span>审批中';
+                        }
+                        btn.title = st.step || '处理中';
+                    } else if (st.status === 'done') {
+                        setBtnDone(tid);
+                    } else if (st.status === 'error') {
+                        setBtnError(tid, '审批失败');
+                        btn.title = st.error || st.step || '';
+                    }
+                }
+                if (!hasRunning && pollTimer) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                }
+            } catch (e) { /* 轮询失败静默，下轮再试 */ }
+        }
+
+        function setBtnDone(todoId) {
+            const btn = document.getElementById('btn-' + todoId);
+            if (!btn) return;
+            const name = nameById[todoId] || '';
+            btn.outerHTML =
+                `<a href="/approve/${esc(todoId)}${name ? '?name=' + encodeURIComponent(name) : ''}"
+                    class="btn btn-done">查看审批结果</a>`;
+        }
+
+        function setBtnError(todoId, msg) {
+            const btn = document.getElementById('btn-' + todoId);
+            if (!btn) return;
+            btn.disabled = false;
+            btn.classList.remove('btn-running');
+            btn.classList.add('btn-error');
+            btn.textContent = msg || '失败·点击重试';
         }
 
         // ===== Cookie 更新 =====

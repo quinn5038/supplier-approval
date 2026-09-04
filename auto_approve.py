@@ -127,7 +127,10 @@ log = logging.getLogger("supplier-approval")
 # HTTP 客户端
 # ============================================================
 # 全局 Session（keep-alive 长连接，所有请求复用，降低被WAF限流概率）
+# trust_env=False：不走系统代理（换网络后残留的代理设置会导致
+# ProxyError: Unable to connect to proxy —— ICCEC 是公司内网域名必须直连）
 _SESSION = requests.Session()
+_SESSION.trust_env = False
 
 
 def _asca_headers():
