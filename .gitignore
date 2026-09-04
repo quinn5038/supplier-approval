@@ -14,13 +14,16 @@ __pycache__/
 # 真实供应商数据缓存（含供应商名称、证件号等敏感信息）
 cache_v*.json
 cache_v*_R*.json
-cache_v*_desens/    # 脱敏后的中间产物（仍可能含少量敏感字段，不入库）
+cache_v*_desens/
 cache_v*_desens_R*/
 stage2_results*.json
 textin_results*.json
 qcc_results*.json
 progress_v*.jsonl
 files_cache/
+files_cache_desens/
+files_cache_desens_R*/
+files_cache_R*/
 
 # 备份文件（_R1~_R99 历史版本，广义匹配所有 _R 后缀的本地副本）
 # **/ 前缀确保跨目录匹配（如 web/app_R2.py、docs/技术文档_R1.md 等）
