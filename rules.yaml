@@ -42,8 +42,12 @@ part_1_basic:
       check_type: material
       rule: "supplier.get('has_legal_id_material', False)"
       requirement: 法人身份证正反面（或护照首页，须在有效期内）
-      verify: 身份证信息与联系信息栏法人一致性；是否在有效期内；企查查股权穿透查询该法人是否与中交有关联
-      note: 审核位置=资质证明栏附件+联系信息栏法人
+      verify: |
+        按 2026-09-04 保密合规要求，法人身份证不再走 TextIn OCR 识别（敏感证件）：
+        1) 材料缺失→退回（要求供应商补交）；
+        2) 材料已上传→转人工（人工核对姓名一致性、有效期、企查查股权穿透关联性）。
+      fail_action_if_bad: manual
+      note: 审核位置=资质证明栏附件+联系信息栏法人。OCR 已禁用，仅做材料存在性核验。
 
     - id: A03
       name: 纳税信用等级
@@ -66,12 +70,16 @@ part_1_basic:
     - id: A08
       name: 资金财务状况
       order: 7
-      check_type: material
-      rule: "supplier.get('has_financial_report', False)"
+      check_type: qichacha
+      rule: "supplier.get('qcc_finance_ok', False)"
       requirement: 上年度经审计的财报（2026年须提交2025年财报）
-      verify: 财报指标——流动比率≥100%、资产负债率≤65%、经营性现金流>0，任一不符转人工
+      verify: |
+        按 2026-09-04 保密合规要求，财报敏感数据不再走 TextIn OCR，改走企查查财务数据（公查信息）：
+        1) 调企查查资产负债表/利润表/现金流量表；
+        2) 计算指标：流动比率≥100%、资产负债率≤65%、经营性现金流>0；
+        3) 任一不符→转人工；企查查无数据（非上市公司常见）→转人工要求供应商补交。
       fail_action_if_bad: manual
-      note: 材料缺失→退回补充；有财报但指标不符→转人工（不是退回）
+      note: 材料缺失或企查查无数据→转人工要求补交；有数据但指标不符→转人工（不是退回）。OCR 路径已废弃。
 
     - id: A10
       name: 商业信誉
