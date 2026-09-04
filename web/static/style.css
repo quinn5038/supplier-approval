@@ -73,32 +73,85 @@ body {
 .alert-danger { background: var(--color-danger-bg); color: var(--color-danger); }
 .alert-success { background: var(--color-success-bg); color: var(--color-success); }
 
-/* ===== 待办列表项 ===== */
+/* ===== 待办列表（表格式 4 列：供应商名称/审批业务/申请时间/操作）===== */
+/* 关键：grid-template-columns 用 minmax(0, Xfr)，列宽严格按比例分配，
+   不被内容最小宽度撑开——否则每行独立 grid 会出现列错位 */
+.todo-table-head,
+.todo-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 0.8fr);
+    gap: 16px;
+    align-items: center;
+    padding: 10px 20px;
+}
+
+/* 表头 */
+.todo-table-head {
+    background: var(--color-primary-light);
+    border: 1px solid var(--color-border);
+    border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+    color: var(--color-primary-dark);
+    font-size: 13px;
+    font-weight: 500;
+}
+.todo-table-head .col-head-action { text-align: right; }
+
+/* 数据行 */
 .todo-item {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding: 16px 20px;
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    border-top: none;
+    transition: background 0.15s, border-color 0.15s;
+}
+.todo-item:last-child {
+    border-radius: 0 0 var(--radius) var(--radius);
     box-shadow: var(--shadow);
-    transition: border-color 0.2s;
 }
-.todo-item:hover { border-color: var(--color-primary); }
-.todo-item .info { flex: 1; }
-.todo-item .name { font-size: 15px; font-weight: 500; color: var(--color-text); margin-bottom: 4px; }
-.todo-item .sub { font-size: 12px; color: var(--color-text-muted); }
-.todo-item .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
+.todo-item:hover {
+    background: var(--color-primary-light);
+    border-color: var(--color-primary);
+}
+
+/* 第 1 列：供应商名称 + todoId */
+.todo-item .col-name { min-width: 0; }   /* 配合 ellipsis 生效 */
+.todo-item .supplier-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--color-text);
+    margin-bottom: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.todo-item .sub-text {
     font-size: 11px;
-    background: var(--color-bg);
     color: var(--color-text-muted);
-    margin-right: 8px;
+    font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
 }
+
+/* 第 2 列：审批业务徽章 */
+.todo-item .bill-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+    background: var(--color-primary-light);
+    color: var(--color-primary-dark);
+    border: 1px solid #c4d8ee;
+    white-space: nowrap;
+}
+
+/* 第 3 列：申请时间 */
+.todo-item .col-time {
+    color: var(--color-text-muted);
+    font-size: 13px;
+    font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+    white-space: nowrap;
+}
+
+/* 第 4 列：操作按钮（右对齐，与表头一致） */
+.todo-item .col-action { text-align: right; }
 
 /* ===== 进度指示器 ===== */
 .progress-bar {
