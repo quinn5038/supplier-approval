@@ -168,5 +168,5 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ---
 
-**作者**：Quinn（GitHub: 待补）
+**作者**：Quinn（GitHub: [quinn5038](https://github.com/quinn5038)）
 **联系方式**：通过参赛组委会联系

@@ -181,12 +181,21 @@ async def api_todos():
         total = data.get("recordsTotal", 0) if isinstance(data, dict) else 0
         items = []
         for r in rows:
+            # 标题格式："供应商名/统一社会信用代码"，去掉后缀只取供应商名
+            raw_title = r.get("title") or r.get("applyUnitName") or r.get("applyUserName") or ""
+            supplier_name = raw_title.split("/")[0].strip() if raw_title else ""
+            # 申请时间格式化（原始 "2026-09-04 12:28:55" → "09-04 12:28"）
+            raw_time = r.get("applyTime") or r.get("createTime") or ""
+            apply_time_short = ""
+            if raw_time and len(raw_time) >= 16:
+                apply_time_short = raw_time[5:16]  # "09-04 12:28"
             items.append({
                 "todoId": r.get("id") or r.get("todoId"),
-                "name": r.get("applyUnitName") or r.get("applyUserName") or "",
+                "name": supplier_name,
                 "billName": r.get("businessBillName") or "",
                 "billType": r.get("businessBillType") or "",
-                "applyTime": r.get("applyTime") or r.get("createTime") or "",
+                "applyTime": raw_time,
+                "applyTimeShort": apply_time_short,
             })
         return {"total": total, "count": len(items), "items": items}
     except auto_approve.SessionExpiredError as e:
