@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>审批详情 - {{ todo_id }}</title>
+    <title>审批详情 - {{ supplier_name or todo_id }}</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="topbar">
         <div>
-            <h1>供应商审批详情</h1>
+            <h1 id="page-title">{{ supplier_name or '供应商审批详情' }}</h1>
             <div class="meta">todoId: {{ todo_id }}</div>
         </div>
         <div class="actions">

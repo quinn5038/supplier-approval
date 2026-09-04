@@ -73,6 +73,91 @@ body {
 .alert-danger { background: var(--color-danger-bg); color: var(--color-danger); }
 .alert-success { background: var(--color-success-bg); color: var(--color-success); }
 
+/* ===== 操作说明卡（首页）===== */
+.guide-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 4px solid var(--color-primary);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow);
+}
+.guide-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-primary-dark);
+    margin-bottom: 12px;
+}
+.guide-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+}
+.guide-step {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.guide-step .guide-num {
+    flex-shrink: 0;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 2px;
+}
+.guide-step b { color: var(--color-text); }
+.guide-desc { color: var(--color-text-muted); font-size: 12px; }
+
+/* ===== 审批按钮状态（首页后台审批模式）===== */
+/* 审批中：转圈 */
+.btn .btn-spinner,
+.btn-spinner {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 6px;
+    vertical-align: -1px;
+}
+.btn.btn-running { background: var(--color-text-muted); cursor: default; }
+
+/* 审批完成：高亮"查看审批结果" */
+.btn.btn-done {
+    background: var(--color-success);
+    color: #fff;
+    display: inline-block;
+    padding: 7px 16px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: 0 0 0 3px var(--color-success-bg);
+    animation: pulse-done 1.6s ease-in-out 2;
+}
+@keyframes pulse-done {
+    0%, 100% { box-shadow: 0 0 0 3px var(--color-success-bg); }
+    50% { box-shadow: 0 0 0 6px var(--color-success-bg); }
+}
+
+/* 审批失败 */
+.btn.btn-error {
+    background: var(--color-danger-bg);
+    color: var(--color-danger);
+    border: 1px solid #e8b4b4;
+    cursor: pointer;
+}
+
 /* ===== 待办列表（表格式 4 列：供应商名称/审批业务/申请时间/操作）===== */
 /* 关键：grid-template-columns 用 minmax(0, Xfr)，列宽严格按比例分配，
    不被内容最小宽度撑开——否则每行独立 grid 会出现列错位 */

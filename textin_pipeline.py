@@ -113,7 +113,8 @@ def parse_file_textin(path):
         "markdown_details": 0,      # 只要markdown，不要detail（省流量）
     }
     resp = requests.post(TEXTIN_API, headers=headers, params=params,
-                         data=data, timeout=120)
+                         data=data, timeout=120,
+                         proxies={"http": None, "https": None})  # 不走系统代理（防换网络后 ProxyError）
     resp.raise_for_status()
     result = resp.json()
     if result.get("code") not in (200, "200"):
@@ -759,7 +760,8 @@ def download_supplier_files(todo_id=None, delay=25.0):
                         "https://scpma.iccec.cn/apis/scpma/oss/downloadByUploadId",
                         headers=_scpma_headers(),
                         params={"fileUrl": fu, "fileName": fname},
-                        timeout=180)
+                        timeout=180,
+                        proxies={"http": None, "https": None})  # 不走系统代理
                 except Exception as e:
                     print(f"  [重试{attempt + 1}] {fname}: {e}")
                     resp = None
