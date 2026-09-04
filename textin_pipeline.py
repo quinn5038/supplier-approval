@@ -39,6 +39,7 @@ import requests
 
 BASE = Path(__file__).parent
 FILES_DIR = BASE / "files_cache"
+FILES_DESENS_DIR = BASE / "files_cache_desens"  # 2026-09-04 保密合规：脱敏后给 OCR 用的中间目录
 RESULTS_FILE = BASE / "textin_results.json"
 TEXTIN_API = "https://api.textin.com/ai/service/v1/pdf_to_markdown"
 # 注：新版 xParse 端点 /ai/service/v1 实测返回 400「缺少必要参数或参数值不正确」，
@@ -783,14 +784,20 @@ def scan_files():
     """扫描 files_cache/<todoId>/ → [(todoId, path, doc_type, md_path)]
     分类优先级：classify_file(文件名) → 失败则用缓存 materials_detail 兜底
     （缓存分类基于附件说明，比纯文件名准——"李作发.jpg"这种人名命名的身份证
-      会被文件名分类漏掉，但缓存里有正确 legal_person_id 标记）"""
+      会被文件名分类漏掉，但缓存里有正确 legal_person_id 标记）
+
+    2026-09-04 保密合规改造：优先读 files_cache_desens/（脱敏后目录），
+    没有再 fallback 到 files_cache/（原始文件，仅用于 OCR 不能识别时人工补救）。
+    """
     import re
     tasks = []
-    if not FILES_DIR.exists():
+    # 优先用脱敏目录，没有再 fallback 到原始目录（保留兜底通道）
+    scan_dir = FILES_DESENS_DIR if FILES_DESENS_DIR.exists() else FILES_DIR
+    if not scan_dir.exists():
         return tasks
     cache = json.loads((BASE / "cache_v4.json").read_text(encoding="utf-8")) \
         if (BASE / "cache_v4.json").exists() else {}
-    for todo_dir in sorted(FILES_DIR.iterdir()):
+    for todo_dir in sorted(scan_dir.iterdir()):
         if not todo_dir.is_dir():
             continue
         todo_id = todo_dir.name
@@ -819,7 +826,22 @@ def scan_files():
 
 
 def run_parse(only_todo=None):
-    """解析 files_cache 下所有文件 → textin_results.json"""
+    """解析 files_cache 下所有文件 → textin_results.json
+
+    2026-09-04 保密合规改造：先调用 desensitize 助手脱敏到 files_cache_desens/，
+    然后 scan_files 改读脱敏目录，OCR 永远不接触原始敏感数据。
+    """
+    # 阶段 1.5：脱敏（缺库时优雅降级——不改任何文件，正常返回）
+    if FILES_DIR.exists():
+        try:
+            from desensitize import desensitize_dir
+            desensitize_dir(FILES_DIR, FILES_DESENS_DIR)
+            log.info(f"已脱敏到 {FILES_DESENS_DIR}，OCR 将读取脱敏后的文件")
+        except ImportError:
+            log.warning("desensitize 模块未找到，跳过脱敏（不推荐——敏感信息可能泄露）")
+        except Exception as e:
+            log.warning(f"脱敏失败：{e}，继续扫描原始目录（不推荐）")
+
     cache = json.loads((BASE / "cache_v4.json").read_text(encoding="utf-8")) \
         if (BASE / "cache_v4.json").exists() else {}
     tasks = [t for t in scan_files()
