@@ -70,6 +70,7 @@
         let todoItems = [];          // 当前待办列表数据
         let pollTimer = null;        // 批量轮询定时器
         const nameById = {};         // todoId → 供应商名称
+        const errorById = {};        // todoId → 失败原因（点失败按钮时展示）
 
         // ===== 加载待办列表 =====
         async function loadTodos() {
@@ -130,6 +131,7 @@
                     <div class="col-action">
                         <button class="btn btn-primary" id="btn-${esc(it.todoId)}"
                                 onclick="startApprove('${esc(it.todoId)}')">后台审批</button>
+                        <div class="fail-reason" id="fail-${esc(it.todoId)}"></div>
                     </div>
                 </div>
             `).join('');
@@ -139,7 +141,9 @@
         async function startApprove(todoId) {
             const btn = document.getElementById('btn-' + todoId);
             if (!btn || btn.disabled) return;
+            clearFailReason(todoId);
             btn.disabled = true;
+            btn.classList.remove('btn-error');
             btn.classList.add('btn-running');
             btn.innerHTML = '<span class="btn-spinner"></span>审批中';
             btn.title = '后台处理中，可继续浏览其他供应商';
@@ -184,7 +188,7 @@
                         setBtnDone(tid);
                     } else if (st.status === 'error') {
                         setBtnError(tid, '审批失败');
-                        btn.title = st.error || st.step || '';
+                        showFailReason(tid, st.error || st.step || '');
                     }
                 }
                 if (!hasRunning && pollTimer) {
@@ -210,6 +214,24 @@
             btn.classList.remove('btn-running');
             btn.classList.add('btn-error');
             btn.textContent = msg || '失败·点击重试';
+        }
+
+        // 失败原因显示：按钮下方红字显示（截断），点击展开完整原因
+        function showFailReason(todoId, reason) {
+            if (!reason) return;
+            errorById[todoId] = reason;
+            const el = document.getElementById('fail-' + todoId);
+            if (!el) return;
+            const short = reason.length > 40 ? reason.slice(0, 40) + '…' : reason;
+            el.innerHTML = `<span class="fail-text" title="点击展开详情">${esc(short)}</span>`;
+            el.style.display = 'block';
+            el.onclick = () => alert('失败原因：\n\n' + (errorById[todoId] || '未知'));
+        }
+
+        function clearFailReason(todoId) {
+            delete errorById[todoId];
+            const el = document.getElementById('fail-' + todoId);
+            if (el) { el.style.display = 'none'; el.innerHTML = ''; }
         }
 
         // ===== Cookie 更新 =====

@@ -158,6 +158,21 @@ body {
     cursor: pointer;
 }
 
+/* 失败原因（按钮下方红字，点击弹完整详情） */
+.fail-reason {
+    display: none;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--color-danger);
+    cursor: pointer;
+    max-width: 120px;
+}
+.fail-reason .fail-text {
+    display: inline-block;
+    border-bottom: 1px dotted var(--color-danger);
+}
+
 /* ===== 待办列表（表格式 4 列：供应商名称/审批业务/申请时间/操作）===== */
 /* 关键：grid-template-columns 用 minmax(0, Xfr)，列宽严格按比例分配，
    不被内容最小宽度撑开——否则每行独立 grid 会出现列错位 */
