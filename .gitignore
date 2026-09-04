@@ -42,3 +42,7 @@ run_v4_*.txt
 preview_*.txt
 preview_*.html
 _supfiles_probe.json
+_cookie_probe.json
+_*_probe.json
+qcc_api_cache.json
+qcc_call_count.json
