@@ -709,6 +709,27 @@ def classify_uploaded_materials(file_list):
     }
 
 
+def _build_skip_result(tid, entry, decision_reason):
+    """9/5 新增：分流供应商（国外/集团）也生成"不适用"结果，避免列表 31 家有点击报 no_result"""
+    supplier = entry.get("supplier", {})
+    todo = entry.get("todo", {})
+    name = supplier.get("name") or todo.get("applyUnitName") or tid
+    return {
+        "todoId": tid,
+        "name": name,
+        "billName": todo.get("billName") or "",
+        "type_desc": "不适用",
+        "decision": "skip",
+        "opinion": f"不适用。{decision_reason}。",
+        "checklist": [],
+        "qcc_issues": [],
+        "textin_issues": [],
+        "materials_detail": entry.get("materials_detail", []),
+        "certifications": entry.get("certifications", []),
+        "stage2_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 def _ensure_inspection_fields(supplier, entry=None):
     """补全 is_inspection / has_inspection_cert 字段（兼容旧 cache）。
     9/3 新增 A13 检验检测资质，旧 cache 无此字段时按规则重新判定。"""
@@ -1912,9 +1933,12 @@ def run_stage2():
 
         # 分流供应商（国外/港澳台/集团独有）不需要企查查增强
         if supplier.get("is_foreign") or supplier.get("is_hmt"):
+            # 9/5 修复：即使分流也生成"不适用"结果，让所有 31 家都能看到决策
+            results[tid] = _build_skip_result(tid, entry, decision_reason="境外供应商不适用中国大陆合规审查")
             continue
         is_special, _ = is_special_category(supplier)
         if is_special:
+            results[tid] = _build_skip_result(tid, entry, decision_reason="集团内部供应商（股东含中交系统关键词），按内部流程处理")
             continue
 
         # 匹配企查查结果（优先信用代码，其次企业名）
