@@ -71,12 +71,9 @@ def render_supplier(tid, s2, textin, cache):
     cache_entry = cache.get(tid, {})
     supplier = cache_entry.get("supplier", {})
 
-    # 9/5 新增：供应商类型（从 cache 取，与经营范围交叉验证后给出建议类目）
+    # 9/5 改造：供应商类型只显示系统分类（推断信息已在 type_desc 里展示，meta 行不重复）
     raw_sup_type = supplier.get("sup_type_name") or supplier.get("supTypeName") or ""
-    inferred_type = _infer_supplier_type(supplier, tdesc)
     sup_type_html = f"<span class='sup-type'>{esc(raw_sup_type) or '未分类'}</span>"
-    if inferred_type:
-        sup_type_html += f"<span class='sup-infer'> → 推断：{esc(inferred_type)}</span>"
 
     dl = DECISION_LABEL.get(decision, ("转人工","#fef7e0","#8a6d00"))
 
@@ -106,8 +103,27 @@ def render_supplier(tid, s2, textin, cache):
         miss_items = []
         for c in checklist:
             cid = c.get("id", "")
+            cname = c.get("name", "")
+            # 9/5：A13 skip 项不报缺失（is_inspection=False 的供应商不需要）
             if c.get("status") == "skip":
                 continue
+            # 9/5：决策依据从 rules.yaml 读 requirement（避免与 cache 内置字段脱节）
+            decision_basis = _load_decision_basis(cid, cname)
+            # 缺失材料：D 类（贸易经销商）单独处理
+            if cid.startswith("D1_03"):
+                miss_items.append((cid, cname, "ISO 9001 质量管理体系认证证书（可上传其代理厂家的认证，须在有效期内）"))
+                continue
+            if cid.startswith("D1_04"):
+                miss_items.append((cid, cname, "ISO 14001 环境管理体系认证证书（须为该贸易公司自己的认证且在有效期内）"))
+                continue
+            if cid.startswith("D1_05"):
+                miss_items.append((cid, cname, "ISO 45001 职业健康安全管理体系认证证书（须为该贸易公司自己的认证且在有效期内）"))
+                continue
+            if cid.startswith("D1_06"):
+                miss_items.append((cid, cname, "产品生产企业的代理协议或产品销售授权资质（授权一方须为该贸易公司且在有效期内）"))
+                continue
+            if cid.startswith("D2_"):
+                continue  # D2 国外贸易商不适用
             need = CL_ID_TO_DOC_TYPE.get(cid)
             if not need:
                 continue
@@ -115,13 +131,22 @@ def render_supplier(tid, s2, textin, cache):
                 if doc_type not in uploaded_types:
                     miss_items.append((cid, c.get("name", ""), label))
         if miss_items:
+            # 9/5：去重（同一个审核项可能多个材料类型缺失，只显示一行）
+            seen_keys = set()
+            dedup = []
+            for cid, cname, label in miss_items:
+                key = (cid, label)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                dedup.append((cid, cname, label))
             missing_rows = (
                 "<table class='sub'><tr><th>编号</th><th>审核项</th>"
                 "<th>缺失的材料</th></tr>"
                 + "".join(
                     f"<tr><td>{esc(c)}</td><td>{esc(n)}</td>"
                     f"<td style='color:#a52834'>⚠ {esc(l)} 未上传</td></tr>"
-                    for c, n, l in miss_items
+                for c, n, l in dedup
                 ) + "</table>"
             )
         else:
@@ -136,6 +161,9 @@ def render_supplier(tid, s2, textin, cache):
         cid = c.get("id", "")
         cname = c.get("name", "")
         st = c.get("status", "")
+        # 9/5 改造：A13（检验检测资质）只对 is_inspection 类供应商展示，贸易商/厂家不显示
+        if cid == "A13" and st == "skip":
+            continue
         mark, bg, color = STATUS_MARK.get(st, ("?", "#fef7e0", "#8a6d00"))
         detail = c.get("detail") or c.get("message") or ""
 
@@ -193,8 +221,8 @@ def render_supplier(tid, s2, textin, cache):
             qcc_extra += "企查查：" + next((x for x in q_issues if "A08" in x), "")
             qcc_extra += "</div>"
 
-        # 决策依据：9/5 改造为静态文本（同类供应商固定不变）
-        decision_basis = _STATIC_BASIS.get(cid, "")
+        # 决策依据：9/5 改造为从 rules.yaml 读 requirement
+        decision_basis = _load_decision_basis(cid, cname)
 
         big_rows += (
             f"<tr style='background:{bg}'>"
@@ -254,6 +282,41 @@ def render_supplier(tid, s2, textin, cache):
       </div>
     </div>
     """
+
+
+# 9/5 新增：决策依据从 rules.yaml 读 requirement（同类供应商固定不变）
+def _load_decision_basis(cid, cname_fallback):
+    """从 rules.yaml 读对应编号规则的 requirement 作为决策依据。
+
+    加载后缓存到模块字典，避免每次重新 IO。
+    """
+    if not hasattr(_load_decision_basis, "_cache"):
+        _load_decision_basis._cache = {}
+    if cid in _load_decision_basis._cache:
+        return _load_decision_basis._cache[cid] or cname_fallback
+    try:
+        import yaml
+        rules_path = Path(__file__).parent / "rules.yaml"
+        if rules_path.exists():
+            with open(rules_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            # 递归查找所有规则列表
+            for part in ("part_1_basic", "part_2_by_type", "part_3_special_categories"):
+                bucket = cfg.get(part) or {}
+                rules = []
+                if isinstance(bucket, dict):
+                    for v in bucket.values():
+                        if isinstance(v, list):
+                            rules.extend(v)
+                elif isinstance(bucket, list):
+                    rules.extend(bucket)
+                for r in rules:
+                    if isinstance(r, dict) and r.get("id") == cid:
+                        _load_decision_basis._cache[cid] = r.get("requirement") or r.get("verify") or ""
+                        return _load_decision_basis._cache[cid] or cname_fallback
+    except Exception as e:
+        print(f"[basis] 加载 rules.yaml 失败：{e}")
+    return cname_fallback
 
 
 # 9/5 新增：决策依据静态文本（同类供应商固定不变，避免每次生成都不一样）
