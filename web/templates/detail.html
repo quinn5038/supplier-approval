@@ -43,7 +43,15 @@
                 <h2>供应商材料审查报告</h2>
                 <div id="report-content"></div>
             </div>
-            <!-- 9/5 删除冗余"最终审批意见"section：卡片内已含 opinion-area 显示+复制 -->
+            <!-- 9/5 反转修复：Quinn 要保留独立"最终审批意见（可一键复制）"section，
+                 删卡片内 opinion-area（重复且不可一键复制） -->
+            <div class="report-section">
+                <h2>最终审批意见（可直接复制）</h2>
+                <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+                    <button class="btn btn-outline" onclick="copyOpinion()">复制全文</button>
+                </div>
+                <div class="opinion-box" id="opinion-content"></div>
+            </div>
         </div>
 
         <!-- 错误区 -->
@@ -137,9 +145,9 @@
                     throw new Error(err.msg || '加载失败');
                 }
                 const data = await r.json();
-                // 9/5 改造：opinion 已在卡片内（gen_stage2_report 输出的 opinion-area），
-                // 不再单独渲染到 opinion-content
                 document.getElementById('report-content').innerHTML = data.report_html || '<p>无报告内容</p>';
+                // 9/5 反转修复：opinion 展示在下方独立"最终审批意见"section 的 opinion-content
+                document.getElementById('opinion-content').textContent = data.opinion_text || '';
                 opinionText = data.opinion_text || '';
                 document.getElementById('report-area').style.display = 'block';
             } catch (e) {

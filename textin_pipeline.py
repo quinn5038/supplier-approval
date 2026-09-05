@@ -32,8 +32,13 @@ import os
 import re
 import sys
 import time
+import logging
 from datetime import datetime, date
 from pathlib import Path
+
+# 9/5 修复：之前 run_parse 里用了 log.info 但模块没定义 log，导致 OCR 集成脱敏后崩溃
+log = logging.getLogger("textin-pipeline")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 import requests
 

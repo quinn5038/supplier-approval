@@ -114,11 +114,11 @@ def _run_pipeline_for_one(todo_id: str):
         # 把真实资质文件下载到 files_cache/<todoId>/，否则 OCR 拿不到图片。
         _update("正在下载资质文件到本地...", progress=30)
         try:
-            import auto_approve as _aa
-            # 用同步方式跑 download（每次文件最多几秒）
+            import textin_pipeline as _tp
+            # 9/5 修复：download_supplier_files 在 textin_pipeline.py 不在 auto_approve.py
             files_dir = BASE_DIR / "files_cache" / str(todo_id)
             files_dir.mkdir(parents=True, exist_ok=True)
-            _aa.download_supplier_files(str(todo_id), delay=2.0)
+            _tp.download_supplier_files(str(todo_id), delay=2.0)
         except Exception as e:
             print(f"[download] 文件下载失败（不阻塞流程，OCR可能空）：{e}")
 

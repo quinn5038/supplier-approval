@@ -276,10 +276,7 @@ def render_supplier(tid, s2, textin, cache):
           {missing_rows}
         </div>
       </div>
-      <div class="opinion-area">
-        <h3>最终审批意见（可复制粘贴进 ICCEC 审批框）</h3>
-        <pre class="opinion">{esc(plain_opinion)}</pre>
-      </div>
+      <!-- 9/5 反转修复：删除卡片内 opinion-area，避免与下方"最终审批意见"section 重复 -->
     </div>
     """
 
