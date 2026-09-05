@@ -341,6 +341,57 @@ body {
 }
 .report-section h2 { font-size: 16px; font-weight: 500; margin-bottom: 16px; color: var(--color-text); }
 
+/* 大表（9/5 改造：5→6 列，加"核验结果"列） */
+.big-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin: 8px 0;
+}
+.big-table th {
+    background: #f8f9fa;
+    text-align: left;
+    padding: 8px 10px;
+    font-weight: 600;
+    color: #5f6368;
+    font-size: 12px;
+    border-bottom: 2px solid #e8eaed;
+}
+.big-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #eee;
+    vertical-align: top;
+    font-size: 13px;
+}
+.big-table tr:last-child td { border-bottom: none; }
+.sup-type {
+    background: var(--color-primary-light);
+    color: var(--color-primary-dark);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    margin-left: 8px;
+}
+.sup-infer {
+    color: var(--color-text-muted);
+    font-size: 12px;
+    margin-left: 8px;
+}
+.auto-gen {
+    padding: 0 20px 12px;
+    color: var(--color-text-muted);
+    font-size: 12px;
+    border-bottom: 1px solid #e8eaed;
+}
+.kv { display: inline-block; margin: 1px 4px 1px 0; font-size: 12px; }
+.kv .k { color: var(--color-text-muted); }
+.kv .v { color: var(--color-text); font-weight: 500; }
+.issue { display: inline-block; color: #a52834; font-size: 12px; }
+.ok-mini { display: inline-block; color: #1e7e34; font-size: 12px; }
+.ng-mini { display: inline-block; color: #a52834; font-weight: 600; font-size: 12px; }
+.opinion-area { margin: 16px 20px 16px; }
+.opinion-area h3 { margin-bottom: 8px; font-size: 15px; color: var(--color-text); }
+
 /* 审查报告内容（gen_stage2_report 生成的 HTML） */
 .report-section table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 12px 0; }
 .report-section th, .report-section td { border: 1px solid var(--color-border); padding: 8px 10px; text-align: left; }

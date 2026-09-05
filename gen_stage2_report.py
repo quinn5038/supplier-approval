@@ -5,6 +5,7 @@ r"""从 stage2_results.json + textin_results.json 生成供应商材料审查对
 输出: D:\WorkBuddy\供应商材料审查_YYYYMMDD.html
 """
 import json, sys, datetime
+from datetime import date
 from pathlib import Path
 
 # 复用 gen_opinion 的意见生成逻辑（9/3：意见表与审查报告整合成一个 HTML）
@@ -67,20 +68,28 @@ def render_supplier(tid, s2, textin, cache):
     checklist = s2.get("checklist") or []
     t_issues = s2.get("textin_issues") or []
     q_issues = s2.get("qcc_issues") or []
+    cache_entry = cache.get(tid, {})
+    supplier = cache_entry.get("supplier", {})
+
+    # 9/5 新增：供应商类型（从 cache 取，与经营范围交叉验证后给出建议类目）
+    raw_sup_type = supplier.get("sup_type_name") or supplier.get("supTypeName") or ""
+    inferred_type = _infer_supplier_type(supplier, tdesc)
+    sup_type_html = f"<span class='sup-type'>{esc(raw_sup_type) or '未分类'}</span>"
+    if inferred_type:
+        sup_type_html += f"<span class='sup-infer'> → 推断：{esc(inferred_type)}</span>"
 
     dl = DECISION_LABEL.get(decision, ("转人工","#fef7e0","#8a6d00"))
 
-    # ---- 9/5 改造：一个大表整合核查清单 + OCR + 企查查 ----
+    # 9/5 改造：大表 5 列
     cache_entry = cache.get(tid, {})
     mdetail = cache_entry.get("materials_detail", [])
     uploaded_types = set()
-    file_names = {}  # doc_type → fileName
+    file_names = {}
     for d in mdetail:
         for t in (d.get("types") or []):
             uploaded_types.add(t)
             file_names.setdefault(t, d.get("fileName", ""))
 
-    # 已上传文件清单（简洁）
     files_html = ""
     if mdetail:
         files_html = "<ul>" + "".join(
@@ -92,7 +101,6 @@ def render_supplier(tid, s2, textin, cache):
     else:
         files_html = "<span style='color:#a52834'>缓存无文件数据</span>"
 
-    # 缺失文件清单
     missing_rows = ""
     if checklist:
         miss_items = []
@@ -121,10 +129,8 @@ def render_supplier(tid, s2, textin, cache):
     else:
         missing_rows = "<div style='color:#5f6368'>无 checklist 数据</div>"
 
-    # TextIn OCR 抽取（按材料类）
     t_data = textin.get(tid, {}) or {}
 
-    # 构建"大表"主体行
     big_rows = ""
     for c in checklist:
         cid = c.get("id", "")
@@ -133,26 +139,43 @@ def render_supplier(tid, s2, textin, cache):
         mark, bg, color = STATUS_MARK.get(st, ("?", "#fef7e0", "#8a6d00"))
         detail = c.get("detail") or c.get("message") or ""
 
-        # 材料状态：脱敏 + OCR
         need = CL_ID_TO_DOC_TYPE.get(cid, [])
-        # 整合所需材料类型的脱敏状态
         mat_status_parts = []
-        ocr_findings = []   # 本项对应的 OCR 抽取结果
+        check_detail_parts = []  # 9/5 新增：核验结果列
         for doc_type, label in need:
             if doc_type in uploaded_types:
-                # 脱敏状态
                 if doc_type in ("legal_person_id", "financial_report"):
                     desens = "✓已脱敏"
                 else:
                     desens = "原样"
-                # OCR 状态
                 td = t_data.get(doc_type) if isinstance(t_data, dict) else None
                 if td and not td.get("_deprecated"):
                     fields = td.get("fields") or {}
                     checks = td.get("checks") or {}
-                    if fields or checks:
-                        fld = ", ".join(f"{k}={v}" for k, v in list(fields.items())[:2])[:80]
-                        ocr_findings.append(f"<span style='font-size:12px'>{fld}</span>")
+                    iss = td.get("issues") or []
+                    # 核验结果：列出 OCR 抽取的关键字段与系统字段对比
+                    for k, v in list(fields.items())[:3]:
+                        s = str(v)
+                        if len(s) > 30:
+                            s = s[:30] + "…"
+                        check_detail_parts.append(
+                            f"<span class='kv'><span class='k'>{esc(k)}</span>=<span class='v'>{esc(s)}</span></span>"
+                        )
+                    if iss:
+                        check_detail_parts.append(
+                            f"<span class='issue'>{esc(iss[0])}</span>"
+                        )
+                    elif checks:
+                        ok = sum(1 for cv in checks.values() if cv is True)
+                        ng = sum(1 for cv in checks.values() if cv is False)
+                        if ng == 0:
+                            check_detail_parts.append(
+                                f"<span class='ok-mini'>核验 {ok} 项全通过</span>"
+                            )
+                        else:
+                            check_detail_parts.append(
+                                f"<span class='ng-mini'>{ng} 项不符</span>"
+                            )
                 elif td and td.get("_deprecated"):
                     desens += "+OCR禁用"
                 else:
@@ -161,28 +184,28 @@ def render_supplier(tid, s2, textin, cache):
                                         f"{label}：{desens}</span>")
         mat_status = "<br>".join(mat_status_parts) if mat_status_parts else \
                      "<span style='color:#a52834'>材料未上传</span>"
+        check_detail = "<br>".join(check_detail_parts) if check_detail_parts else \
+                       "<span style='color:#5f6368;font-size:12px'>无核验数据</span>"
 
-        # 企查查结果（如果 checklist 项是 qichacha check_type）
         qcc_extra = ""
-        if cid == "A08" and "A08 财报" in str(q_issues):
+        if cid == "A08" and any("A08" in q for q in q_issues):
             qcc_extra = "<div style='margin-top:4px;font-size:12px;color:#8a6d00'>"
             qcc_extra += "企查查：" + next((x for x in q_issues if "A08" in x), "")
             qcc_extra += "</div>"
+
+        # 决策依据：9/5 改造为静态文本（同类供应商固定不变）
+        decision_basis = _STATIC_BASIS.get(cid, "")
 
         big_rows += (
             f"<tr style='background:{bg}'>"
             f"<td style='color:{color};font-weight:bold;font-size:16px;text-align:center'>{mark}</td>"
             f"<td>{esc(cid)}</td>"
             f"<td>{esc(cname)}</td>"
-            f"<td style='font-size:13px'>{esc(detail)}</td>"
+            f"<td style='font-size:13px'>{esc(decision_basis)}</td>"
             f"<td>{mat_status}{qcc_extra}</td>"
+            f"<td>{check_detail}</td>"
             f"</tr>"
         )
-
-    # 缺失文件也加一行（状态 fail）
-    if missing_rows and "未上传" in missing_rows:
-        for cid, cname, label in []:  # 已在 checklist 中体现，单独行会增加冗余
-            pass
 
     big_table = (
         "<table class='big-table'>"
@@ -190,26 +213,30 @@ def render_supplier(tid, s2, textin, cache):
         "<th style='width:40px'></th>"
         "<th style='width:60px'>编号</th>"
         "<th style='width:140px'>项目</th>"
-        "<th>说明 / 决策依据</th>"
-        "<th style='width:280px'>材料状态（脱敏 + OCR）</th>"
+        "<th style='width:200px'>决策依据</th>"
+        "<th style='width:220px'>材料状态（脱敏 + OCR）</th>"
+        "<th>核验结果（OCR/企查查/系统对比）</th>"
         "</tr>"
         + big_rows + "</table>"
     )
 
-    # 纯文本意见（复用 gen_opinion）
     try:
         plain_opinion = gen_opinion.build_opinion(tid, s2, textin, cache)
     except Exception:
         plain_opinion = opinion
 
+    today = date.today().strftime("%Y年%m月%d日")
+    auto_gen = f"（自动生成于 {today}，依据《中港采购发〔2025〕161号》准入审查规则）"
+
     return f"""
     <div class="card">
       <div class="card-head">
         <span class="title">{esc(name)}</span>
-        <span class="meta">#{esc(tid)} ｜ {esc(bill)} ｜ {esc(tdesc)}</span>
+        <span class="meta">#{esc(tid)} ｜ {esc(bill)} ｜ {esc(tdesc)} ｜ {sup_type_html}</span>
         <span class="decision" style="background:{dl[1]};color:{dl[2]}">{dl[0]}</span>
       </div>
-      <h3 style="margin:16px 20px 8px">综合核验表（核查清单 + 材料状态 + OCR/企查查）</h3>
+      <div class="auto-gen">{auto_gen}</div>
+      <h3 style="margin:16px 20px 8px">综合核验表</h3>
       <div style="padding:0 20px">{big_table}</div>
       <div class="grid">
         <div>
@@ -221,14 +248,49 @@ def render_supplier(tid, s2, textin, cache):
           {missing_rows}
         </div>
       </div>
-      <details style="margin:8px 20px 16px">
-        <summary style="cursor:pointer;color:#1a73e8;font-size:14px;padding:8px 0">
-          📋 点击展开纯文本审批意见（可复制粘贴进 ICCEC 审批框）
-        </summary>
-        <pre class="opinion" style="margin:8px 0">{esc(plain_opinion)}</pre>
-      </details>
+      <div class="opinion-area">
+        <h3>最终审批意见（可复制粘贴进 ICCEC 审批框）</h3>
+        <pre class="opinion">{esc(plain_opinion)}</pre>
+      </div>
     </div>
     """
+
+
+# 9/5 新增：决策依据静态文本（同类供应商固定不变，避免每次生成都不一样）
+_STATIC_BASIS = {
+    "A01": "《公司法》登记成立；营业执照信息与基本信息栏一致",
+    "A02": "法人身份证正反面在有效期；与联系信息栏法人一致；股权穿透无中交关联",
+    "A03": "上年度纳税信用等级证明为 C 级及以上",
+    "A07": "售后服务五星认证或厂家/供应商出具的售后服务证明函（落款 3 个月内有效）",
+    "A08": "上年度经审计财报三指标达标：流动比率≥100%、资产负债率≤65%、经营性现金流>0",
+    "A10": "天眼查/企查查无失信/被执行/限消令/经营异常/严重违法记录",
+    "C1_02": "ISO 9001 质量管理体系认证证书在有效期",
+    "C1_03": "ISO 14001 环境管理体系认证证书在有效期",
+    "C1_04": "ISO 45001 职业健康安全管理体系认证证书在有效期",
+    "C1_05": "生产许可证 / 强制认证证书在有效期",
+    "D-1": "ISO 三认证齐全 + 经销授权证明（贸易经销商适用）",
+    "D-2": "OEM 合作协议 / 授权委托书（适用）",
+}
+
+
+# 9/5 新增：从供应商经营范围推断类目（与系统类型交叉验证）
+_TRADE_HINTS = ("销售", "批发", "零售", "贸易", "经销", "代理")
+_MANUFACTURE_HINTS = ("生产", "制造", "加工", "研发")
+_SERVICE_HINTS = ("服务", "咨询", "运输", "工程", "维修")
+
+
+def _infer_supplier_type(supplier, tdesc):
+    """根据经营范围与公司类型推断供应商实际类目（用于与系统 sup_type_name 交叉验证）"""
+    busi = (supplier.get("busi_scope") or "") + " " + (tdesc or "")
+    if not busi.strip():
+        return ""
+    if any(k in busi for k in _TRADE_HINTS):
+        return "贸易商/经销商"
+    if any(k in busi for k in _MANUFACTURE_HINTS):
+        return "生产/制造商"
+    if any(k in busi for k in _SERVICE_HINTS):
+        return "服务商"
+    return ""
 
 def main():
     stage2 = json.loads((BASE/"stage2_results.json").read_text(encoding="utf-8"))

@@ -796,11 +796,7 @@ def build_checklist(supplier, rules_list):
 
         elif ct == "material":
             # 条件性规则：不需要检查时标记跳过（不进核验清单、不退回）
-            if rid == "A07" and not supplier.get("is_manufacturer", False):
-                entry["status"] = "skip"
-                entry["detail"] = "贸易商不需要售后服务材料"
-                checklist.append(entry)
-                continue
+            # 9/5 改造：A07 售后服务改为"贸易商/经销商也需要"（不再按厂家专属判定）
             if rid == "A13" and not supplier.get("is_inspection", False):
                 entry["status"] = "skip"
                 entry["detail"] = "非检验检测类供应商，不需要检验检测资质"
@@ -1062,6 +1058,7 @@ def determine_supplier_rules(supplier, cfg):
     type_rules = []
     type_label = ""
 
+    # 9/5 改造：先用 ICCEC 系统 sup_type_name 匹配，匹配不上时按经营范围交叉验证
     if "厂家" in sup_type_name or "生产商" in sup_type_name or "制造商" in sup_type_name:
         if is_foreign:
             type_rules = part2.get("overseas_manufacturer", [])
@@ -1077,6 +1074,16 @@ def determine_supplier_rules(supplier, cfg):
             type_rules = part2.get("domestic_trader", [])
             type_label = "境内贸易商"
 
+    all_rules = basic_rules
+    # 9/5 改造：sup_type_name="其他"时按经营范围交叉验证推断类目
+    if not type_label and not is_foreign:
+        busi = (supplier.get("busi_scope") or "") + " " + (supplier.get("supTypeName") or "")
+        if any(k in busi for k in ("销售", "批发", "零售", "贸易", "经销", "代理")):
+            type_rules = part2.get("domestic_trader", [])
+            type_label = "境内贸易商（推断自经营范围）"
+        elif any(k in busi for k in ("生产", "制造", "加工")):
+            type_rules = part2.get("domestic_manufacturer", [])
+            type_label = "境内厂家（推断自经营范围）"
     all_rules = basic_rules + type_rules
     return all_rules, f"{region_label}{'·' + type_label if type_label else ''}"
 
