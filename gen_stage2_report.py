@@ -70,38 +70,39 @@ def render_supplier(tid, s2, textin, cache):
 
     dl = DECISION_LABEL.get(decision, ("转人工","#fef7e0","#8a6d00"))
 
-    # 文件下载情况
+    # ---- 9/5 改造：一个大表整合核查清单 + OCR + 企查查 ----
     cache_entry = cache.get(tid, {})
     mdetail = cache_entry.get("materials_detail", [])
+    uploaded_types = set()
+    file_names = {}  # doc_type → fileName
+    for d in mdetail:
+        for t in (d.get("types") or []):
+            uploaded_types.add(t)
+            file_names.setdefault(t, d.get("fileName", ""))
+
+    # 已上传文件清单（简洁）
     files_html = ""
     if mdetail:
         files_html = "<ul>" + "".join(
-            f"<li>{esc(d.get('fileName',''))} <span style='color:#5f6368'>"
+            f"<li>{esc(d.get('fileName',''))} "
+            f"<span style='color:#5f6368;font-size:11px'>"
             f"[{', '.join(d.get('types') or ['未分类'])}]</span></li>"
             for d in mdetail
         ) + "</ul>"
     else:
-        files_html = "<span style='color:#a52834'>缓存无数据</span>"
+        files_html = "<span style='color:#a52834'>缓存无文件数据</span>"
 
-    # 缺失文件清单：对比 checklist 应有材料 vs 已上传 types
-    # 已上传材料的 doc_type 集合
-    uploaded_types = set()
-    for d in mdetail:
-        for t in (d.get("types") or []):
-            uploaded_types.add(t)
+    # 缺失文件清单
     missing_rows = ""
     if checklist:
         miss_items = []
         for c in checklist:
             cid = c.get("id", "")
-            st = c.get("status", "")
-            # skip 项不报缺失（不适用）
-            if st == "skip":
+            if c.get("status") == "skip":
                 continue
             need = CL_ID_TO_DOC_TYPE.get(cid)
             if not need:
                 continue
-            # A07 售后只对厂家必查；规则层若 status=skip 表示该供应商非厂家，跳过
             for doc_type, label in need:
                 if doc_type not in uploaded_types:
                     miss_items.append((cid, c.get("name", ""), label))
@@ -117,129 +118,89 @@ def render_supplier(tid, s2, textin, cache):
             )
         else:
             missing_rows = "<div style='color:#1e7e34'>无缺失（应有材料已全部上传）</div>"
-
-    # TextIn OCR 各材料结论
-    t_data = textin.get(tid, {})
-    ocr_html = ""
-    if t_data:
-        ocr_rows = ""
-        for doc_type, info in t_data.items():
-            if not isinstance(info, dict):
-                continue
-            iss = info.get("issues") or []
-            checks = info.get("checks") or {}
-            fields = info.get("fields") or {}
-            mark = "✓" if not iss else "✗"
-            color = "#1e7e34" if not iss else "#a52834"
-            field_str = " ".join(f"{k}={v}" for k,v in fields.items())[:200]
-            check_str = " ".join(f"{k}:{'✓' if v else '✗'}" for k,v in checks.items())
-            iss_str = "; ".join(iss) if iss else "通过"
-            ocr_rows += (
-                f"<tr><td style='color:{color};font-weight:bold'>{mark}</td>"
-                f"<td>{esc(doc_type)}</td><td style='font-size:13px;color:#5f6368'>{esc(field_str)}</td>"
-                f"<td style='font-size:13px'>{esc(check_str)}</td>"
-                f"<td style='color:{color}'>{esc(iss_str)}</td></tr>"
-            )
-        if ocr_rows:
-            ocr_html = (
-                "<table class='sub'><tr><th></th><th>材料</th>"
-                "<th>抽取字段</th><th>核验</th><th>结论</th></tr>"
-                + ocr_rows + "</table>"
-            )
     else:
-        ocr_html = "<div class='warn'>⚠ 该供应商文件无法下载（待办已关闭）或尚未跑 TextIn，仅规则层面初判</div>"
+        missing_rows = "<div style='color:#5f6368'>无 checklist 数据</div>"
 
-    # checklist 行
-    cl_rows = ""
+    # TextIn OCR 抽取（按材料类）
+    t_data = textin.get(tid, {}) or {}
+
+    # 构建"大表"主体行
+    big_rows = ""
     for c in checklist:
-        st = c.get("status","")
-        mark, bg, color = STATUS_MARK.get(st, ("?","#fef7e0","#8a6d00"))
-        cl_rows += (
+        cid = c.get("id", "")
+        cname = c.get("name", "")
+        st = c.get("status", "")
+        mark, bg, color = STATUS_MARK.get(st, ("?", "#fef7e0", "#8a6d00"))
+        detail = c.get("detail") or c.get("message") or ""
+
+        # 材料状态：脱敏 + OCR
+        need = CL_ID_TO_DOC_TYPE.get(cid, [])
+        # 整合所需材料类型的脱敏状态
+        mat_status_parts = []
+        ocr_findings = []   # 本项对应的 OCR 抽取结果
+        for doc_type, label in need:
+            if doc_type in uploaded_types:
+                # 脱敏状态
+                if doc_type in ("legal_person_id", "financial_report"):
+                    desens = "✓已脱敏"
+                else:
+                    desens = "原样"
+                # OCR 状态
+                td = t_data.get(doc_type) if isinstance(t_data, dict) else None
+                if td and not td.get("_deprecated"):
+                    fields = td.get("fields") or {}
+                    checks = td.get("checks") or {}
+                    if fields or checks:
+                        fld = ", ".join(f"{k}={v}" for k, v in list(fields.items())[:2])[:80]
+                        ocr_findings.append(f"<span style='font-size:12px'>{fld}</span>")
+                elif td and td.get("_deprecated"):
+                    desens += "+OCR禁用"
+                else:
+                    desens += "+未OCR"
+                mat_status_parts.append(f"<span style='font-size:12px;color:#5f6368'>"
+                                        f"{label}：{desens}</span>")
+        mat_status = "<br>".join(mat_status_parts) if mat_status_parts else \
+                     "<span style='color:#a52834'>材料未上传</span>"
+
+        # 企查查结果（如果 checklist 项是 qichacha check_type）
+        qcc_extra = ""
+        if cid == "A08" and "A08 财报" in str(q_issues):
+            qcc_extra = "<div style='margin-top:4px;font-size:12px;color:#8a6d00'>"
+            qcc_extra += "企查查：" + next((x for x in q_issues if "A08" in x), "")
+            qcc_extra += "</div>"
+
+        big_rows += (
             f"<tr style='background:{bg}'>"
-            f"<td style='color:{color};font-weight:bold;font-size:16px'>{mark}</td>"
-            f"<td>{esc(c.get('id',''))}</td><td>{esc(c.get('name',''))}</td>"
-            f"<td style='font-size:13px'>{esc(c.get('message',''))}</td></tr>"
+            f"<td style='color:{color};font-weight:bold;font-size:16px;text-align:center'>{mark}</td>"
+            f"<td>{esc(cid)}</td>"
+            f"<td>{esc(cname)}</td>"
+            f"<td style='font-size:13px'>{esc(detail)}</td>"
+            f"<td>{mat_status}{qcc_extra}</td>"
+            f"</tr>"
         )
 
-    # textin_issues
-    ti_html = ""
-    if t_issues:
-        ti_html = "<ul style='color:#a52834'>" + "".join(
-            f"<li>{esc(x)}</li>" for x in t_issues
-        ) + "</ul>"
+    # 缺失文件也加一行（状态 fail）
+    if missing_rows and "未上传" in missing_rows:
+        for cid, cname, label in []:  # 已在 checklist 中体现，单独行会增加冗余
+            pass
 
-    # === 审批意见：结构化表格 + 纯文本（可复制粘贴）===
-    # 纯文本意见（复用 gen_opinion，可粘贴进 ICCEC 审批框）
+    big_table = (
+        "<table class='big-table'>"
+        "<tr>"
+        "<th style='width:40px'></th>"
+        "<th style='width:60px'>编号</th>"
+        "<th style='width:140px'>项目</th>"
+        "<th>说明 / 决策依据</th>"
+        "<th style='width:280px'>材料状态（脱敏 + OCR）</th>"
+        "</tr>"
+        + big_rows + "</table>"
+    )
+
+    # 纯文本意见（复用 gen_opinion）
     try:
         plain_opinion = gen_opinion.build_opinion(tid, s2, textin, cache)
     except Exception:
-        plain_opinion = opinion  # fallback 到 stage2 自带 opinion
-
-    # 结构化表格行：按 status 分类（硬伤→核验→通过→不适用）
-    seq = 0
-    opinion_table_rows = ""
-
-    # 1. 须退回补材料/整改（fail 且含硬伤关键词）
-    for c in checklist:
-        if c.get("status") != "fail":
-            continue
-        desc = c.get("detail") or c.get("message") or ""
-        if gen_opinion._is_hard_fail(desc):
-            seq += 1
-            opinion_table_rows += (
-                f"<tr style='background:#fce8e6'>"
-                f"<td style='font-weight:bold'>{seq}</td>"
-                f"<td>[{esc(c.get('id',''))}] {esc(c.get('name',''))}</td>"
-                f"<td style='color:#a52834;font-weight:bold'>✗ 退回</td>"
-                f"<td style='font-size:13px'>{esc(desc)}</td></tr>"
-            )
-    # 2. 需人工核验（pending/partial/manual + 软 fail）
-    for c in checklist:
-        st = c.get("status")
-        if st in ("pending", "partial", "manual"):
-            seq += 1
-            desc = c.get("message") or c.get("detail") or "需人工核验"
-            opinion_table_rows += (
-                f"<tr style='background:#fef7e0'>"
-                f"<td style='font-weight:bold'>{seq}</td>"
-                f"<td>[{esc(c.get('id',''))}] {esc(c.get('name',''))}</td>"
-                f"<td style='color:#8a6d00;font-weight:bold'>? 核验</td>"
-                f"<td style='font-size:13px'>{esc(desc)}</td></tr>"
-            )
-    # 3. 核验通过
-    for c in checklist:
-        if c.get("status") == "pass":
-            seq += 1
-            desc = c.get("detail") or c.get("message") or "通过"
-            # 截断过长描述
-            if len(desc) > 120:
-                desc = desc[:117] + "..."
-            opinion_table_rows += (
-                f"<tr style='background:#e6f4ea'>"
-                f"<td style='font-weight:bold'>{seq}</td>"
-                f"<td>[{esc(c.get('id',''))}] {esc(c.get('name',''))}</td>"
-                f"<td style='color:#1e7e34;font-weight:bold'>✓ 通过</td>"
-                f"<td style='font-size:13px'>{esc(desc)}</td></tr>"
-            )
-    # 4. 不适用
-    for c in checklist:
-        if c.get("status") == "skip":
-            opinion_table_rows += (
-                f"<tr style='background:#f1f3f4'>"
-                f"<td style='color:#5f6368'>—</td>"
-                f"<td>[{esc(c.get('id',''))}] {esc(c.get('name',''))}</td>"
-                f"<td style='color:#5f6368'>— 不适用</td>"
-                f"<td style='font-size:13px;color:#5f6368'>{esc(c.get('detail','') or c.get('message',''))}</td></tr>"
-            )
-
-    opinion_table = (
-        "<table class='opinion-table'>"
-        "<tr><th style='width:40px'>序号</th>"
-        "<th style='width:180px'>审核项</th>"
-        "<th style='width:80px'>状态</th>"
-        "<th>说明</th></tr>"
-        + opinion_table_rows + "</table>"
-    )
+        plain_opinion = opinion
 
     return f"""
     <div class="card">
@@ -248,32 +209,22 @@ def render_supplier(tid, s2, textin, cache):
         <span class="meta">#{esc(tid)} ｜ {esc(bill)} ｜ {esc(tdesc)}</span>
         <span class="decision" style="background:{dl[1]};color:{dl[2]}">{dl[0]}</span>
       </div>
-      <div class="grid">
-        <div>
-          <h3>核查清单</h3>
-          <table><tr><th></th><th>编号</th><th>项目</th><th>说明</th></tr>{cl_rows}</table>
-        </div>
-        <div>
-          <h3>TextIn OCR 材料核验</h3>
-          {ocr_html}
-        </div>
-      </div>
+      <h3 style="margin:16px 20px 8px">综合核验表（核查清单 + 材料状态 + OCR/企查查）</h3>
+      <div style="padding:0 20px">{big_table}</div>
       <div class="grid">
         <div>
           <h3>已上传文件</h3>
           {files_html}
         </div>
         <div>
-          <h3>缺失文件（应传未传）</h3>
-          {missing_rows if missing_rows else "<div style='color:#5f6368'>无法判定（缓存无数据）</div>"}
+          <h3>缺失材料</h3>
+          {missing_rows}
         </div>
       </div>
-      <h3 style="margin:16px 20px 0">OCR 发现的问题</h3>
-      <div style="padding:0 20px">{ti_html if ti_html else "<span style='color:#1e7e34'>无</span>"}</div>
-      <h3 style="margin:16px 20px 0">审批意见（结构化表格）</h3>
-      <div style="padding:8px 20px">{opinion_table}</div>
       <details style="margin:8px 20px 16px">
-        <summary style="cursor:pointer;color:#1a73e8;font-size:14px;padding:8px 0">📋 点击展开纯文本审批意见（可复制粘贴进 ICCEC 审批框）</summary>
+        <summary style="cursor:pointer;color:#1a73e8;font-size:14px;padding:8px 0">
+          📋 点击展开纯文本审批意见（可复制粘贴进 ICCEC 审批框）
+        </summary>
         <pre class="opinion" style="margin:8px 0">{esc(plain_opinion)}</pre>
       </details>
     </div>

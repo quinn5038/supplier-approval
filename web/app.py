@@ -201,42 +201,47 @@ async def index(request: Request):
 
 @app.get("/api/todos")
 async def api_todos():
-    """AJAX：拉取待办列表"""
+    """AJAX：拉取待办列表（2026-09-05 加重试防偶发 ConnectionResetError）"""
     try:
         import auto_approve
     except Exception as e:
         return JSONResponse({"error": "module_load_failed", "msg": f"auto_approve 模块加载失败：{e}"}, status_code=500)
-    try:
-        result = auto_approve.fetch_pending_todos()
-        data = result.get("data", {})
-        rows = data.get("rows", []) if isinstance(data, dict) else []
-        total = data.get("recordsTotal", 0) if isinstance(data, dict) else 0
-        items = []
-        for r in rows:
-            # 标题格式："供应商名/统一社会信用代码"，去掉后缀只取供应商名
-            raw_title = r.get("title") or r.get("applyUnitName") or r.get("applyUserName") or ""
-            supplier_name = raw_title.split("/")[0].strip() if raw_title else ""
-            # 申请时间格式化（原始 "2026-09-04 12:28:55" → "09-04 12:28"）
-            raw_time = r.get("applyTime") or r.get("createTime") or ""
-            apply_time_short = ""
-            if raw_time and len(raw_time) >= 16:
-                apply_time_short = raw_time[5:16]  # "09-04 12:28"
-            items.append({
-                "todoId": r.get("id") or r.get("todoId"),
-                "name": supplier_name,
-                "billName": r.get("businessBillName") or "",
-                "billType": r.get("businessBillType") or "",
-                "applyTime": raw_time,
-                "applyTimeShort": apply_time_short,
-            })
-        return {"total": total, "count": len(items), "items": items}
-    except auto_approve.SessionExpiredError as e:
-        return JSONResponse({"error": "cookie_expired", "msg": str(e)}, status_code=401)
-    except Exception as e:
-        err = str(e)
-        if "code" in err and "111" in err:
-            return JSONResponse({"error": "cookie_expired", "msg": "Cookie 已过期"}, status_code=401)
-        return JSONResponse({"error": "fetch_failed", "msg": err[:500]}, status_code=500)
+    # 单次尝试 + 失败重试（Connection 类错误自动 5 秒后重试一次）
+    for attempt in (1, 2):
+        try:
+            result = auto_approve.fetch_pending_todos()
+            data = result.get("data", {})
+            rows = data.get("rows", []) if isinstance(data, dict) else []
+            total = data.get("recordsTotal", 0) if isinstance(data, dict) else 0
+            items = []
+            for r in rows:
+                raw_title = r.get("title") or r.get("applyUnitName") or r.get("applyUserName") or ""
+                supplier_name = raw_title.split("/")[0].strip() if raw_title else ""
+                raw_time = r.get("applyTime") or r.get("createTime") or ""
+                apply_time_short = raw_time[5:16] if raw_time and len(raw_time) >= 16 else ""
+                items.append({
+                    "todoId": r.get("id") or r.get("todoId"),
+                    "name": supplier_name,
+                    "billName": r.get("businessBillName") or "",
+                    "billType": r.get("businessBillType") or "",
+                    "applyTime": raw_time,
+                    "applyTimeShort": apply_time_short,
+                })
+            return {"total": total, "count": len(items), "items": items}
+        except auto_approve.SessionExpiredError as e:
+            return JSONResponse({"error": "cookie_expired", "msg": str(e)}, status_code=401)
+        except Exception as e:
+            err = str(e)
+            if attempt == 1 and ("Connection" in err or "10054" in err or "aborted" in err.lower()):
+                log.warning(f"[/api/todos] 偶发连接错误，5秒后重试: {err[:200]}")
+                import time
+                time.sleep(5)
+                continue
+            if "code" in err and "111" in err:
+                return JSONResponse({"error": "cookie_expired", "msg": "Cookie 已过期"}, status_code=401)
+            return JSONResponse({"error": "fetch_failed", "msg": err[:500]}, status_code=500)
+    # 重试仍失败
+    return JSONResponse({"error": "fetch_failed", "msg": "重试后仍失败，请稍后再试"}, status_code=500)
 
 
 @app.get("/approve/{todo_id}", response_class=HTMLResponse)
