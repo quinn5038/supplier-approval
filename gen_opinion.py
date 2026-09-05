@@ -218,72 +218,12 @@ def build_opinion(tid, s2, textin, cache):
         suggest_action = "同意"
         suggest_reason = "所有审核项均通过"
 
-    # ---- 拼接意见文本 ----
+    # ---- 9/5 改造：只输出"五、退回内容"紧凑格式（单行分号分隔，无换行）----
     lines = []
     today = date.today().strftime("%Y年%m月%d日")
-    lines.append(f"经审核，{name}{brief}：")
-    lines.append("")
 
-    # 动态段落编号：每次取下一个中文数字
-    state = {"idx": 0}
-
-    def take_sec():
-        i = state["idx"]
-        state["idx"] += 1
-        return _CN_NUM[i] if i < len(_CN_NUM) else str(i + 1)
-
-    # 一、须退回补材料/整改（硬伤）
+    # 决策 1：退回（紧凑）
     if hard_fails:
-        lines.append(f"{take_sec()}、须退回补材料/整改（以下为客观不符项）：")
-        for i, (cid, cname, desc) in enumerate(hard_fails, 1):
-            desc = _strip_dup_prefix(cname, desc)
-            lines.append(f"  {i}. [{cid}] {cname}：{desc}")
-        lines.append("")
-
-    # 二、需人工核验（软 fail + pending）
-    soft_pending = []
-    for c in pending_items:
-        cid = c.get("id", "")
-        cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
-        msg = c.get("message") or c.get("detail") or "需人工核验"
-        msg = _strip_dup_prefix(cname, msg)
-        soft_pending.append((cid, cname, msg))
-    soft_pending.extend([(c, n, _strip_dup_prefix(n, d)) for c, n, d in soft_fails])
-
-    if soft_pending:
-        lines.append(f"{take_sec()}、需人工核验事项：")
-        for i, (cid, cname, desc) in enumerate(soft_pending, 1):
-            lines.append(f"  {i}. [{cid}] {cname}：{desc}")
-        lines.append("")
-
-    # 三、核验通过项
-    if pass_items:
-        lines.append(f"{take_sec()}、核验通过项：")
-        for c in pass_items:
-            cid = c.get("id", "")
-            cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
-            summary = _build_pass_summary(c, textin_for_doc)
-            lines.append(f"  - [{cid}] {cname}：{summary}")
-        lines.append("")
-
-    # 四、不适用项（简略）
-    if skip_items:
-        skip_names = "、".join(c.get("name", c.get("id", ""))
-                              for c in skip_items)
-        lines.append(f"{take_sec()}、不适用项：{skip_names}")
-        lines.append("")
-
-    # 五、企查查发现
-    if q_issues:
-        lines.append(f"{take_sec()}、企查查核验发现：")
-        for i, q in enumerate(q_issues, 1):
-            lines.append(f"  {i}. {q}")
-        lines.append("")
-
-    # 最终建议（具体审批意见格式，9/3 要求）
-    lines.append(f"{take_sec()}、审批意见")
-    if suggest_action == "退回":
-        # 按材料类别汇总应补材料，ISO 三项合并为一条
         supplement_items = []
         seen_iso = False
         for cid, cname, desc in hard_fails:
@@ -295,33 +235,33 @@ def build_opinion(tid, s2, textin, cache):
             tmpl = SUPPLEMENT_TEMPLATES.get(cid)
             if tmpl:
                 supplement_items.append((cid, tmpl))
-        # 去重保序（同一 cid 只保留一条）
         seen = set()
         dedup = []
         for cid, txt in supplement_items:
             if cid not in seen:
                 seen.add(cid)
                 dedup.append(txt)
-        lines.append("退回。")
         if dedup:
-            lines.append("请补充资质文件：")
-            for i, item in enumerate(dedup, 1):
-                lines.append(f"  {i}. {item}")
-            lines.append("补充后重新提交。")
+            items_str = "；".join(f"{i+1}. {x}" for i, x in enumerate(dedup))
+            lines.append(f"退回。请补充资质文件：{items_str}。补充后重新提交。")
         else:
-            lines.append("请整改后重新提交。")
-    elif suggest_action == "转人工":
-        lines.append("转人工。")
-        if soft_pending:
-            lines.append("需核验：")
-            for i, (cid, cname, desc) in enumerate(soft_pending, 1):
-                lines.append(f"  {i}. {cname}：{desc}")
-            lines.append("核验通过后决定。")
+            lines.append("退回。具体见上方审查报告。")
+    # 决策 2：转人工（紧凑）
+    elif soft_pending or pending_items:
+        reasons = []
+        for cid, cname, msg in soft_pending:
+            reasons.append(f"[{cid}]{cname}：{msg}")
+        if not reasons:
+            reasons.append("部分审核项需人工核验")
+        lines.append("转人工。" + "；".join(reasons))
+    # 决策 3：同意
     else:
-        lines.append("同意。")
-        lines.append("（建议人工最终确认后正式准入）")
+        lines.append("同意。各项审核均通过，建议后续常规管理。")
 
-    lines.append("")
+    # 企查查额外项追加到末尾（行内顿号分隔）
+    if q_issues:
+        lines.append(" 另经企查查核验：" + "；".join(q_issues))
+
     lines.append(f"（自动生成于 {today}，依据《中港采购发〔2025〕161号》准入审查规则）")
     return "\n".join(lines)
 
