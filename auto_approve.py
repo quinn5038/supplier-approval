@@ -1921,8 +1921,14 @@ def run_stage2():
         key = supplier.get("social_credit_code") or ""
         q = qcc.get(key) or qcc.get(supplier.get("name", "")) \
             or qcc.get(todo.get("applyUnitName", ""))
+        # 2026-09-05 修复（Quinn 反馈）：无企查查数据不再整体跳过——
+        # 以空数据继续跑规则引擎，材料齐全性检查照常，企查查相关核验项
+        # 自然落入"待人工核验"。这样每家供应商都有审批结果（决策），
+        # 而不是 no_result。
         if not q:
-            continue
+            q = {}
+            log.info(f"[阶段2] {todo.get('applyUnitName') or supplier.get('name')}"
+                     f" 无企查查数据，仅按材料+规则出结果（企查查项转人工）")
 
         applicable_rules, type_desc = determine_supplier_rules(supplier, cfg)
         checklist, auto_failed, missing, verify_items = build_checklist(
