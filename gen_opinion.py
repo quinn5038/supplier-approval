@@ -227,10 +227,24 @@ def build_opinion(tid, s2, textin, cache):
         supplement_items = []
         seen_iso = False
         for cid, cname, desc in hard_fails:
-            if cid in ("C1_02", "C1_03", "C1_04"):
+            # ISO 三认证合并为一条（不论 C1 还是 D1）
+            if cid in ("C1_02", "C1_03", "C1_04", "D1_03", "D1_04", "D1_05"):
                 if not seen_iso:
-                    supplement_items.append(("ISO", SUPPLEMENT_TEMPLATES["C1_02"]))
+                    iso_label = SUPPLEMENT_TEMPLATES.get("D1_03") or SUPPLEMENT_TEMPLATES["C1_02"]
+                    supplement_items.append(("ISO", iso_label))
                     seen_iso = True
+                continue
+            # 经销授权（D-1 适用）
+            if cid == "D1_06":
+                tmpl = SUPPLEMENT_TEMPLATES.get("D1_06") or SUPPLEMENT_TEMPLATES.get("authorization")
+                if tmpl:
+                    supplement_items.append(("D1_06", tmpl))
+                continue
+            # 售后服务（A07：贸易商也需要，9/5 改造）
+            if cid == "A07":
+                tmpl = SUPPLEMENT_TEMPLATES.get("A07") or SUPPLEMENT_TEMPLATES.get("after_sales")
+                if tmpl:
+                    supplement_items.append(("A07", tmpl))
                 continue
             tmpl = SUPPLEMENT_TEMPLATES.get(cid)
             if tmpl:
@@ -258,11 +272,7 @@ def build_opinion(tid, s2, textin, cache):
     else:
         lines.append("同意。各项审核均通过，建议后续常规管理。")
 
-    # 企查查额外项追加到末尾（行内顿号分隔）
-    if q_issues:
-        lines.append(" 另经企查查核验：" + "；".join(q_issues))
-
-    lines.append(f"（自动生成于 {today}，依据《中港采购发〔2025〕161号》准入审查规则）")
+    # 9/5 改造：去掉末尾的"另经企查查核验..."——这是给审核员看的，不给供应商
     return "\n".join(lines)
 
 
