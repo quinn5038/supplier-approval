@@ -52,12 +52,19 @@
         <div class="modal">
             <h3>更新 Cookie</h3>
             <div class="hint">
-                1. 浏览器打开 scpma.iccec.cn 并确认已登录<br>
-                2. F12 → Network → 任选一个请求 → 复制请求头里的 Cookie 值<br>
-                3. 粘贴到下方输入框（可选填 Authorization 令牌）
+                <b>操作步骤</b>（浏览器先登录 <code>scpma.iccec.cn</code>，看到任意待办列表即可）：<br>
+                ① F12 打开 DevTools → ② 切到 <b>Network</b> 选项卡 → ③ 点击页面上任意待办触发请求<br>
+                ④ 在左侧请求列表选一个 <code>scpma.iccec.cn/apis/...</code> 请求 → ⑤ 点 <b>Headers</b><br>
+                ⑥ 滚动找到 <b>Cookie</b> 和 <b>Authorization</b>，分别复制下面两个值<br>
+                <span style="color:var(--color-danger); font-size:12px;">
+                ⚠ Cookie 和 Authorization 两个都需要填，只填一个会导致 scpma 域接口返回 111
+                </span><br>
+                <span style="color:var(--color-text-muted); font-size:11px;">
+                提示：Cookie 整段很长（如 <code>DSESSIONID=...; access_token=...; _c_WBKFRo=...</code>），全部粘过来即可
+                </span>
             </div>
-            <textarea id="cookie-input" placeholder="粘贴 Cookie 字符串（key1=val1; key2=val2; ...）"></textarea>
-            <textarea id="auth-input" placeholder="（可选）粘贴 Authorization 令牌" style="margin-top:8px; min-height:60px;"></textarea>
+            <textarea id="cookie-input" placeholder="粘贴 Cookie 整段（含 DSESSIONID/access_token/_c_WBKFRo 等所有字段）" style="min-height:80px;"></textarea>
+            <textarea id="auth-input" placeholder="粘贴 Authorization 头（如 Bearer xxx，scpma 域必须填）" style="margin-top:8px; min-height:60px;"></textarea>
             <div class="actions">
                 <button class="btn btn-outline" onclick="closeCookieModal()">取消</button>
                 <button class="btn btn-primary" id="save-cookie-btn" onclick="saveCookie()">保存</button>
@@ -129,9 +136,22 @@
                     </div>
                     <div class="col-time">${esc(it.applyTimeShort) || '-'}</div>
                     <div class="col-action">
-                        <button class="btn btn-primary" id="btn-${esc(it.todoId)}"
-                                onclick="startApprove('${esc(it.todoId)}')">后台审批</button>
-                        <div class="fail-reason" id="fail-${esc(it.todoId)}"></div>
+                        <div class="action-stack">
+                            <button class="btn btn-primary" id="btn-${esc(it.todoId)}"
+                                    onclick="startApprove('${esc(it.todoId)}')">后台审批</button>
+                            <div class="progress-widget" id="widget-${esc(it.todoId)}" style="display:none">
+                                <svg class="progress-ring" viewBox="0 0 36 36">
+                                    <circle class="ring-bg" cx="18" cy="18" r="15.5"/>
+                                    <circle class="ring-fg" id="ring-${esc(it.todoId)}" cx="18" cy="18" r="15.5"
+                                            stroke-dasharray="0 100" />
+                                </svg>
+                                <div class="progress-info">
+                                    <span class="progress-pct" id="pct-${esc(it.todoId)}">0%</span>
+                                    <span class="progress-step" id="step-${esc(it.todoId)}">处理中</span>
+                                </div>
+                            </div>
+                            <div class="fail-reason" id="fail-${esc(it.todoId)}"></div>
+                        </div>
                     </div>
                 </div>
             `).join('');
@@ -144,8 +164,7 @@
             clearFailReason(todoId);
             btn.disabled = true;
             btn.classList.remove('btn-error');
-            btn.classList.add('btn-running');
-            btn.innerHTML = '<span class="btn-spinner"></span>审批中';
+            showProgressWidget(todoId, 0, '处理中…');
             btn.title = '后台处理中，可继续浏览其他供应商';
             try {
                 const r = await fetch('/api/approve/' + todoId, { method: 'POST' });
@@ -178,12 +197,7 @@
                     if (!btn) continue;   // 该行不在当前列表（翻页/已处理）
                     if (st.status === 'running') {
                         hasRunning = true;
-                        if (!btn.classList.contains('btn-running')) {
-                            btn.disabled = true;
-                            btn.classList.add('btn-running');
-                            btn.innerHTML = '<span class="btn-spinner"></span>审批中';
-                        }
-                        btn.title = st.step || '处理中';
+                        updateProgressUI(todoId, st.progress || 0, st.step || '处理中');
                     } else if (st.status === 'done') {
                         setBtnDone(tid);
                     } else if (st.status === 'error') {
@@ -205,6 +219,9 @@
             btn.outerHTML =
                 `<a href="/approve/${esc(todoId)}${name ? '?name=' + encodeURIComponent(name) : ''}"
                     class="btn btn-done">查看审批结果</a>`;
+            // 隐藏进度 widget
+            const w = document.getElementById('widget-' + todoId);
+            if (w) w.style.display = 'none';
         }
 
         function setBtnError(todoId, msg) {
@@ -214,6 +231,33 @@
             btn.classList.remove('btn-running');
             btn.classList.add('btn-error');
             btn.textContent = msg || '失败·点击重试';
+            // 隐藏进度 widget
+            const w = document.getElementById('widget-' + todoId);
+            if (w) w.style.display = 'none';
+        }
+
+        // 进度 widget：SVG 圆环 + 百分比 + 步骤文字
+        function showProgressWidget(todoId, pct, stepText) {
+            const btn = document.getElementById('btn-' + todoId);
+            const w = document.getElementById('widget-' + todoId);
+            if (btn) btn.style.display = 'none';
+            if (!w) return;
+            w.style.display = 'flex';
+            updateProgressUI(todoId, pct, stepText);
+        }
+
+        function updateProgressUI(todoId, pct, stepText) {
+            const ring = document.getElementById('ring-' + todoId);
+            const pctEl = document.getElementById('pct-' + todoId);
+            const stepEl = document.getElementById('step-' + todoId);
+            if (ring) {
+                // 圆周长 = 2πr = 2π*15.5 ≈ 97.39
+                const c = 2 * Math.PI * 15.5;
+                const dashLen = (Math.max(0, Math.min(100, pct)) / 100) * c;
+                ring.setAttribute('stroke-dasharray', `${dashLen} ${c}`);
+            }
+            if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+            if (stepEl && stepText) stepEl.textContent = stepText;
         }
 
         // 失败原因显示：按钮下方红字显示（截断），点击展开完整原因

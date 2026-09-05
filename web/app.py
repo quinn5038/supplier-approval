@@ -77,18 +77,22 @@ def _backup_env_and_write(new_cookie: str, new_auth: str = ""):
 
 def _run_pipeline_for_one(todo_id: str):
     """在后台线程中跑完整审批流水线（单家供应商）"""
-    def _update(step, status="running", error=None):
+    def _update(step, status="running", error=None, progress=None):
         with _task_lock:
+            prev = _task_status.get(todo_id, {})
+            # progress 未显式传时保留旧值（让同阶段的细分文案也能平滑刷新）
+            new_progress = progress if progress is not None else prev.get("progress", 0)
             _task_status[todo_id] = {
                 "step": step,
                 "status": status,
                 "error": error,
-                "started_at": _task_status.get(todo_id, {}).get("started_at", datetime.now().isoformat()),
+                "progress": new_progress,
+                "started_at": prev.get("started_at", datetime.now().isoformat()),
                 "updated_at": datetime.now().isoformat(),
             }
 
     try:
-        _update("正在拉取供应商数据（下载材料入缓存）...")
+        _update("正在拉取供应商数据（下载材料入缓存）...", progress=20)
         env = os.environ.copy()
         env["FETCH_ONLY"] = "true"
         env["FETCH_IDS"] = str(todo_id)
@@ -106,7 +110,7 @@ def _run_pipeline_for_one(todo_id: str):
             return
 
         # 2026-09-04 保密合规改造：下载完成后自动脱敏（与 textin_pipeline.py 集成一致）
-        _update("正在本地脱敏敏感材料（身份证/财报）...")
+        _update("正在本地脱敏敏感材料（身份证/财报）...", progress=40)
         try:
             from desensitize import desensitize_dir
             desensitize_dir(BASE_DIR / "files_cache" / str(todo_id),
@@ -116,7 +120,7 @@ def _run_pipeline_for_one(todo_id: str):
         except Exception as e:
             print(f"[desens] 脱敏失败（不阻塞流程）：{e}")
 
-        _update("正在 OCR 识别证件文件（TextIn）...")
+        _update("正在 OCR 识别证件文件（TextIn）...", progress=60)
         r2 = subprocess.run(
             [PYTHON_EXE, str(BASE_DIR / "textin_pipeline.py")],
             cwd=str(BASE_DIR), env=env,
@@ -126,7 +130,7 @@ def _run_pipeline_for_one(todo_id: str):
             _update("ocr_failed", status="error", error=f"OCR 失败（exit={r2.returncode}）：{r2.stderr[:500]}")
             return
 
-        _update("正在按规则判定合规性（stage2）...")
+        _update("正在按规则判定合规性（stage2）...", progress=80)
         r3 = subprocess.run(
             [PYTHON_EXE, str(BASE_DIR / "auto_approve.py"), "--stage2"],
             cwd=str(BASE_DIR), env=env,
@@ -136,7 +140,7 @@ def _run_pipeline_for_one(todo_id: str):
             _update("stage2_failed", status="error", error=f"规则判定失败（exit={r3.returncode}）：{r3.stderr[:500]}")
             return
 
-        _update("正在生成审查报告和审批意见...", status="running")
+        _update("正在生成审查报告和审批意见...", status="running", progress=95)
         # 验证结果是否存在
         stage2_path = BASE_DIR / "stage2_results.json"
         if not stage2_path.exists():
@@ -158,7 +162,7 @@ def _run_pipeline_for_one(todo_id: str):
                            "可先补拉该供应商的企查查数据后重试，或按人工流程处理。"))
             return
 
-        _update("完成", status="done")
+        _update("完成", status="done", progress=100)
     except subprocess.TimeoutExpired:
         _update("timeout", status="error", error="处理超时（>10分钟），请检查网络或重试")
     except Exception as e:
@@ -278,7 +282,9 @@ async def api_status(todo_id: str):
 async def api_status_all():
     """批量查询所有审批任务状态（首页恢复各行按钮状态用，只返回轻量字段）"""
     with _task_lock:
-        return {tid: {"status": st.get("status"), "step": st.get("step")}
+        return {tid: {"status": st.get("status"),
+                      "step": st.get("step"),
+                      "progress": st.get("progress", 0)}
                 for tid, st in _task_status.items()}
 
 
