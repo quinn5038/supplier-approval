@@ -203,7 +203,10 @@ body {
     stroke-linecap: round;
 }
 .progress-ring .ring-bg { stroke: #e3eaf3; }
-.progress-ring .ring-fg { stroke: var(--color-primary); transition: stroke-dasharray 0.4s ease; }
+.progress-ring .ring-fg {
+    stroke: #1e5fb0;  /* 9/5 修复：原 var(--color-primary) 在 SVG circle 上没匹配上显示黑色 */
+    transition: stroke-dasharray 0.4s ease;
+}
 .progress-info {
     display: flex;
     flex-direction: column;

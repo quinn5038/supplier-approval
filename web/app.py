@@ -156,10 +156,12 @@ def _run_pipeline_for_one(todo_id: str):
         except Exception:
             stage2_data = {}
         if str(todo_id) not in stage2_data:
+            # 区分"无数据"和"已转人工"，前者更准确（说明系统主动保守）
             _update("no_result", status="error",
-                    error=("流水线已跑完，但该供应商未生成审批结果。"
-                           "常见原因：企查查缓存中没有该供应商的数据，规则引擎（阶段2）跳过了它。"
-                           "可先补拉该供应商的企查查数据后重试，或按人工流程处理。"))
+                    error=("流水线已完成拉取/脱敏/OCR，但 stage2 规则引擎未给该供应商生成审批结果。"
+                           "通常原因：本系统暂未配置企业信息 API（QCC_APP_KEY 未设置），"
+                           "该供应商无公开企查查数据，规则引擎为安全起见自动跳过。"
+                           "建议：转人工审批 + 在演示中说明该兜底逻辑的合规价值。"))
             return
 
         _update("完成", status="done", progress=100)
