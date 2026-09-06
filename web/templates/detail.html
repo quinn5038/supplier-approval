@@ -28,11 +28,7 @@
             </div>
         </div>
 
-        <!-- 开始按钮 -->
-        <div id="start-area" style="text-align:center; padding:40px 20px;">
-            <p style="margin-bottom:20px; color:var(--color-text-muted);">点击下方按钮开始审批，系统将自动执行：<br>下载材料 → OCR 识别 → 规则判定 → 生成意见</p>
-            <button class="btn btn-success" style="padding:12px 36px; font-size:15px;" onclick="startApprove()">开始审批</button>
-        </div>
+        <!-- 启动审批入口在首页「后台审批」按钮，详情页仅展示结果与重新审批（9/6 移除重复引导） -->
 
         <!-- 报告区 -->
         <div id="report-area" style="display:none;">
@@ -54,11 +50,11 @@
             </div>
         </div>
 
-        <!-- 错误区 -->
+        <!-- 无审批结果 / 加载失败提示区（启动入口已上移至首页，详情页只展示结果） -->
         <div id="error-area" style="display:none;">
-            <div class="alert alert-danger" id="error-msg"></div>
+            <div class="alert alert-warning" id="error-msg"></div>
             <div style="text-align:center; margin-top:16px;">
-                <button class="btn btn-outline" onclick="location.reload()">重试</button>
+                <a href="/" class="btn btn-outline" style="text-decoration:none;">返回列表</a>
             </div>
         </div>
     </div>
@@ -67,26 +63,6 @@
         const TODO_ID = "{{ todo_id }}";
         let pollTimer = null;
         let opinionText = "";
-
-        // ===== 开始审批 =====
-        async function startApprove() {
-            const btn = event.target;
-            btn.disabled = true; btn.textContent = '已开始...';
-            try {
-                const r = await fetch('/api/approve/' + TODO_ID, { method: 'POST' });
-                if (r.status === 409) {
-                    alert('正在处理中，请勿重复点击');
-                    return;
-                }
-                const data = await r.json();
-                document.getElementById('start-area').style.display = 'none';
-                document.getElementById('progress-area').style.display = 'block';
-                pollStatus();
-            } catch (e) {
-                alert('网络错误：' + e.message);
-                btn.disabled = false; btn.textContent = '开始审批';
-            }
-        }
 
         // ===== 重新审批（供应商更新了材料时使用）=====
         async function reRunApprove() {
@@ -176,38 +152,28 @@
             });
         }
 
-        // 启动轮询（如果已经开始）
-        pollTimer = setInterval(pollStatus, 2000);
-        // 页面加载时：先查是否已有报告 → 再查是否在处理中
+        // 启动审批入口已上移至首页「后台审批」按钮，详情页只负责展示结果与重新审批
+        // 页面加载时：直接查是否已有报告
         (async function init() {
             try {
-                // 1. 先查是否已有审批结果
                 const rr = await fetch('/api/report/' + TODO_ID);
                 if (rr.ok) {
                     // 已有结果，直接展示
                     const data = await rr.json();
-                    document.getElementById('start-area').style.display = 'none';
                     document.getElementById('report-area').style.display = 'block';
                     document.getElementById('report-content').innerHTML = data.report_html || '<p>无报告内容</p>';
                     document.getElementById('opinion-content').textContent = data.opinion_text || '';
                     opinionText = data.opinion_text || '';
-                    clearInterval(pollTimer);  // 已有结果，停止轮询
                     return;
                 }
-                // 2. 查是否正在处理中
-                const sr = await fetch('/api/status/' + TODO_ID);
-                const sdata = await sr.json();
-                if (sdata.status === 'running') {
-                    document.getElementById('start-area').style.display = 'none';
-                    document.getElementById('progress-area').style.display = 'block';
-                } else if (sdata.status === 'error') {
-                    document.getElementById('start-area').style.display = 'none';
-                    document.getElementById('error-area').style.display = 'block';
-                    document.getElementById('error-msg').textContent = '⚠ ' + (sdata.error || '处理失败');
-                }
-                // 否则显示开始按钮（默认状态）
+                // 无结果（404 或渲染异常）：显示友好提示并提供返回入口
+                document.getElementById('error-area').style.display = 'block';
+                document.getElementById('error-msg').innerHTML =
+                    '该供应商暂无审批结果，请<a href="/" style="color:var(--color-primary);">返回列表</a>，点击对应行的「后台审批」按钮开始审批。';
             } catch (e) {
                 console.error('初始化检查失败:', e);
+                document.getElementById('error-area').style.display = 'block';
+                document.getElementById('error-msg').textContent = '⚠ 加载失败：' + e.message;
             }
         })();
     </script>

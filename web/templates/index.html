@@ -34,7 +34,7 @@
                 </div>
                 <div class="guide-step">
                     <span class="guide-num">3</span>
-                    <div><b>查看结果</b><br><span class="guide-desc">跑完后按钮变为蓝色「查看审批结果」，点击进入详情页看审查报告和审批意见</span></div>
+                    <div><b>查看结果</b><br><span class="guide-desc">跑完后按钮变为抹茶绿色「查看结果」，点击进入详情页看审查报告和审批意见</span></div>
                 </div>
             </div>
         </div>
@@ -138,7 +138,7 @@
                     <div class="col-action">
                         <div class="action-stack">
                             ${it.hasResult
-                                ? `<a href="/approve/${esc(it.todoId)}${it.name ? '?name=' + encodeURIComponent(it.name) : ''}" class="btn btn-done">查看审批结果</a>`
+                                ? `<a href="/approve/${esc(it.todoId)}${it.name ? '?name=' + encodeURIComponent(it.name) : ''}" class="btn btn-done">查看结果</a>`
                                 : `<button class="btn btn-primary" id="btn-${esc(it.todoId)}"
                                     onclick="startApprove('${esc(it.todoId)}')">后台审批</button>`}
                             <div class="progress-widget" id="widget-${esc(it.todoId)}" style="display:none">
@@ -232,7 +232,7 @@
             const name = nameById[todoId] || '';
             btn.outerHTML =
                 `<a href="/approve/${esc(todoId)}${name ? '?name=' + encodeURIComponent(name) : ''}"
-                    class="btn btn-done">查看审批结果</a>`;
+                    class="btn btn-done">查看结果</a>`;
             // 隐藏进度 widget
             const w = document.getElementById('widget-' + todoId);
             if (w) w.style.display = 'none';
