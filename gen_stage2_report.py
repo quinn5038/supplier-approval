@@ -166,10 +166,12 @@ def render_supplier(tid, s2, textin, cache):
             continue
         mark, bg, color = STATUS_MARK.get(st, ("?", "#fef7e0", "#8a6d00"))
         detail = c.get("detail") or c.get("message") or ""
+        # 9/6 新增：从 rules.yaml 读 check_type，区分「需上传材料」与「企查查核验」
+        check_type = _load_check_type(cid)
 
         need = CL_ID_TO_DOC_TYPE.get(cid, [])
         mat_status_parts = []
-        check_detail_parts = []  # 9/5 新增：核验结果列
+        check_detail_parts = []  # 核验结果列（material 类型：OCR 字段）
         for doc_type, label in need:
             if doc_type in uploaded_types:
                 if doc_type in ("legal_person_id", "financial_report"):
@@ -210,16 +212,31 @@ def render_supplier(tid, s2, textin, cache):
                     desens += "+未OCR"
                 mat_status_parts.append(f"<span style='font-size:12px;color:#5f6368'>"
                                         f"{label}：{desens}</span>")
-        mat_status = "<br>".join(mat_status_parts) if mat_status_parts else \
-                     "<span style='color:#a52834'>材料未上传</span>"
-        check_detail = "<br>".join(check_detail_parts) if check_detail_parts else \
-                       "<span style='color:#5f6368;font-size:12px'>无核验数据</span>"
+        # ---- 9/6 修复：材料状态列按 check_type 区分 ----
+        # material 类才需要供应商上传材料；qichacha/auto/skip 类不需要
+        if check_type and check_type != "material":
+            mat_status = "<span style='color:#5f6368;font-size:12px'>无需提交材料</span>"
+        elif mat_status_parts:
+            mat_status = "<br>".join(mat_status_parts)
+        else:
+            mat_status = "<span style='color:#a52834'>材料未上传</span>"
 
-        qcc_extra = ""
-        if cid == "A08" and any("A08" in q for q in q_issues):
-            qcc_extra = "<div style='margin-top:4px;font-size:12px;color:#8a6d00'>"
-            qcc_extra += "企查查：" + next((x for x in q_issues if "A08" in x), "")
-            qcc_extra += "</div>"
+        # ---- 9/6 修复：核验结果列按 check_type 区分 ----
+        # qichacha 类（A08 财报/A10 商业信誉）→ 显示企查查/天眼查核验结论（detail）
+        # material 类 → 显示 OCR 抽取字段
+        # auto/skip 类 → 显示规则判定结论（detail）或「无需核验」
+        if check_type == "qichacha":
+            check_detail = (esc(detail).replace("\n", "<br>")
+                            if detail
+                            else "<span style='color:#5f6368;font-size:12px'>无核验数据</span>")
+        elif check_type in ("auto", "skip"):
+            check_detail = (esc(detail).replace("\n", "<br>")
+                            if detail
+                            else "<span style='color:#5f6368;font-size:12px'>无需核验</span>")
+        else:  # material 或未识别
+            check_detail = ("<br>".join(check_detail_parts)
+                            if check_detail_parts
+                            else "<span style='color:#5f6368;font-size:12px'>无核验数据</span>")
 
         # 决策依据：9/5 改造为从 rules.yaml 读 requirement
         decision_basis = _load_decision_basis(cid, cname)
@@ -230,7 +247,7 @@ def render_supplier(tid, s2, textin, cache):
             f"<td>{esc(cid)}</td>"
             f"<td>{esc(cname)}</td>"
             f"<td style='font-size:13px'>{esc(decision_basis)}</td>"
-            f"<td>{mat_status}{qcc_extra}</td>"
+            f"<td>{mat_status}</td>"
             f"<td>{check_detail}</td>"
             f"</tr>"
         )
@@ -314,6 +331,43 @@ def _load_decision_basis(cid, cname_fallback):
     except Exception as e:
         print(f"[basis] 加载 rules.yaml 失败：{e}")
     return cname_fallback
+
+
+# 9/6 新增：从 rules.yaml 读对应编号规则的 check_type（material/qichacha/auto/skip）
+# 用于判断该核验项是否需要供应商上传材料（材料状态列）、以及核验结果列的展示方式
+def _load_check_type(cid):
+    """从 rules.yaml 读对应编号规则的 check_type。
+
+    加载后缓存到模块字典，避免每次重新 IO。
+    找不到时返回空字符串（调用方按 material 兜底）。
+    """
+    if not hasattr(_load_check_type, "_cache"):
+        _load_check_type._cache = {}
+    if cid in _load_check_type._cache:
+        return _load_check_type._cache[cid]
+    try:
+        import yaml
+        rules_path = Path(__file__).parent / "rules.yaml"
+        if rules_path.exists():
+            with open(rules_path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            for part in ("part_1_basic", "part_2_by_type", "part_3_special_categories"):
+                bucket = cfg.get(part) or {}
+                rules = []
+                if isinstance(bucket, dict):
+                    for v in bucket.values():
+                        if isinstance(v, list):
+                            rules.extend(v)
+                elif isinstance(bucket, list):
+                    rules.extend(bucket)
+                for r in rules:
+                    if isinstance(r, dict) and r.get("id") == cid:
+                        _load_check_type._cache[cid] = r.get("check_type") or ""
+                        return _load_check_type._cache[cid]
+    except Exception as e:
+        print(f"[check_type] 加载 rules.yaml 失败：{e}")
+    _load_check_type._cache[cid] = ""
+    return ""
 
 
 # 9/5 新增：决策依据静态文本（同类供应商固定不变，避免每次生成都不一样）
