@@ -199,11 +199,35 @@ def _run_pipeline_for_one(todo_id: str):
                            "建议：转人工审批 + 在演示中说明该兜底逻辑的合规价值。"))
             return
 
+        # 9/6：分流项（decision=skip，如境外/集团内供应商）不算有效审批结果，
+        # 标记为 skipped 而非 done，前端据此恢复「后台审批」按钮、不显示「查看结果」
+        entry = stage2_data.get(str(todo_id), {})
+        if entry.get("decision") == "skip":
+            _update("skipped", status="skipped", progress=100,
+                    error="该供应商为境外/集团内分流项，不适用标准审批流程，请转人工处理")
+            return
+
         _update("完成", status="done", progress=100)
     except subprocess.TimeoutExpired:
         _update("timeout", status="error", error="处理超时（>10分钟），请检查网络或重试")
     except Exception as e:
         _update("exception", status="error", error=str(e))
+
+
+def _has_valid_result(todo_id: str) -> bool:
+    """判断某供应商是否有「有效审批结果」（decision 为 reject/manual/approve）。
+
+    skip（境外/集团内分流不适用）不算有效结果——首页按钮与详情页据此保持一致，
+    避免出现"列表显示查看结果、点进去却提示无结果"的前后矛盾。
+    """
+    stage2_path = BASE_DIR / "stage2_results.json"
+    if not stage2_path.exists():
+        return False
+    try:
+        stage2 = json.loads(stage2_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return stage2.get(str(todo_id), {}).get("decision") in ("reject", "manual", "approve")
 
 
 def _load_stage2_for_todo(todo_id: str):
@@ -248,16 +272,8 @@ async def api_todos():
             data = result.get("data", {})
             rows = data.get("rows", []) if isinstance(data, dict) else []
             total = data.get("recordsTotal", 0) if isinstance(data, dict) else 0
-            # 9/6 修复：加载磁盘上已持久化的审批结果（stage2_results.json），
-            # 让首页按钮在服务重启后也能恢复为「查看审批结果」，不依赖内存状态
-            stage2_ids = set()
-            stage2_path = BASE_DIR / "stage2_results.json"
-            if stage2_path.exists():
-                try:
-                    stage2_ids = set(json.loads(stage2_path.read_text(encoding="utf-8")).keys())
-                except Exception:
-                    stage2_ids = set()
-
+            # 9/6 修复：hasResult 判断「有效审批结果」（decision 非 skip），
+            # 让首页按钮在服务重启后也能恢复，且与详情页判断一致
             items = []
             for r in rows:
                 raw_title = r.get("title") or r.get("applyUnitName") or r.get("applyUserName") or ""
@@ -272,7 +288,7 @@ async def api_todos():
                     "billType": r.get("businessBillType") or "",
                     "applyTime": raw_time,
                     "applyTimeShort": apply_time_short,
-                    "hasResult": str(todo_id) in stage2_ids,
+                    "hasResult": _has_valid_result(todo_id),
                 })
             return {"total": total, "count": len(items), "items": items}
         except auto_approve.SessionExpiredError as e:
@@ -346,8 +362,9 @@ async def api_status_all():
 async def api_report(todo_id: str):
     """返回审查报告 HTML 片段 + 审批意见纯文本"""
     s2, textin, cache = _load_stage2_for_todo(todo_id)
-    if not s2:
-        return JSONResponse({"error": "no_data", "msg": "该供应商暂无审批结果，请先点击审批按钮"}, status_code=404)
+    if not s2 or s2.get("decision") == "skip":
+        # skip（境外/集团内分流不适用）不算有效审批结果，与首页按钮判断一致
+        return JSONResponse({"error": "no_data", "msg": "该供应商暂无有效审批结果（分流不适用项），请返回列表点击后台审批"}, status_code=404)
 
     try:
         import gen_stage2_report
