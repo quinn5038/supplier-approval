@@ -132,9 +132,9 @@ body {
 }
 .btn.btn-running { background: var(--color-text-muted); cursor: default; }
 
-/* 审批完成：高亮"查看审批结果" */
+/* 审批完成：抹茶绿色"查看结果"按钮（区别于 .btn-success 的深青绿，避免与"同意"语义混淆） */
 .btn.btn-done {
-    background: var(--color-success);
+    background: #7cb342;
     color: #fff;
     display: inline-block;
     padding: 7px 16px;
@@ -142,12 +142,13 @@ body {
     font-size: 13px;
     font-weight: 600;
     text-decoration: none;
-    box-shadow: 0 0 0 3px var(--color-success-bg);
+    box-shadow: 0 0 0 3px #e8f5d8;
     animation: pulse-done 1.6s ease-in-out 2;
 }
+.btn.btn-done:hover { background: #689a35; }
 @keyframes pulse-done {
-    0%, 100% { box-shadow: 0 0 0 3px var(--color-success-bg); }
-    50% { box-shadow: 0 0 0 6px var(--color-success-bg); }
+    0%, 100% { box-shadow: 0 0 0 3px #e8f5d8; }
+    50% { box-shadow: 0 0 0 6px #e8f5d8; }
 }
 
 /* 审批失败 */
