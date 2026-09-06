@@ -248,19 +248,31 @@ async def api_todos():
             data = result.get("data", {})
             rows = data.get("rows", []) if isinstance(data, dict) else []
             total = data.get("recordsTotal", 0) if isinstance(data, dict) else 0
+            # 9/6 修复：加载磁盘上已持久化的审批结果（stage2_results.json），
+            # 让首页按钮在服务重启后也能恢复为「查看审批结果」，不依赖内存状态
+            stage2_ids = set()
+            stage2_path = BASE_DIR / "stage2_results.json"
+            if stage2_path.exists():
+                try:
+                    stage2_ids = set(json.loads(stage2_path.read_text(encoding="utf-8")).keys())
+                except Exception:
+                    stage2_ids = set()
+
             items = []
             for r in rows:
                 raw_title = r.get("title") or r.get("applyUnitName") or r.get("applyUserName") or ""
                 supplier_name = raw_title.split("/")[0].strip() if raw_title else ""
                 raw_time = r.get("applyTime") or r.get("createTime") or ""
                 apply_time_short = raw_time[5:16] if raw_time and len(raw_time) >= 16 else ""
+                todo_id = r.get("id") or r.get("todoId")
                 items.append({
-                    "todoId": r.get("id") or r.get("todoId"),
+                    "todoId": todo_id,
                     "name": supplier_name,
                     "billName": r.get("businessBillName") or "",
                     "billType": r.get("businessBillType") or "",
                     "applyTime": raw_time,
                     "applyTimeShort": apply_time_short,
+                    "hasResult": str(todo_id) in stage2_ids,
                 })
             return {"total": total, "count": len(items), "items": items}
         except auto_approve.SessionExpiredError as e:
