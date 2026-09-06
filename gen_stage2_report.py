@@ -25,6 +25,7 @@ DECISION_LABEL = {
     "reject": ("退回", "#fce8e6", "#a52834"),
     "manual": ("转人工", "#fef7e0", "#8a6d00"),
     "approve": ("建议同意", "#e6f4ea", "#1e7e34"),
+    "skip": ("不适用", "#f1f3f4", "#5f6368"),
 }
 
 # checklist 项 → 应有的材料 doc_type（与 auto_approve._TEXTIN_DOC_TYPE_KEYWORDS 对称）
@@ -152,7 +153,10 @@ def render_supplier(tid, s2, textin, cache):
         else:
             missing_rows = "<div style='color:#1e7e34'>无缺失（应有材料已全部上传）</div>"
     else:
-        missing_rows = "<div style='color:#5f6368'>无 checklist 数据</div>"
+        if decision == "skip":
+            missing_rows = "<div style='color:#5f6368'>不适用（分流项，无需材料核验）</div>"
+        else:
+            missing_rows = "<div style='color:#5f6368'>无 checklist 数据</div>"
 
     t_data = textin.get(tid, {}) or {}
 
@@ -252,18 +256,32 @@ def render_supplier(tid, s2, textin, cache):
             f"</tr>"
         )
 
-    big_table = (
-        "<table class='big-table'>"
-        "<tr>"
-        "<th style='width:40px'></th>"
-        "<th style='width:60px'>编号</th>"
-        "<th style='width:140px'>项目</th>"
-        "<th style='width:200px'>决策依据</th>"
-        "<th style='width:220px'>材料状态（脱敏 + OCR）</th>"
-        "<th>核验结果（OCR/企查查/系统对比）</th>"
-        "</tr>"
-        + big_rows + "</table>"
-    )
+    # 9/6：skip 项（不适用）——综合核验表位置显示不适用说明，而非空表格
+    if decision == "skip":
+        skip_reason = (s2.get("skip_reason")
+                       or opinion.replace("不适用。", "").rstrip("。").strip()
+                       or "该供应商不适用标准审批流程")
+        big_table = (
+            "<div class='skip-notice' style='padding:28px 24px;text-align:center;"
+            "background:#f8f9fa;border:1px dashed #c0c4cc;border-radius:6px;margin:8px 0;'>"
+            "<div style='font-size:16px;font-weight:600;color:#5f6368;margin-bottom:10px;'>"
+            "该供应商不适用标准审批流程</div>"
+            f"<div style='font-size:13px;color:#6b7280;line-height:1.6;'>{esc(skip_reason)}</div>"
+            "</div>"
+        )
+    else:
+        big_table = (
+            "<table class='big-table'>"
+            "<tr>"
+            "<th style='width:40px'></th>"
+            "<th style='width:60px'>编号</th>"
+            "<th style='width:140px'>项目</th>"
+            "<th style='width:200px'>决策依据</th>"
+            "<th style='width:220px'>材料状态（脱敏 + OCR）</th>"
+            "<th>核验结果（OCR/企查查/系统对比）</th>"
+            "</tr>"
+            + big_rows + "</table>"
+        )
 
     try:
         plain_opinion = gen_opinion.build_opinion(tid, s2, textin, cache)

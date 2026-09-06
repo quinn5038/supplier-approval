@@ -721,6 +721,7 @@ def _build_skip_result(tid, entry, decision_reason):
         "type_desc": "不适用",
         "decision": "skip",
         "opinion": f"不适用。{decision_reason}。",
+        "skip_reason": decision_reason,   # 9/6 新增：报告页展示"不适用"具体原因用
         "checklist": [],
         "qcc_issues": [],
         "textin_issues": [],
@@ -1012,7 +1013,8 @@ def is_special_category(supplier):
     
     special_keywords = {
         "平台": "平台类",
-        "租赁": "租赁商",
+        # 9/6 移除「租赁」：机械设备租赁/销售本质是普通物资贸易，与贸易/经销商同规则，
+        # 不再算集团独有类别（Quinn 确认）
         "云服务": "云服务商",
         "软件服务": "软件服务商",
         "运输": "运输服务商",
@@ -1446,16 +1448,10 @@ def run():
             # ============================================================
 
             # ---- 分流1：国外供应商（B01跳过项，分流由代码处理）----
+            # 9/6：判断依据只信系统「是否海外供应商」字段（isOverseas），
+            # 不再用 country（申请人所在国家）反推是否境外
             if is_foreign:
-                # 数据冲突保护（2026-09-01发现）：isOverseas=1 但国家为"China/中国/空"
-                # 属于系统数据自相矛盾（可能是国内公司误走境外渠道注册），
-                # 自动退回话术可能不适用 → 转人工核实
-                if (not country) or country in ("China", "中国", "CHINA"):
-                    opinion = ("转人工复核。系统数据异常：该供应商标记为境外注册，"
-                               "但国家信息为中国（或为空），请人工核实其注册渠道与主体信息后，"
-                               "再决定是否按国外或国内标准审查。")
-                    decision = "manual"
-                elif bill_type == "P0701":
+                if bill_type == "P0701":
                     # 注册审批 + 国外供应商 → 自动退回（固定话术，核对表原文）
                     opinion = "退回。国外供应商请通过中交海外采购专区进行注册申请。"
                     decision = "reject"
@@ -1940,12 +1936,15 @@ def run_stage2():
 
         # 分流供应商（国外/港澳台/集团独有）不需要企查查增强
         if supplier.get("is_foreign") or supplier.get("is_hmt"):
-            # 9/5 修复：即使分流也生成"不适用"结果，让所有 31 家都能看到决策
+            # 即使分流也生成"不适用"结果，让所有待办都能看到决策（9/6 报告页写不适用原因）
             results[tid] = _build_skip_result(tid, entry, decision_reason="境外供应商不适用中国大陆合规审查")
             continue
-        is_special, _ = is_special_category(supplier)
+        is_special, special_category = is_special_category(supplier)
         if is_special:
-            results[tid] = _build_skip_result(tid, entry, decision_reason="集团内部供应商（股东含中交系统关键词），按内部流程处理")
+            # 9/6 修正：文案描述实际判定依据（集团独有类别名），不再误写"股东含中交关键词"
+            results[tid] = _build_skip_result(
+                tid, entry,
+                decision_reason=f"该供应商属于集团独有类别（{special_category}），审查标准复杂，需转人工处理")
             continue
 
         # 匹配企查查结果（优先信用代码，其次企业名）
