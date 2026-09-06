@@ -108,6 +108,21 @@ def _supplier_brief(s2, cache_entry):
     return "（" + "，".join(parts) + "）" if parts else ""
 
 
+def _suspect_domestic_tip(supplier):
+    """疑似国内供应商提示：isOverseas=1 但国家/地区信息为中国。
+
+    返回追加到最终审批意见末尾的可复制提示文字；不符合条件返回空串。
+    """
+    if not supplier:
+        return ""
+    is_overseas = supplier.get("is_overseas")
+    country = str(supplier.get("country_name") or "").strip()
+    if is_overseas and country in ("China", "中国", "CHINA"):
+        return ("提示：该供应商「是否海外供应商」字段标记为海外，但国家/地区信息为中国，"
+                "疑似国内供应商。建议将该供应商「是否海外供应商」字段修改为国内供应商后重新提交。")
+    return ""
+
+
 def _strip_dup_prefix(cname, desc):
     """去掉 issue 描述里与项目名重复的前缀（如"纳税信用等级：纳税信用等级：..."）"""
     if not desc:
@@ -171,6 +186,7 @@ def _build_pass_summary(c, textin_for_doc):
 def build_opinion(tid, s2, textin, cache):
     """生成最终审批意见文本"""
     cache_entry = cache.get(tid, {})
+    supplier = cache_entry.get("supplier", {}) if cache_entry else {}
     textin_for_doc = textin.get(tid, {}) if textin else {}
     name = s2.get("name", tid)
     brief = _supplier_brief(s2, cache_entry)
@@ -179,9 +195,13 @@ def build_opinion(tid, s2, textin, cache):
     q_issues = s2.get("qcc_issues", []) or []
     decision = s2.get("decision", "manual")
 
+    # 9/6：疑似国内供应商提示（isOverseas=1 但国家为中国），追加到意见末尾
+    suspect_tip = _suspect_domestic_tip(supplier)
+
     # 9/6：skip 项（境外/集团独有不适用）直接返回不适用意见，不走标准核验意见拼接
     if decision == "skip":
-        return s2.get("opinion") or s2.get("skip_reason") or "该供应商不适用标准审批流程"
+        base = s2.get("opinion") or s2.get("skip_reason") or "该供应商不适用标准审批流程"
+        return base + ("\n\n" + suspect_tip if suspect_tip else "")
 
     # 分类：fail / pass / skip / pending-or-manual
     fail_items = [c for c in checklist if c.get("status") == "fail"]
@@ -286,7 +306,11 @@ def build_opinion(tid, s2, textin, cache):
         lines.append("同意。各项审核均通过，建议后续常规管理。")
 
     # 9/5 改造：去掉末尾的"另经企查查核验..."——这是给审核员看的，不给供应商
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    # 9/6：疑似国内供应商（isOverseas=1 但国家为中国）追加提示
+    if suspect_tip:
+        result += "\n\n" + suspect_tip
+    return result
 
 
 def main():
