@@ -15,8 +15,13 @@ import subprocess
 import threading
 import time
 import shutil
+import logging
 from pathlib import Path
 from datetime import datetime
+
+# 9/6 修复：/api/todos 重试路径用了 log.warning 但模块没定义 log（NameError）
+log = logging.getLogger("webui")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # 把父目录加入 sys.path，便于 import auto_approve 等模块
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -40,6 +45,20 @@ templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 # 审批任务进度追踪：todo_id → {status, step, error, started_at}
 _task_status: dict = {}
 _task_lock = threading.Lock()
+
+# 9/6 修复：webui 重启时内存 _task_status 会被清空，但如果任务字典里
+# 遗留了 running 状态（线程随旧进程死亡但状态未清理），前端会永久
+# 显示"处理中"。启动时把所有 running 重置为 error（让用户可以重试）。
+def _reset_stale_running():
+    with _task_lock:
+        for tid, st in _task_status.items():
+            if st.get("status") == "running":
+                st["status"] = "error"
+                st["error"] = "上次处理被中断（服务重启），请重新点击后台审批"
+                st["step"] = "stale_running_reset"
+        log.info(f"[_reset_stale_running] 重置 {len(_task_status)} 条状态")
+
+_reset_stale_running()
 
 
 # ============================================================
@@ -134,8 +153,11 @@ def _run_pipeline_for_one(todo_id: str):
             print(f"[desens] 脱敏失败（不阻塞流程）：{e}")
 
         _update("正在 OCR 识别证件文件（TextIn）...", progress=70)
+        # 9/6 修复：必须传 parse <todo_id> 单家过滤——不带参数会 OCR 全部
+        # files_cache_desens/ 下 33 家文件，跑 10+ 分钟，子进程超时报错，
+        # 前端永久卡在处理中（Quinn 9/6 反馈的"进度条不动"根因）
         r2 = subprocess.run(
-            [PYTHON_EXE, str(BASE_DIR / "textin_pipeline.py")],
+            [PYTHON_EXE, str(BASE_DIR / "textin_pipeline.py"), "parse", str(todo_id)],
             cwd=str(BASE_DIR), env=env,
             capture_output=True, text=True, encoding="utf-8", timeout=600,
         )

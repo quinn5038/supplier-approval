@@ -169,7 +169,19 @@
             try {
                 const r = await fetch('/api/approve/' + todoId, { method: 'POST' });
                 if (r.status === 409) {
-                    // 已在跑，直接进入轮询
+                    // 已在跑：立即刷新一次状态，widget 显示真实进度（不卡在 0%）
+                    const sr = await fetch('/api/status/' + todoId);
+                    const st = await sr.json();
+                    if (st.status === 'running') {
+                        updateProgressUI(todoId, st.progress || 0, st.step || '处理中');
+                    } else if (st.status === 'done') {
+                        setBtnDone(todoId);
+                        return;
+                    } else if (st.status === 'error') {
+                        setBtnError(todoId, '审批失败');
+                        showFailReason(todoId, st.error || '');
+                        return;
+                    }
                 } else if (!r.ok) {
                     throw new Error('启动失败');
                 }

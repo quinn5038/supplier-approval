@@ -41,17 +41,18 @@ def desensitize_dir(src_dir, dst_dir):
 
     src_dir: 原始材料目录（如 cache_v4/{todoId}/）
     dst_dir: 输出目录（如 cache_v4_desens/{todoId}/）
+
+    9/6 修复：不再 shutil.rmtree(dst) 整目录删除——
+    files_cache_desens/ 下累积 50+ 文件时触发 WorkBuddy 沙箱
+    SAFE_DELETE_BULK_CONFIRM 批量删除保护直接杀子进程。
+    改为逐文件覆盖写入（同名文件覆盖，stale 文件保留无害）。
     """
     src = Path(src_dir)
     dst = Path(dst_dir)
     if not src.exists():
         log.warning(f"源目录不存在：{src}")
         return
-    if dst.exists():
-        # 清空旧的脱敏目录，避免混合新旧数据
-        import shutil
-        shutil.rmtree(dst)
-    dst.mkdir(parents=True)
+    dst.mkdir(parents=True, exist_ok=True)
 
     n_total = 0
     n_desens = 0
