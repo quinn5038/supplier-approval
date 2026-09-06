@@ -20,10 +20,13 @@
     <div class="container">
         <div id="alert-area"></div>
 
-        <!-- 操作说明卡 -->
+        <!-- 操作说明卡（默认折叠，点击标题展开） -->
         <div class="guide-card">
-            <div class="guide-title">使用说明</div>
-            <div class="guide-steps">
+            <div class="guide-title" onclick="toggleGuide()" title="点击展开/收起">
+                <span>使用说明</span>
+                <span class="guide-toggle" id="guide-toggle">▸</span>
+            </div>
+            <div class="guide-steps" id="guide-steps" style="display:none;">
                 <div class="guide-step">
                     <span class="guide-num">1</span>
                     <div><b>更新 Cookie</b><br><span class="guide-desc">浏览器登录 scpma.iccec.cn → F12 复制 Cookie → 点右上角按钮粘贴</span></div>
@@ -34,7 +37,7 @@
                 </div>
                 <div class="guide-step">
                     <span class="guide-num">3</span>
-                    <div><b>查看结果</b><br><span class="guide-desc">跑完后按钮变为抹茶绿色「查看结果」，点击进入详情页看审查报告和审批意见</span></div>
+                    <div><b>查看结果</b><br><span class="guide-desc">跑完后按钮变为绿色「查看结果」，点击进入详情页看审查报告和审批意见</span></div>
                 </div>
             </div>
         </div>
@@ -78,6 +81,20 @@
         let pollTimer = null;        // 批量轮询定时器
         const nameById = {};         // todoId → 供应商名称
         const errorById = {};        // todoId → 失败原因（点失败按钮时展示）
+
+        // ===== 使用说明卡折叠 =====
+        function toggleGuide() {
+            const steps = document.getElementById('guide-steps');
+            const toggle = document.getElementById('guide-toggle');
+            if (!steps || !toggle) return;
+            if (steps.style.display === 'none') {
+                steps.style.display = 'grid';
+                toggle.textContent = '▾';
+            } else {
+                steps.style.display = 'none';
+                toggle.textContent = '▸';
+            }
+        }
 
         // ===== 加载待办列表 =====
         async function loadTodos() {

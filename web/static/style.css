@@ -6,12 +6,18 @@
     --color-border: #e5e7eb;
     --color-primary: #185fa5;
     --color-primary-hover: #0c447c;
+    --color-primary-light: #eaf2fb;   /* 9/6 补：表头/行 hover 浅蓝（此前未定义导致多处失效） */
+    --color-primary-dark: #0c447c;    /* 9/6 补：深蓝文字 */
     --color-success: #0f6e56;
     --color-success-bg: #e1f5ee;
     --color-danger: #a32d2d;
     --color-danger-bg: #fcebeb;
     --color-warning: #854f0b;
     --color-warning-bg: #faeeda;
+    /* 9/6 新增：查看结果按钮绿 */
+    --color-done: #009876;
+    --color-done-hover: #007a5e;
+    --color-done-bg: #e0f5f0;
     --radius: 8px;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
@@ -51,9 +57,9 @@ body {
     font-weight: 500;
     transition: background 0.2s;
 }
-.btn-primary { background: var(--color-primary); color: #fff; }
+.btn-primary { background: var(--color-primary); color: #fff; box-shadow: 0 0 0 3px var(--color-primary-light); }
 .btn-primary:hover { background: var(--color-primary-hover); }
-.btn-success { background: var(--color-success); color: #fff; }
+.btn-success { background: var(--color-success); color: #fff; box-shadow: 0 0 0 3px var(--color-success-bg); }
 .btn-success:hover { background: #085041; }
 .btn-outline { background: transparent; border: 1px solid var(--color-border); color: var(--color-text); }
 .btn-outline:hover { background: var(--color-bg); }
@@ -87,12 +93,22 @@ body {
     font-size: 14px;
     font-weight: 600;
     color: var(--color-primary-dark);
-    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+}
+.guide-toggle {
+    font-size: 16px;
+    line-height: 1;
+    color: var(--color-text-muted);
 }
 .guide-steps {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     gap: 16px;
+    margin-top: 12px;
 }
 .guide-step {
     display: flex;
@@ -132,9 +148,9 @@ body {
 }
 .btn.btn-running { background: var(--color-text-muted); cursor: default; }
 
-/* 审批完成：抹茶绿色"查看结果"按钮（区别于 .btn-success 的深青绿，避免与"同意"语义混淆） */
+/* 审批完成："查看结果"按钮（#009876 绿） */
 .btn.btn-done {
-    background: #7cb342;
+    background: var(--color-done);
     color: #fff;
     display: inline-block;
     padding: 7px 16px;
@@ -142,13 +158,13 @@ body {
     font-size: 13px;
     font-weight: 600;
     text-decoration: none;
-    box-shadow: 0 0 0 3px #e8f5d8;
+    box-shadow: 0 0 0 3px var(--color-done-bg);
     animation: pulse-done 1.6s ease-in-out 2;
 }
-.btn.btn-done:hover { background: #689a35; }
+.btn.btn-done:hover { background: var(--color-done-hover); }
 @keyframes pulse-done {
-    0%, 100% { box-shadow: 0 0 0 3px #e8f5d8; }
-    50% { box-shadow: 0 0 0 6px #e8f5d8; }
+    0%, 100% { box-shadow: 0 0 0 3px var(--color-done-bg); }
+    50% { box-shadow: 0 0 0 6px var(--color-done-bg); }
 }
 
 /* 审批失败 */
@@ -156,6 +172,7 @@ body {
     background: var(--color-danger-bg);
     color: var(--color-danger);
     border: 1px solid #e8b4b4;
+    box-shadow: 0 0 0 3px var(--color-danger-bg);
     cursor: pointer;
 }
 
@@ -282,7 +299,7 @@ body {
 }
 .todo-item .sub-text {
     font-size: 11px;
-    color: var(--color-text-muted);
+    color: #a3adba;   /* 9/6 弱化 todoId 视觉权重（原 --color-text-muted #6b7280） */
     font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
 }
 
@@ -543,8 +560,23 @@ body {
     text-align: center;
     padding: 60px 20px;
     color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius);
 }
-.empty .icon { font-size: 36px; margin-bottom: 12px; opacity: 0.4; }
+.empty .icon {
+    font-size: 40px;
+    margin: 0 auto 12px;
+    opacity: 0.55;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: var(--color-bg);
+    line-height: 1;
+}
 
 /* 响应式 */
 @media (max-width: 720px) {
