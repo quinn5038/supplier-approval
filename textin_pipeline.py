@@ -106,7 +106,12 @@ FILE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".pdf",
 # TextIn API 直连解析
 # ============================================================
 def parse_file_textin(path):
-    """调 TextIn xParse 解析单个文件 → 返回 markdown 文本（失败抛异常）"""
+    """调 TextIn xParse 解析单个文件 → 返回 (markdown, detail)（失败抛异常）
+
+    9/7 改造：markdown_details=1 以拿到字段坐标 detail（含 position + 纯文本 text）。
+    - markdown：正文（身份证会返回 [DESENSITIZED] + HTML 注释敏感信息）
+    - detail：结构化字段列表，text 是纯文本（无 HTML 注释包裹），供身份证提取姓名/有效期
+    """
     if not TEXTIN_APP_ID or not TEXTIN_SECRET_CODE:
         raise RuntimeError("未配置 TEXTIN_APP_ID / TEXTIN_SECRET_CODE（.env），"
                            "无法直连TextIn解析")
@@ -123,7 +128,7 @@ def parse_file_textin(path):
         "apply_document_tree": 0,   # 不需要标题树
         "table_flavor": "md",       # 表格按md输出（财报数字在表格里）
         "get_image": "none",
-        "markdown_details": 0,      # 只要markdown，不要detail（省流量）
+        "markdown_details": 1,      # 9/7：拿 detail 坐标，身份证需要定位姓名/有效期
     }
     resp = requests.post(TEXTIN_API, headers=headers, params=params,
                          data=data, timeout=120,
@@ -143,7 +148,28 @@ def parse_file_textin(path):
         if isinstance(content, list):
             md = "\n".join(str(x.get("text", x) if isinstance(x, dict) else x)
                            for x in content)
-    return md
+    detail = r.get("detail") or []
+    if not isinstance(detail, list):
+        detail = []
+    return md, detail
+
+
+def _sanitize_detail(doc_type, detail):
+    """缓存 detail 前字段级脱敏：身份证只保留「姓名」+「有效期限」，
+    其余敏感字段（性别/民族/出生/住址/身份证号/签发机关）一律丢弃，不落盘。
+    其他材料类型原样返回 detail。
+    """
+    if doc_type != "legal_person_id" or not detail:
+        return detail
+    text = "\n".join(str(d.get("text", "")) for d in detail if isinstance(d, dict))
+    kept = []
+    m = re.search(r"姓\s*名\s*[:：]?\s*([\u4e00-\u9fa5·]{2,15})", text)
+    if m:
+        kept.append("姓名 " + m.group(1))
+    m = re.search(r"有效期限\s*([^\s\n，,；;]+)", text)
+    if m:
+        kept.append("有效期限 " + m.group(1))
+    return [{"text": " ".join(kept)}] if kept else []
 
 
 # ============================================================
@@ -166,8 +192,15 @@ def _norm(s):
 
 def _pre(text):
     """预处理：删表格分隔线、竖线换空格、去加粗星号/标题井号——保留换行结构
-    （TextIn 返回的 markdown 里字段通常按行/表格排列，行结构是字段边界的依据）"""
-    text = re.sub(r"^\s*\|[\s:\-|]+\|?\s*$", "", str(text or ""), flags=re.M)
+    （TextIn 返回的 markdown 里字段通常按行/表格排列，行结构是字段边界的依据）
+
+    注（9/7）：TextIn 对"证照类"文档（营业执照/身份证）把结构化内容放在
+    HTML 注释里，正文可能是空或占位符。因此这里**不过滤注释**（否则营业执照
+    也提取不到）。身份证的敏感字段隔离改在 extract_legal_person_id（用 detail
+    纯文本只取姓名+有效期）+ _sanitize_detail（缓存时脱敏）两层处理。
+    """
+    text = str(text or "")
+    text = re.sub(r"^\s*\|[\s:\-|]+\|?\s*$", "", text, flags=re.M)
     text = text.replace("|", " ").replace("**", "")
     # 竖排执照常见"名\n称"式断行标签：把 1-3 个汉字的短行与下一行合并
     text = re.sub(r"(?m)^([\u4e00-\u9fa5]{1,3})[ \t]*\n+[ \t]*(?=[\u4e00-\u9fa5])", r"\1", text)
@@ -338,37 +371,46 @@ def extract_business_license(text, supplier):
     return {"fields": fields, "checks": checks, "issues": issues}
 
 
-def extract_legal_person_id(text, supplier):
-    """法人身份证 → 有效期核验（2026-09-06 恢复：脱敏后 OCR）
+def extract_legal_person_id(text, supplier, detail=None):
+    """法人身份证 → 核验「姓名」+「身份证有效期」（2026-09-07 重写）
 
-    保密合规前提：身份证在 OCR 前先走 desensitize 脱敏（人像页打码，国徽页保留）。
-    脱敏后姓名/证号不可见，但国徽页「有效期限」保留，故本函数仅核验有效期；
-    姓名一致性无法 OCR 比对，由 A02 转人工核验。
+    保密合规（9/7）：身份证 OCR 前本地脱敏，仅保留姓名 + 有效期限两项可见；
+    核验也仅针对这两项。其余敏感字段（性别/民族/出生/住址/身份证号/签发机关）
+    一律不提取、不落盘。
+
+    detail 为 TextIn markdown_details=1 返回的结构化字段（text 是纯文本，
+    不含 HTML 注释）。优先从 detail 提取（正文 markdown 里敏感信息在注释中，
+    已被 _pre 过滤）。
+
+    正反面完整性：姓名（正面）与有效期限（背面）任一缺失 → 报错提示补传。
     """
+    # 拼接 detail 里的纯文本（TextIn 把正面/背面分成多个 paragraph）
+    detail_text = ""
+    if detail:
+        detail_text = "\n".join(
+            str(d.get("text", "")) for d in detail if isinstance(d, dict))
+    # 正文（_pre 已过滤注释，正文仅剩 [DESENSITIZED]，无法提取字段，仅兜底）
     t = _pre(text)
-    n = _norm(t)
-    fields = {}
-    m = re.search(r"姓\s*名\s*[:：]?\s*([\u4e00-\u9fa5·]{2,15}?)"
-                  r"(?=\s*(?:性别|民族|出生|住址|公民|号码|签发|\n|$))", t)
-    fields["姓名"] = m.group(1) if m else None
-    m = re.search(r"公民身份号码[:：]?\s*(\d{17}[\dXx])", n)
-    fields["身份证号"] = (m.group(1)[:6] + "****" + m.group(1)[-4:]) if m else None
+    combined = detail_text + "\n" + t
+    n = _norm(combined)
 
-    checks, issues = {}, []
-    sys_legal = _norm(supplier.get("legal_person", ""))
-    if fields["姓名"] and sys_legal:
-        checks["姓名与法人一致"] = fields["姓名"] == sys_legal
-        if not checks["姓名与法人一致"]:
-            issues.append(f"身份证姓名{fields['姓名']}与系统法人{sys_legal}不一致")
+    fields = {}
+    issues = []
+
+    # ---- 姓名（正面）----
+    m = re.search(r"姓\s*名\s*[:：]?\s*([\u4e00-\u9fa5·]{2,15}?)"
+                  r"(?=\s*(?:性别|民族|出生|住址|公民|号码|签发|$))", combined)
+    fields["姓名"] = m.group(1) if m else None
+
+    # ---- 有效期限（背面）----
+    # 格式：有效期限 2018.12.26-长期 / 有效期限 2022.10.12-2025.10.11
     exp, longterm = None, False
-    # ① 最高优先级：OCR 文本同时含"有效期"+"长期/永久"，直接判长期
-    # （湖北科规李作发身份证 OCR 返回"有效期限 2022.10.12 长期"，无连接符）
-    if re.search(r"有效期", n) and re.search(r"长期|永久|无固定期限", n):
+    if re.search(r"有效期限", n) and re.search(r"长期|永久|无固定期限", n):
         longterm = True
     else:
-        # ② 严格匹配"有效期 YYYY-MM-DD - 长期/日期"格式（连接符可选，支持空格分隔）
+        # 严格匹配 "有效期限 起始日-长期/结束日" 或 "有效期至 YYYY-MM-DD"
         m = re.search(r"有效[期限]*[^\d]*" + _DATE + r"\s*[-—~至\s]*" +
-                      r"(长期|永久|无固定期限|" + _DATE + r")", text)
+                      r"(长期|永久|无固定期限|" + _DATE + r")", combined)
         if m:
             gs = [g for g in m.groups() if g]
             end_str = gs[3] if len(gs) >= 4 else None
@@ -377,20 +419,47 @@ def extract_legal_person_id(text, supplier):
             elif end_str:
                 em = re.match(_DATE, end_str)
                 exp = _to_date(em.groups()) if em else None
-    # ③ fallback：仅在确实没有"长期"字样时，且能匹配到"有效期至 YYYY-MM-DD"标签
-    # （避免把签发日期/出生日期等当作到期日，造成误判过期）
     if not longterm and exp is None:
         m = re.search(r"有效期[至止]?\s*[:：]?\s*" + _DATE, n)
         if m:
             exp = _to_date(m.groups())
+
+    checks = {}
+
+    # ---- 正反面完整性检测（9/7 新增）----
+    # 姓名缺失 → 缺正面；有效期缺失 → 缺背面
+    missing_sides = []
+    if not fields["姓名"]:
+        missing_sides.append("正面（姓名）")
+    if not longterm and exp is None:
+        missing_sides.append("背面（有效期限）")
+    if missing_sides:
+        checks["正反面齐全"] = False
+        issues.append(
+            f"身份证缺少{'、'.join(missing_sides)}，请供应商重新上传完整的身份证正反面")
+    else:
+        checks["正反面齐全"] = True
+
+    # ---- 姓名一致性核验 ----
+    sys_legal = _norm(supplier.get("legal_person", ""))
+    if fields["姓名"] and sys_legal:
+        checks["姓名与法人一致"] = fields["姓名"] == sys_legal
+        if not checks["姓名与法人一致"]:
+            issues.append(f"身份证姓名「{fields['姓名']}」与系统法人「{sys_legal}」不一致")
+
+    # ---- 有效期核验 ----
     today = date.today()
     if longterm:
         checks["在有效期内"] = True
+        fields["有效期至"] = "长期"
     elif exp:
         checks["在有效期内"] = exp >= today
+        fields["有效期至"] = str(exp)
         if not checks["在有效期内"]:
             issues.append(f"身份证已过期（{exp}）")
-    fields["有效期至"] = str(exp) if exp else ("长期" if longterm else None)
+    else:
+        fields["有效期至"] = None
+
     return {"fields": fields, "checks": checks, "issues": issues}
 
 
@@ -688,11 +757,11 @@ def extract_self_statement(text):
 
 
 # 材料类型 → 抽取器
-def extract(doc_type, text, supplier=None):
+def extract(doc_type, text, supplier=None, detail=None):
     if doc_type == "business_license":
         return extract_business_license(text, supplier)
     if doc_type == "legal_person_id":
-        return extract_legal_person_id(text, supplier)
+        return extract_legal_person_id(text, supplier, detail)
     if doc_type in ("tax_credit",):
         return extract_tax_credit(text)
     if doc_type in ("financial_report",):
@@ -885,13 +954,26 @@ def run_parse(only_todo=None):
                 supplier["full_name"] = reg["企业名称"]
         # 同目录已有缓存的 .md 就直接用（extract 模式 / 重跑不烧额度）
         md_path = fpath.with_suffix(fpath.suffix + ".md")
+        detail_path = fpath.with_suffix(fpath.suffix + ".detail.json")
         if md_path.exists():
             md = md_path.read_text(encoding="utf-8")
+            detail = json.loads(detail_path.read_text(encoding="utf-8")) \
+                if detail_path.exists() else None
         else:
             try:
                 print(f"[解析] {todo_id}/{fpath.name} ({doc_type}) ...")
-                md = parse_file_textin(fpath)
-                md_path.write_text(md, encoding="utf-8")   # 缓存，避免重复计费
+                md, detail = parse_file_textin(fpath)
+                # 9/7：缓存 markdown——身份证过滤注释（敏感信息不落盘），
+                # 其他类型（营业执照等证照内容也在注释里）原样保留
+                if doc_type == "legal_person_id":
+                    md_path.write_text(
+                        re.sub(r"<!--.*?-->", "", md, flags=re.S), encoding="utf-8")
+                else:
+                    md_path.write_text(md, encoding="utf-8")
+                if detail:
+                    detail_path.write_text(
+                        json.dumps(_sanitize_detail(doc_type, detail),
+                                   ensure_ascii=False), encoding="utf-8")
                 time.sleep(1)
             except Exception as e:
                 print(f"  [失败] {fpath.name}: {e}")
@@ -900,7 +982,7 @@ def run_parse(only_todo=None):
                 n_fail += 1
                 continue
         try:
-            r = extract(doc_type, md, supplier)
+            r = extract(doc_type, md, supplier, detail)
             r["file"] = fpath.name
             r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
             results.setdefault(todo_id, {})[doc_type] = r

@@ -203,101 +203,84 @@ def build_opinion(tid, s2, textin, cache):
         base = s2.get("opinion") or s2.get("skip_reason") or "该供应商不适用标准审批流程"
         return base + ("\n\n" + suspect_tip if suspect_tip else "")
 
-    # 分类：fail / pass / skip / pending-or-manual
+    # 分类：fail / pass / skip / 待人工（pending/partial/manual）
     fail_items = [c for c in checklist if c.get("status") == "fail"]
-    pass_items = [c for c in checklist if c.get("status") == "pass"]
-    skip_items = [c for c in checklist if c.get("status") == "skip"]
-    pending_items = [c for c in checklist
-                     if c.get("status") in ("pending", "partial", "manual")]
+    manual_items = [c for c in checklist
+                    if c.get("status") in ("pending", "partial", "manual")]
 
-    # 判断整体处置建议
-    # 有 fail 项 → 看是否全是硬伤
-    hard_fails = []
-    soft_fails = []
-    fail_issue_map = {}  # cid → issue 描述
+    # fail 细分：缺材料（detail 含"缺少/未上传/材料缺失"，可退回补办）vs 其他异常（不一致/已过期/核验问题，需整改）
+    supplement_fails = []   # 缺材料，退回补办
+    other_fails = []        # 其他 fail（整改）
     for c in fail_items:
         cid = c.get("id", "")
         cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
-        # 找对应 OCR issue
-        issue_desc = c.get("detail") or c.get("message") or ""
-        # 从 textin_issues 里按关键词匹配（OCR 增强时已写进去）
-        for ti in t_issues:
-            if cname.split("/")[0].strip() in ti or cid in ti:
-                issue_desc = ti
-                break
-        fail_issue_map[cid] = issue_desc
-        if _is_hard_fail(issue_desc):
-            hard_fails.append((cid, cname, issue_desc))
+        detail = c.get("detail") or c.get("message") or ""
+        if ("缺少" in detail or "未上传" in detail or "材料缺失" in detail
+                or "需上传" in detail):
+            supplement_fails.append((cid, cname, detail))
         else:
-            soft_fails.append((cid, cname, issue_desc))
+            other_fails.append((cid, cname, detail))
 
-    # 9/6 修复：soft_pending = pending 项 + 软 fail 项（此前该变量未初始化，导致转人工分支 NameError）
-    soft_pending = []
-    for c in pending_items:
-        cid = c.get("id", "")
-        cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
-        msg = c.get("message") or c.get("detail") or "需人工核验"
-        soft_pending.append((cid, cname, msg))
-    soft_pending.extend(soft_fails)
-
-    # 整体建议：硬伤 ≥1 → 建议退回；其余 fail/pending → 转人工；全 pass → 建议同意
-    if hard_fails:
+    # 整体建议：缺材料 fail ≥1 → 退回；其余 fail/待人工 → 转人工；全 pass → 同意
+    if supplement_fails:
         suggest_action = "退回"
-        suggest_reason = "存在须退回补材料/整改的客观硬伤"
-    elif fail_items or pending_items:
+    elif fail_items or manual_items:
         suggest_action = "转人工"
-        suggest_reason = "存在需人工核验的事项"
     else:
         suggest_action = "同意"
-        suggest_reason = "所有审核项均通过"
 
-    # ---- 9/5 改造：只输出"五、退回内容"紧凑格式（单行分号分隔，无换行）----
+    # ---- 9/7 改造：完整列出所有异常（与综合核验表联动），单行分号分隔 ----
     lines = []
-    today = date.today().strftime("%Y年%m月%d日")
 
-    # 决策 1：退回（紧凑）
-    if hard_fails:
+    def _clip(s, n=100):
+        s = str(s or "")
+        return s[:n] + "…" if len(s) > n else s
+
+    # 决策 1：退回（补材料清单 + 整改/人工项）
+    if suggest_action == "退回":
         supplement_items = []
         seen_iso = False
-        for cid, cname, desc in hard_fails:
+        for cid, cname, desc in supplement_fails:
             # ISO 三认证合并为一条（不论 C1 还是 D1）
             if cid in ("C1_02", "C1_03", "C1_04", "D1_03", "D1_04", "D1_05"):
                 if not seen_iso:
-                    iso_label = SUPPLEMENT_TEMPLATES.get("D1_03") or SUPPLEMENT_TEMPLATES["C1_02"]
-                    supplement_items.append(("ISO", iso_label))
+                    supplement_items.append(
+                        SUPPLEMENT_TEMPLATES.get("D1_03") or SUPPLEMENT_TEMPLATES["C1_02"])
                     seen_iso = True
-                continue
-            # 经销授权（D-1 适用）
-            if cid == "D1_06":
-                tmpl = SUPPLEMENT_TEMPLATES.get("D1_06") or SUPPLEMENT_TEMPLATES.get("authorization")
-                if tmpl:
-                    supplement_items.append(("D1_06", tmpl))
-                continue
-            # 售后服务（A07：贸易商也需要，9/5 改造）
-            if cid == "A07":
-                tmpl = SUPPLEMENT_TEMPLATES.get("A07") or SUPPLEMENT_TEMPLATES.get("after_sales")
-                if tmpl:
-                    supplement_items.append(("A07", tmpl))
                 continue
             tmpl = SUPPLEMENT_TEMPLATES.get(cid)
             if tmpl:
-                supplement_items.append((cid, tmpl))
+                supplement_items.append(tmpl)
+        # 去重保序
         seen = set()
-        dedup = []
-        for cid, txt in supplement_items:
-            if cid not in seen:
-                seen.add(cid)
-                dedup.append(txt)
+        dedup = [x for x in supplement_items
+                 if not (x in seen or seen.add(x))]
         if dedup:
             items_str = "；".join(f"{i+1}. {x}" for i, x in enumerate(dedup))
             lines.append(f"退回。请补充资质文件：{items_str}。补充后重新提交。")
         else:
             lines.append("退回。具体见上方审查报告。")
-    # 决策 2：转人工（紧凑）
-    elif soft_pending or pending_items:
+        # 其他异常（非缺材料的 fail + 待人工项）→ 一并列出，让供应商知道所有问题
+        other_issues = []
+        for cid, cname, desc in other_fails:
+            other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")
+        for c in manual_items:
+            cid = c.get("id", "")
+            cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
+            desc = c.get("detail") or c.get("message") or "需人工核验"
+            other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")
+        if other_issues:
+            lines.append("另需整改/核实：" + "；".join(other_issues) + "。")
+    # 决策 2：转人工（完整列出所有异常项）
+    elif suggest_action == "转人工":
         reasons = []
-        for cid, cname, msg in soft_pending:
-            reasons.append(f"[{cid}]{cname}：{msg}")
+        for cid, cname, desc in other_fails:
+            reasons.append(f"[{cid}]{cname}：{_clip(desc)}")
+        for c in manual_items:
+            cid = c.get("id", "")
+            cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
+            desc = c.get("detail") or c.get("message") or "需人工核验"
+            reasons.append(f"[{cid}]{cname}：{_clip(desc)}")
         if not reasons:
             reasons.append("部分审核项需人工核验")
         lines.append("转人工。" + "；".join(reasons))

@@ -26,6 +26,7 @@
     python desensitize.py --src cache_v4 --dst cache_v4_desens
 """
 import logging
+import json
 import re
 import sys
 from pathlib import Path
@@ -83,13 +84,62 @@ def _desensitize_one(src, dst):
         return False  # 其他 PDF 原样保留
 
     if ext in (".jpg", ".jpeg", ".png", ".bmp", ".gif"):
-        # 身份证判断：通过文件名特征（法人姓名.jpg 或包含 id_/证件/身份证）
-        if any(k in name_lower for k in ["身份证", "证件", "id_card", "id_"]) \
-                or _looks_like_id_card_name(name_lower):
+        # 身份证判断（9/7 精确化：用 cache_v4 的 types 交叉验证，避免营业执照被误判）
+        if _is_id_card_image(src):
             return _desensitize_id_card_image(src, dst)
         return False  # 其他图片原样保留
 
     return False
+
+
+# cache_v4 的身份证/非身份证文件名集合（types 交叉验证，懒加载）
+_ID_CARD_NAMES = None
+_NON_ID_CARD_NAMES = None
+
+
+def _load_type_name_sets():
+    """从 cache_v4.json 读 materials_detail 的 types，构建：
+    - _ID_CARD_NAMES：types 含 legal_person_id 的文件名（真身份证）
+    - _NON_ID_CARD_NAMES：types 含其他已知类型但不含 legal_person_id 的文件名（营业执照等）
+    """
+    global _ID_CARD_NAMES, _NON_ID_CARD_NAMES
+    if _ID_CARD_NAMES is not None:
+        return
+    _ID_CARD_NAMES = set()
+    _NON_ID_CARD_NAMES = set()
+    try:
+        cache_file = Path(__file__).parent / "cache_v4.json"
+        if cache_file.exists():
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+            for e in cache.values():
+                for d in e.get("materials_detail", []):
+                    types = set(d.get("types") or [])
+                    fn = d.get("fileName", "")
+                    if not fn:
+                        continue
+                    if "legal_person_id" in types:
+                        _ID_CARD_NAMES.add(fn)
+                    elif types:  # 有其他已知类型（营业执照/ISO/税务等）
+                        _NON_ID_CARD_NAMES.add(fn)
+    except Exception:
+        pass
+
+
+def _is_id_card_image(src):
+    """判断图片是否为身份证（明确关键词 → cache_v4 types → 中文名保守兜底）"""
+    name_lower = src.name.lower()
+    # 1) 明确关键词
+    if any(k in name_lower for k in ["身份证", "证件", "id_card", "id_"]):
+        return True
+    # 2) cache_v4 types 交叉验证
+    _load_type_name_sets()
+    bare = re.sub(r"^\d+_", "", src.name)  # 去 uploadId 前缀
+    if bare in _ID_CARD_NAMES:
+        return True
+    if bare in _NON_ID_CARD_NAMES:
+        return False  # cache_v4 明确分类为非身份证（营业执照等）
+    # 3) 中文名保守兜底（cache_v4 无分类时的回退）
+    return _looks_like_id_card_name(name_lower)
 
 
 # 常见材料关键词（用于排除——这些不是身份证）
@@ -181,18 +231,26 @@ def _desensitize_financial_pdf(src, dst):
 # ============================================================
 # 身份证图片脱敏
 # ============================================================
+# 9/7 重写：仅保留「姓名」+「身份证有效期」两项，其余全部打码。
+# 身份证为「上下拼版」扫描件：
+#   - 上半部分为人像页正面（顶部约 45%），含姓名/性别/民族/出生/住址/公民身份号码+头像
+#   - 下半部分为国徽页背面（底部约 55%），含国徽+"中华人民共和国居民身份证"+签发机关+有效期限
+# 保留矩形（基于图像宽高比例）：
+#   - 姓名：top 5%-13%, left 5%-58%（姓名行宽度，按标准排版估算）
+#   - 有效期限：top 84%-94%, left 22%-72%（底部居中行）
+# 全部其余区域：白色覆盖 + 「[DESENSITIZED]」水印 + 头像马赛克
+
+# 保留矩形坐标（基于图像宽高比例）
+_KEEP_NAME_BOX = (0.03, 0.58, 0.03, 0.24)          # left, right, top, bottom（正面姓名区）
+_KEEP_EXPIRY_BOX = (0.18, 0.75, 0.76, 0.97)        # 背面有效期限区
+_HEAD_PHOTO_BOX = (0.62, 0.98, 0.02, 0.42)        # 头像估算区域
+
+
 def _desensitize_id_card_image(src, dst):
-    """身份证图片脱敏：保留国徽页（公开），整个人像页覆盖打码
+    """身份证图片脱敏：保留 姓名 + 有效期限，其余打码
 
-    身份证布局（身份证图片扫描件，常见比例约 4:3）：
-    - 上方 ~50% 是国徽页（公开）：含国徽 + "中华人民共和国居民身份证" + 签发机关 + 有效期
-    - 下方 ~50% 是人像页（敏感）：含姓名 + 性别 + 出生 + 住址 + 公民身份证号 + 头像
-
-    脱敏策略：
-    - 整片覆盖人像页（白色 + "已脱敏"水印）
-    - 人像页区域头像必须马赛克化（用 Pillow 的缩小再放大 = 像素化）
-
-    简化方案——整个图片除国徽外全部打码（最保守，避免漏打码）。
+    依据：9/7 与保密专员共识——身份证扫描件只暴露这两两个字段给 AI，
+    其余敏感信息（性别/民族/出生/住址/身份证号/头像/签发机关）一律打码。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -205,48 +263,61 @@ def _desensitize_id_card_image(src, dst):
         w, h = img.size
         draw = ImageDraw.Draw(img)
 
-        # 简化打码——直接打码下半部分（覆盖整个人像页 + 国徽页的"签发机关"行）
-        # 但保留国徽本身（在图片顶 1/4）
-        # 计算坐标：身份证扫描件通常上方 1/3 是国徽区，下方 2/3 是人像页
-        # 为了最保守，整片覆盖下方 2/3
-        text_box = (0, int(h * 0.30), w, h)
-        draw.rectangle(text_box, fill=(255, 255, 255))
-
-        # 头像照片马赛克——位置在人像页中部偏右（典型身份证布局）
-        # 头像区域估算：宽 25-40%，高 30-65% 区域的中部
-        face_box = (
-            int(w * 0.25),   # 左
-            int(h * 0.32),   # 上
-            int(w * 0.50),   # 右
-            int(h * 0.65),   # 下
+        # 解析保留矩形的像素坐标
+        name_box = (
+            int(w * _KEEP_NAME_BOX[0]), int(h * _KEEP_NAME_BOX[2]),
+            int(w * _KEEP_NAME_BOX[1]), int(h * _KEEP_NAME_BOX[3]),
         )
-        # 先取头像区域（即使这部分已被白色覆盖，马赛克仍生效）
-        if face_box[2] > face_box[0] and face_box[3] > face_box[1]:
-            face = img.crop(face_box)
-            # 缩小再放大 = 马赛克（即使空白图像也能产生像素化视觉效果）
-            small_size = (max(1, face.width // 16), max(1, face.height // 16))
+        expiry_box = (
+            int(w * _KEEP_EXPIRY_BOX[0]), int(h * _KEEP_EXPIRY_BOX[2]),
+            int(w * _KEEP_EXPIRY_BOX[1]), int(h * _KEEP_EXPIRY_BOX[3]),
+        )
+        photo_box = (
+            int(w * _HEAD_PHOTO_BOX[0]), int(h * _HEAD_PHOTO_BOX[2]),
+            int(w * _HEAD_PHOTO_BOX[1]), int(h * _HEAD_PHOTO_BOX[3]),
+        )
+
+        # 1) 头像马赛克（先做，确保后续白色覆盖不影响视觉效果）
+        if (photo_box[2] > photo_box[0] and photo_box[3] > photo_box[1]
+                and photo_box[2] <= w and photo_box[3] <= h):
+            face = img.crop(photo_box)
+            small_size = (max(1, face.width // 12), max(1, face.height // 12))
             small = face.resize(small_size)
             face_mosaic = small.resize(face.size, Image.NEAREST)
-            img.paste(face_mosaic, face_box)
-            # 再覆盖一次（确保是白色底）
-            draw.rectangle(face_box, fill=(255, 255, 255))
+            img.paste(face_mosaic, photo_box)
+            draw.rectangle(photo_box, fill=(255, 255, 255))
 
-        # 在中间加 "已脱敏" 水印（用 ASCII 文字避免字体缺失显示方框）
+        # 2) 整图打白色背景（保留姓名/有效期两个矩形）
+        # 先整图覆盖
+        draw.rectangle((0, 0, w, h), fill=(255, 255, 255))
+        # 再还原姓名矩形和有效期矩形的原图内容
+        img_org = Image.open(src).convert("RGB")
+        if (name_box[2] > name_box[0] and name_box[3] > name_box[1]
+                and name_box[2] <= w and name_box[3] <= h):
+            name_crop = img_org.crop(name_box)
+            img.paste(name_crop, name_box)
+        if (expiry_box[2] > expiry_box[0] and expiry_box[3] > expiry_box[1]
+                and expiry_box[2] <= w and expiry_box[3] <= h):
+            expiry_crop = img_org.crop(expiry_box)
+            img.paste(expiry_crop, expiry_box)
+
+        # 3) 加 [DESENSITIZED] 水印（在姓名矩形下方，不遮挡关键字段）
         try:
-            font = ImageFont.truetype("arial.ttf", max(20, h // 30))
+            font = ImageFont.truetype("arial.ttf", max(18, h // 32))
         except OSError:
             font = ImageFont.load_default()
         text = "[DESENSITIZED]"
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
         text_x = (w - text_w) // 2
-        text_y = int(h * 0.55)
+        # 水印 y 位置：姓名矩形下方到有效期限矩形上方之间的中间
+        text_y = (name_box[3] + expiry_box[2]) // 2
         # 浅灰文字
-        draw.text((text_x, text_y), text, fill=(180, 180, 180), font=font)
+        draw.text((text_x, text_y), text, fill=(170, 170, 170), font=font)
 
         img.save(dst, quality=85)
-        log.info(f"[身份证脱敏] {src.name} → {dst.name}（{w}x{h}，整片覆盖人像页 + 头像马赛克）")
+        log.info(f"[身份证脱敏] {src.name} → {dst.name}（{w}x{h}，"
+                 f"姓名/有效期限保留，其余打码）")
         return True
     except Exception as e:
         log.warning(f"[身份证脱敏] {src.name} 失败：{e}，原样复制")
