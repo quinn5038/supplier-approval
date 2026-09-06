@@ -137,8 +137,10 @@
                     <div class="col-time">${esc(it.applyTimeShort) || '-'}</div>
                     <div class="col-action">
                         <div class="action-stack">
-                            <button class="btn btn-primary" id="btn-${esc(it.todoId)}"
-                                    onclick="startApprove('${esc(it.todoId)}')">后台审批</button>
+                            ${it.hasResult
+                                ? `<a href="/approve/${esc(it.todoId)}${it.name ? '?name=' + encodeURIComponent(it.name) : ''}" class="btn btn-done">查看审批结果</a>`
+                                : `<button class="btn btn-primary" id="btn-${esc(it.todoId)}"
+                                    onclick="startApprove('${esc(it.todoId)}')">后台审批</button>`}
                             <div class="progress-widget" id="widget-${esc(it.todoId)}" style="display:none">
                                 <svg class="progress-ring" viewBox="0 0 36 36">
                                     <circle class="ring-bg" cx="18" cy="18" r="15.5"/>
@@ -209,7 +211,7 @@
                     if (!btn) continue;   // 该行不在当前列表（翻页/已处理）
                     if (st.status === 'running') {
                         hasRunning = true;
-                        updateProgressUI(todoId, st.progress || 0, st.step || '处理中');
+                        updateProgressUI(tid, st.progress || 0, st.step || '处理中');
                     } else if (st.status === 'done') {
                         setBtnDone(tid);
                     } else if (st.status === 'error') {
