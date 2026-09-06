@@ -384,6 +384,96 @@ body {
     font-size: 12px;
     border-bottom: 1px solid #e8eaed;
 }
+
+/* ===== 审查报告卡片（gen_stage2_report.render_supplier 输出的 HTML）===== */
+/* 9/6 补全：此前这些 class 在 style.css 未定义，导致卡片/两列布局/对齐丢失 */
+.card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: 20px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+.card-head {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--color-border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.card-head .title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+.card-head .meta {
+    color: var(--color-text-muted);
+    font-size: 13px;
+    flex: 1;
+    min-width: 0;
+}
+.card-head .decision {
+    padding: 3px 12px;
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+/* 卡片内标题（如「综合核验表」）——左右 20px 与表格对齐 */
+.card h3 {
+    margin: 16px 20px 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+/* 已上传文件 / 缺失材料 两列布局，左右边界与综合核验表一致（20px） */
+.grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border-top: 1px solid var(--color-border);
+}
+.grid > div {
+    padding: 16px 20px;
+}
+.grid > div:first-child {
+    border-right: 1px solid var(--color-border);
+}
+.grid h3 {
+    margin: 0 0 10px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+}
+.grid ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.7;
+}
+/* 缺失材料子表格 */
+.sub {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 8px;
+}
+.sub th {
+    background: var(--color-bg);
+    text-align: left;
+    padding: 6px 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    border-bottom: 1px solid var(--color-border);
+}
+.sub td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #eee;
+    vertical-align: top;
+}
 .kv { display: inline-block; margin: 1px 4px 1px 0; font-size: 12px; }
 .kv .k { color: var(--color-text-muted); }
 .kv .v { color: var(--color-text); font-weight: 500; }
