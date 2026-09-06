@@ -87,7 +87,8 @@ part_1_basic:
       check_type: qichacha
       rule: "supplier.get('tyc_checked', False) and supplier.get('has_violation_3y', True) is False and supplier.get('is_dishonest', False) is False"
       fail_action: manual
-      verify: 企查查核验是否为被执行人/在任意惩戒名单上/信用分<500
+      requirement: 无失信被执行人、被执行、限制消费令、经营异常名录、严重违法失信等不良记录
+      verify: 企查查核验登记状态是否存续、是否列入失信/被执行/限消令/经营异常/严重违法名单（系统 tycInfo 数据辅助初判）
       note: tycInfo有数据时自动初判；无数据或存疑→核验清单转人工。A11法律纠纷随本条通过即符合
 
     - id: A13
