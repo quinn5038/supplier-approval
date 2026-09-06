@@ -1868,20 +1868,27 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                             )
                             c["qcc_finance_ok"] = True
 
-        # ---- A10 商业信誉：企查查登记状态辅助天眼查 ----
-        elif cid == "A10" and reg:
-            status = reg.get("登记状态", "")
-            if status and not any(k in status for k in ("存续", "在业", "开业")):
+        # ---- A10 商业信誉：企查查数据核验（9/7 优化：明确有/无数据）----
+        elif cid == "A10":
+            status = reg.get("登记状态", "") if reg else ""
+            if not reg:
+                # 企查查无该企业工商数据 → 人工核验
+                c["status"] = "manual"
+                c["detail"] = ("企查查未查到该企业数据，商业信誉（失信被执行人/被执行人/"
+                               "限制消费令/经营异常/严重违法）需人工核验")
+                qcc_issues.append("A10 商业信誉：企查查无数据，需人工核验")
+            elif status and not any(k in status for k in ("存续", "在业", "开业")):
+                # 企查查查到登记状态异常 → 具体问题
                 c["status"] = "fail"
-                c["detail"] = f"企查查工商登记状态异常：「{status}」，需人工复核"
-                qcc_issues.append(f"商业信誉：工商登记状态「{status}」")
-            elif c["status"] == "pending":
-                # 天眼查无数据 + 企查查登记状态正常 → 部分通过
-                c["status"] = "partial"
+                c["detail"] = f"企查查登记状态异常：「{status}」，需人工复核"
+                qcc_issues.append(f"商业信誉：企查查登记状态「{status}」异常")
+            else:
+                # 登记状态正常（有数据），但失信/被执行等专项数据企查查未接入 → 专项标人工核验
+                c["status"] = "manual"
                 c["detail"] = (f"企查查登记状态「{status}」正常；"
-                               f"失信/被执行/惩戒名单记录仍需人工核验")
-            elif c["status"] == "pass":
-                c["detail"] += f"；企查查登记状态「{status}」正常"
+                               f"失信被执行人/被执行人/限制消费令/经营异常/严重违法："
+                               f"企查查无对应数据，需人工核验")
+                qcc_issues.append("A10 商业信誉：失信/被执行等专项数据企查查无数据，需人工核验")
 
     return checklist, qcc_issues
 

@@ -254,28 +254,27 @@ def render_supplier(tid, s2, textin, cache):
                     desens += "+OCR禁用"
                 else:
                     desens += "+未OCR"
-                mat_status_parts.append(f"<span style='font-size:12px;color:#5f6368'>"
-                                        f"{label}：{desens}</span>")
+                mat_status_parts.append(f"<span class='mat-item'>{label}：{desens}</span>")
         # ---- 9/6 修复：材料状态列按 check_type 区分 ----
         # material 类才需要供应商上传材料；qichacha/auto/skip 类不需要
         if check_type and check_type != "material":
-            mat_status = "<span style='color:#5f6368;font-size:12px'>无需提交材料</span>"
+            mat_status = "<span class='mat-muted'>无需提交材料</span>"
         elif mat_status_parts:
             mat_status = "<br>".join(mat_status_parts)
             # 9/6：A02 身份证脱敏后，加「点击查看脱敏后证件」链接（跳转展示脱敏图片）
             if cid == "A02":
                 mat_status += (
                     f"<br><a href='/api/desens_image/{esc(tid)}' target='_blank' "
-                    f"style='font-size:12px;color:#1a73e8;'>点击查看脱敏后证件</a>"
+                    f"class='desens-link'>点击查看脱敏后证件</a>"
                 )
         elif st == "manual":
             # 9/6：转人工项（如 ISO 传错位置）→ 显示「上传异常」而非「材料未上传」误导
-            mat_status = "<span style='color:#854f0b'>上传异常（见核验结果列）</span>"
+            mat_status = "<span class='mat-warn'>上传异常（见核验结果列）</span>"
         elif st == "skip" and detail:
             # 9/6：skip 项（如 C1_05 无需生产许可证）→ 显示 detail 而非「材料未上传」
-            mat_status = f"<span style='color:#5f6368;font-size:12px'>{esc(detail)}</span>"
+            mat_status = f"<span class='mat-muted'>{esc(detail)}</span>"
         else:
-            mat_status = "<span style='color:#a52834'>材料未上传</span>"
+            mat_status = "<span class='mat-miss'>材料未上传</span>"
 
         # ---- 9/6 修复：核验结果列按 check_type 区分 ----
         # qichacha 类（A08 财报/A10 商业信誉）→ 显示企查查/天眼查核验结论（detail）
@@ -286,31 +285,31 @@ def render_supplier(tid, s2, textin, cache):
             check_detail = f"<span class='issue'>{esc(detail)}</span>"
         elif st == "skip" and detail:
             # 9/6：skip 项（如 C1_05 无需生产许可证）→ 核验结果列显示 detail
-            check_detail = f"<span style='color:#5f6368'>{esc(detail)}</span>"
+            check_detail = f"<span class='verify-skip'>{esc(detail)}</span>"
         elif check_type == "qichacha":
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
-                            else "<span style='color:#5f6368;font-size:12px'>无核验数据</span>")
+                            else "<span class='verify-empty'>无核验数据</span>")
         elif check_type in ("auto", "skip"):
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
-                            else "<span style='color:#5f6368;font-size:12px'>无需核验</span>")
+                            else "<span class='verify-empty'>无需核验</span>")
         else:  # material 或未识别
             check_detail = ("<br>".join(check_detail_parts)
                             if check_detail_parts
-                            else "<span style='color:#5f6368;font-size:12px'>无核验数据</span>")
+                            else "<span class='verify-empty'>无核验数据</span>")
 
         # 决策依据：9/5 改造为从 rules.yaml 读 requirement
         decision_basis = _load_decision_basis(cid, cname)
 
         big_rows += (
             f"<tr style='background:{bg}'>"
-            f"<td style='color:{color};font-weight:bold;font-size:16px;text-align:center'>{mark}</td>"
-            f"<td>{esc(cid)}</td>"
-            f"<td>{esc(cname)}</td>"
-            f"<td style='font-size:13px'>{esc(decision_basis)}</td>"
-            f"<td>{mat_status}</td>"
-            f"<td>{check_detail}</td>"
+            f"<td class='mark-cell' style='color:{color};text-align:center'>{mark}</td>"
+            f"<td class='cid-cell'>{esc(cid)}</td>"
+            f"<td class='name-cell'>{esc(cname)}</td>"
+            f"<td class='basis-cell'>{esc(decision_basis)}</td>"
+            f"<td class='mat-cell'>{mat_status}</td>"
+            f"<td class='verify-cell'>{check_detail}</td>"
             f"</tr>"
         )
 
@@ -530,6 +529,25 @@ h3{{margin:0 0 10px;font-size:15px;color:#202124;border-left:3px solid #1a73e8;p
 table{{width:100%;border-collapse:collapse;font-size:14px}}
 table th{{background:#f8f9fa;text-align:left;padding:6px 8px;font-weight:600;color:#5f6368;font-size:12px}}
 table td{{padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top}}
+.big-table{{font-size:13px}}
+.big-table .mark-cell{{font-size:14px;font-weight:700;line-height:1;width:32px}}
+.big-table .cid-cell{{font-size:12px;font-family:ui-monospace,Consolas,monospace;color:#5f6368;white-space:nowrap}}
+.big-table .name-cell{{font-size:13px;font-weight:500;color:#202124}}
+.big-table .basis-cell{{font-size:13px;color:#202124;line-height:1.6}}
+.big-table .mat-cell,.big-table .verify-cell{{font-size:13px;color:#202124;line-height:1.7}}
+.mat-item{{font-size:13px;color:#5f6368}}
+.mat-muted{{font-size:13px;color:#5f6368}}
+.mat-warn{{font-size:13px;color:#854f0b}}
+.mat-miss{{font-size:13px;color:#a52834}}
+.desens-link{{font-size:12px;color:#1a73e8;text-decoration:none}}
+.verify-skip{{font-size:13px;color:#5f6368}}
+.verify-empty{{font-size:12px;color:#5f6368}}
+.kv{{display:inline-block;margin:1px 4px 1px 0;font-size:12px}}
+.kv .k{{color:#5f6368}}
+.kv .v{{color:#202124;font-weight:500}}
+.issue{{display:inline-block;color:#a52834;font-size:12px}}
+.ok-mini{{display:inline-block;color:#1e7e34;font-size:12px}}
+.ng-mini{{display:inline-block;color:#a52834;font-weight:600;font-size:12px}}
 .sub{{margin-top:8px}}
 .sub th{{font-size:11px}}
 .warn{{background:#fef7e0;color:#8a6d00;padding:10px;border-radius:4px;font-size:13px}}

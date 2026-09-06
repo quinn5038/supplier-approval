@@ -382,6 +382,51 @@ body {
     font-size: 13px;
 }
 .big-table tr:last-child td { border-bottom: none; }
+
+/* ===== 综合核验表单元格统一排版（9/7 统一字体/字号/粗细）===== */
+/* 字号层级：表头 12px < 正文 13px < 状态符号 14px；细节（kv/issue）12px */
+.big-table .mark-cell {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    width: 32px;
+}
+.big-table .cid-cell {
+    font-size: 12px;
+    font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+}
+.big-table .name-cell {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text);
+}
+.big-table .basis-cell {
+    font-size: 13px;
+    color: var(--color-text);
+    line-height: 1.6;
+}
+.big-table .mat-cell,
+.big-table .verify-cell {
+    font-size: 13px;
+    color: var(--color-text);
+    line-height: 1.7;
+}
+/* 材料状态列内的各类标签 */
+.mat-item { font-size: 13px; color: var(--color-text-muted); }
+.mat-muted { font-size: 13px; color: var(--color-text-muted); }
+.mat-warn  { font-size: 13px; color: var(--color-warning); }
+.mat-miss  { font-size: 13px; color: var(--color-danger); }
+.desens-link {
+    font-size: 12px;
+    color: #1a73e8;
+    text-decoration: none;
+}
+.desens-link:hover { text-decoration: underline; }
+/* 核验结果列内：skip 说明 / 空提示 */
+.verify-skip  { font-size: 13px; color: var(--color-text-muted); }
+.verify-empty { font-size: 12px; color: var(--color-text-muted); }
 .sup-type {
     background: var(--color-primary-light);
     color: var(--color-primary-dark);
