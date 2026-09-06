@@ -217,10 +217,6 @@
                     } else if (st.status === 'error') {
                         setBtnError(tid, '审批失败');
                         showFailReason(tid, st.error || st.step || '');
-                    } else if (st.status === 'skipped') {
-                        // 分流不适用项：恢复「后台审批」，不显示「查看结果」
-                        setBtnIdle(tid);
-                        showFailReason(tid, st.error || '不适用标准审批流程');
                     }
                 }
                 if (!hasRunning && pollTimer) {
@@ -249,17 +245,6 @@
             btn.classList.remove('btn-running');
             btn.classList.add('btn-error');
             btn.textContent = msg || '失败·点击重试';
-            // 隐藏进度 widget
-            const w = document.getElementById('widget-' + todoId);
-            if (w) w.style.display = 'none';
-        }
-
-        // 恢复为初始「后台审批」按钮（分流不适用项，无有效审批结果时用）
-        function setBtnIdle(todoId) {
-            const btn = document.getElementById('btn-' + todoId);
-            if (!btn) return;
-            btn.outerHTML = `<button class="btn btn-primary" id="btn-${esc(todoId)}"
-                                    onclick="startApprove('${esc(todoId)}')">后台审批</button>`;
             // 隐藏进度 widget
             const w = document.getElementById('widget-' + todoId);
             if (w) w.style.display = 'none';

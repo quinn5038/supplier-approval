@@ -179,6 +179,10 @@ def build_opinion(tid, s2, textin, cache):
     q_issues = s2.get("qcc_issues", []) or []
     decision = s2.get("decision", "manual")
 
+    # 9/6：skip 项（境外/集团独有不适用）直接返回不适用意见，不走标准核验意见拼接
+    if decision == "skip":
+        return s2.get("opinion") or s2.get("skip_reason") or "该供应商不适用标准审批流程"
+
     # 分类：fail / pass / skip / pending-or-manual
     fail_items = [c for c in checklist if c.get("status") == "fail"]
     pass_items = [c for c in checklist if c.get("status") == "pass"]
@@ -206,6 +210,15 @@ def build_opinion(tid, s2, textin, cache):
             hard_fails.append((cid, cname, issue_desc))
         else:
             soft_fails.append((cid, cname, issue_desc))
+
+    # 9/6 修复：soft_pending = pending 项 + 软 fail 项（此前该变量未初始化，导致转人工分支 NameError）
+    soft_pending = []
+    for c in pending_items:
+        cid = c.get("id", "")
+        cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
+        msg = c.get("message") or c.get("detail") or "需人工核验"
+        soft_pending.append((cid, cname, msg))
+    soft_pending.extend(soft_fails)
 
     # 整体建议：硬伤 ≥1 → 建议退回；其余 fail/pending → 转人工；全 pass → 建议同意
     if hard_fails:
