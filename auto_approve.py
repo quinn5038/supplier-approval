@@ -544,6 +544,28 @@ FILEINFO_TYPE_MAP = {
     "CMA资质证书": {"inspection_cert"},
 }
 
+# 9/6：ISO 三体系「文件名编号 vs 上传位置」矛盾检测辅助
+_ISO_TYPE_BY_CODE = {"9001": "iso9001", "14001": "iso14001", "45001": "iso45001"}
+
+def _iso_code_in_filename(name):
+    """从文件名提取 ISO 编号（9001/14001/45001），无则返回空串"""
+    name = str(name or "")
+    for code in ("9001", "14001", "45001"):
+        if code in name:
+            return code
+    return ""
+
+def _iso_code_in_typename(type_name):
+    """从上传位置 typeName 反推 ISO 编号（无则空串）"""
+    tn = str(type_name or "")
+    if "质量管理" in tn:
+        return "9001"
+    if "环境管理" in tn:
+        return "14001"
+    if "健康安全" in tn or "职业健康" in tn:
+        return "45001"
+    return ""
+
 # 文件名/附件说明关键词 → 材料类型（用于"传到错误位置"的情况）
 # 按优先级排列，先匹配的优先
 KEYWORD_MAP = [
@@ -662,6 +684,7 @@ def classify_uploaded_materials(file_list):
     materials = set()
     certifications = []
     details = []
+    iso_conflicts = []   # 9/6：ISO 三体系传错位置异常记录
     
     for f in file_list:
         if not isinstance(f, dict):
@@ -686,10 +709,20 @@ def classify_uploaded_materials(file_list):
             if keyword.lower() in all_text.lower():
                 classified |= types
         
-        # 3. 特殊行业资质证书图片 → 需从文件名/说明判断具体是什么
-        if type_name == "特殊行业资质证书图片" or type_name == "其他图片" or type_name == "其他":
-            # 已经在上面关键词匹配中处理了
-            pass
+        # 3. 9/6：ISO 编号矛盾检测——文件名含明确 ISO 编号，但上传位置（typeName）
+        #    对应的是另一个 ISO 编号（如 fileName=ISO14001.png 却传到"健康安全管理体系"位置）
+        #    → 以文件名编号为准，移除 typeName 误标的编号，并记录异常供转人工
+        fn_iso = _iso_code_in_filename(file_name)
+        tn_iso = _iso_code_in_typename(type_name)
+        if fn_iso and tn_iso and fn_iso != tn_iso:
+            classified.discard(_ISO_TYPE_BY_CODE.get(tn_iso, ""))
+            classified.add(_ISO_TYPE_BY_CODE.get(fn_iso, fn_iso))
+            iso_conflicts.append({
+                "file": file_name,
+                "position": type_name,
+                "expected_code": tn_iso,
+                "actual_code": fn_iso,
+            })
         
         materials |= classified
         details.append((file_name, type_name, file_desc, classified))
@@ -706,6 +739,7 @@ def classify_uploaded_materials(file_list):
         "materials": materials,
         "certifications": certifications,
         "details": details,
+        "iso_conflicts": iso_conflicts,   # 9/6：ISO 传错位置异常列表
     }
 
 
@@ -805,12 +839,22 @@ def build_checklist(supplier, rules_list):
                 continue
             if rid == "C1_05" and not supplier.get("needs_production_license", False):
                 entry["status"] = "skip"
-                entry["detail"] = "经营范围不涉及强制许可/认证产品"
+                entry["detail"] = "无需生产许可证（经营范围不涉及强制许可/认证产品）"
                 checklist.append(entry)
                 continue
 
             ok, _ = evaluate_rule(rule, supplier)
             if not ok:
+                # 9/6：ISO 三体系「传错位置」异常 → 转人工（而非简单"缺少材料"）
+                conflict = _find_iso_conflict(supplier, rid)
+                if conflict:
+                    entry["status"] = "manual"
+                    entry["detail"] = (f"上传异常：文件「{conflict.get('file')}」被传到"
+                                       f"「{conflict.get('position')}」位置（文件名编号 "
+                                       f"{conflict.get('actual_code')} 与位置 {conflict.get('expected_code')} 不符），"
+                                       f"疑似重复上传/传错位置，需人工核验")
+                    checklist.append(entry)
+                    continue
                 entry["status"] = "fail"
                 rid_name = f"{rid} {name}"
                 req = rule.get("requirement") or MATERIAL_REQUIREMENTS.get(rid_name, rid_name)
@@ -858,6 +902,26 @@ def evaluate_rule(rule, supplier):
     except Exception:
         ok = False
     return ok, rule.get("name", "")
+
+
+# 9/6：ISO 三体系审核项 → 对应 ISO 编号
+_ISO_CODE_BY_RULE = {
+    "C1_02": "9001", "C1_03": "14001", "C1_04": "45001",
+    "D1_03": "9001", "D1_04": "14001", "D1_05": "45001",
+}
+
+def _find_iso_conflict(supplier, rid):
+    """检查供应商是否存在对应 ISO 审核项的「传错位置」异常。
+
+    返回冲突 dict（含 file/position/actual_code 等），无则 None。
+    """
+    code = _ISO_CODE_BY_RULE.get(rid)
+    if not code:
+        return None
+    for c in (supplier.get("iso_conflicts") or []):
+        if c.get("expected_code") == code:
+            return c
+    return None
 
 
 def check_auto_rules(supplier, rules_list):
@@ -1390,6 +1454,8 @@ def run():
                 "country_name": base_bo.get("countryName", ""),
                 # ISO认证（从资质文件分类提取）
                 "certifications": certifications,
+                # 9/6：ISO 传错位置异常（供 C1_02/C1_03/C1_04 转人工）
+                "iso_conflicts": mat_cls.get("iso_conflicts", []),
                 # 材料分类结果（齐全性检查用）
                 "has_business_license": "business_license" in classified_materials,
                 "has_legal_id_material": "legal_person_id" in classified_materials,

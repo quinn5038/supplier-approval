@@ -187,29 +187,69 @@ def render_supplier(tid, s2, textin, cache):
                     fields = td.get("fields") or {}
                     checks = td.get("checks") or {}
                     iss = td.get("issues") or []
-                    # 核验结果：列出 OCR 抽取的关键字段与系统字段对比
-                    for k, v in list(fields.items())[:3]:
-                        s = str(v)
-                        if len(s) > 30:
-                            s = s[:30] + "…"
-                        check_detail_parts.append(
-                            f"<span class='kv'><span class='k'>{esc(k)}</span>=<span class='v'>{esc(s)}</span></span>"
-                        )
-                    if iss:
-                        check_detail_parts.append(
-                            f"<span class='issue'>{esc(iss[0])}</span>"
-                        )
-                    elif checks:
-                        ok = sum(1 for cv in checks.values() if cv is True)
-                        ng = sum(1 for cv in checks.values() if cv is False)
-                        if ng == 0:
+                    # 9/6：核验结果列——ISO 证书显示有效期，营业执照显示法人差异
+                    if doc_type in ("iso9001", "iso14001", "iso45001"):
+                        org = fields.get("获证组织")
+                        exp = fields.get("有效期至")
+                        valid = checks.get("在有效期内")
+                        if org:
                             check_detail_parts.append(
-                                f"<span class='ok-mini'>核验 {ok} 项全通过</span>"
-                            )
+                                f"<span class='kv'><span class='k'>获证组织</span>=<span class='v'>{esc(org)}</span></span>")
+                        if exp:
+                            if valid is True:
+                                check_detail_parts.append(
+                                    f"<span class='ok-mini'>有效期至 {esc(exp)}，在有效期内</span>")
+                            elif valid is False:
+                                check_detail_parts.append(
+                                    f"<span class='ng-mini'>有效期至 {esc(exp)}，已过期</span>")
+                            else:
+                                check_detail_parts.append(
+                                    f"<span class='kv'>有效期至 {esc(exp)}</span>")
                         else:
                             check_detail_parts.append(
-                                f"<span class='ng-mini'>{ng} 项不符</span>"
+                                f"<span class='issue'>未识别到有效期</span>")
+                        for it in iss[:2]:
+                            check_detail_parts.append(f"<span class='issue'>{esc(it)}</span>")
+                    elif doc_type == "business_license":
+                        f_legal = fields.get("法定代表人")
+                        f_cap = fields.get("注册资本_万")
+                        if f_legal:
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>法定代表人</span>=<span class='v'>{esc(f_legal)}</span></span>")
+                        if f_cap:
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>注册资本</span>=<span class='v'>{esc(str(f_cap))}万</span></span>")
+                        if checks.get("法人一致") is False:
+                            sys_legal = supplier.get("legal_person", "")
+                            check_detail_parts.append(
+                                f"<span class='ng-mini'>法定代表人：执照「{esc(f_legal)}」vs 系统「{esc(sys_legal)}」不一致</span>")
+                        if checks.get("信用代码一致") is False:
+                            check_detail_parts.append(
+                                f"<span class='ng-mini'>信用代码：执照与系统不一致</span>")
+                    else:
+                        # 通用：fields 前 3 个
+                        for k, v in list(fields.items())[:3]:
+                            s = str(v)
+                            if len(s) > 30:
+                                s = s[:30] + "…"
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>{esc(k)}</span>=<span class='v'>{esc(s)}</span></span>"
                             )
+                        if iss:
+                            check_detail_parts.append(
+                                f"<span class='issue'>{esc(iss[0])}</span>"
+                            )
+                        elif checks:
+                            ok = sum(1 for cv in checks.values() if cv is True)
+                            ng = sum(1 for cv in checks.values() if cv is False)
+                            if ng == 0:
+                                check_detail_parts.append(
+                                    f"<span class='ok-mini'>核验 {ok} 项全通过</span>"
+                                )
+                            else:
+                                check_detail_parts.append(
+                                    f"<span class='ng-mini'>{ng} 项不符</span>"
+                                )
                 elif td and td.get("_deprecated"):
                     desens += "+OCR禁用"
                 else:
@@ -222,6 +262,18 @@ def render_supplier(tid, s2, textin, cache):
             mat_status = "<span style='color:#5f6368;font-size:12px'>无需提交材料</span>"
         elif mat_status_parts:
             mat_status = "<br>".join(mat_status_parts)
+            # 9/6：A02 身份证脱敏后，加「点击查看脱敏后证件」链接（跳转展示脱敏图片）
+            if cid == "A02":
+                mat_status += (
+                    f"<br><a href='/api/desens_image/{esc(tid)}' target='_blank' "
+                    f"style='font-size:12px;color:#1a73e8;'>点击查看脱敏后证件</a>"
+                )
+        elif st == "manual":
+            # 9/6：转人工项（如 ISO 传错位置）→ 显示「上传异常」而非「材料未上传」误导
+            mat_status = "<span style='color:#854f0b'>上传异常（见核验结果列）</span>"
+        elif st == "skip" and detail:
+            # 9/6：skip 项（如 C1_05 无需生产许可证）→ 显示 detail 而非「材料未上传」
+            mat_status = f"<span style='color:#5f6368;font-size:12px'>{esc(detail)}</span>"
         else:
             mat_status = "<span style='color:#a52834'>材料未上传</span>"
 
@@ -229,7 +281,13 @@ def render_supplier(tid, s2, textin, cache):
         # qichacha 类（A08 财报/A10 商业信誉）→ 显示企查查/天眼查核验结论（detail）
         # material 类 → 显示 OCR 抽取字段
         # auto/skip 类 → 显示规则判定结论（detail）或「无需核验」
-        if check_type == "qichacha":
+        # 9/6：转人工项（manual，如 ISO 传错位置）→ 核验结果列直接显示 detail（人工核验说明）
+        if st == "manual" and detail:
+            check_detail = f"<span class='issue'>{esc(detail)}</span>"
+        elif st == "skip" and detail:
+            # 9/6：skip 项（如 C1_05 无需生产许可证）→ 核验结果列显示 detail
+            check_detail = f"<span style='color:#5f6368'>{esc(detail)}</span>"
+        elif check_type == "qichacha":
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
                             else "<span style='color:#5f6368;font-size:12px'>无核验数据</span>")

@@ -339,17 +339,13 @@ def extract_business_license(text, supplier):
 
 
 def extract_legal_person_id(text, supplier):
-    """[已废弃 2026-09-04] 法人身份证 → 姓名比对+效期
+    """法人身份证 → 有效期核验（2026-09-06 恢复：脱敏后 OCR）
 
-    按保密合规要求：法人身份证是敏感证件，不再发给 AI 处理。
-    A02 法人身份证明改为仅校验材料是否上传，OCR 识别禁用。
-
-    函数保留为兼容旧调用，实际被 extract() 调用时直接返回 None。
-    详见 docs/保密合规改造方案.md
+    保密合规前提：身份证在 OCR 前先走 desensitize 脱敏（人像页打码，国徽页保留）。
+    脱敏后姓名/证号不可见，但国徽页「有效期限」保留，故本函数仅核验有效期；
+    姓名一致性无法 OCR 比对，由 A02 转人工核验。
     """
-    log.warning("[DEPRECATED] extract_legal_person_id 已废弃——按保密合规要求 "
-                "A02 不再做身份证 OCR 识别，仅校验材料是否上传")
-    return {"fields": {}, "checks": {}, "issues": [], "_deprecated": True}
+    t = _pre(text)
     n = _norm(t)
     fields = {}
     m = re.search(r"姓\s*名\s*[:：]?\s*([\u4e00-\u9fa5·]{2,15}?)"

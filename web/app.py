@@ -28,7 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -370,6 +370,23 @@ async def api_report(todo_id: str):
         }
     except Exception as e:
         return JSONResponse({"error": "render_failed", "msg": str(e)[:500]}, status_code=500)
+
+
+@app.get("/api/desens_image/{todo_id}")
+async def api_desens_image(todo_id: str):
+    """返回该供应商脱敏后的身份证图片（报告页「点击查看脱敏后证件」用）"""
+    desens_dir = BASE_DIR / "files_cache_desens" / str(todo_id)
+    if not desens_dir.exists():
+        return JSONResponse({"error": "not_found", "msg": "无脱敏文件"}, status_code=404)
+    id_keywords = ("身份证", "证件", "id_card", "id_")
+    for f in sorted(desens_dir.iterdir()):
+        if not f.is_file():
+            continue
+        name_lower = f.name.lower()
+        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif") \
+                and any(k in name_lower for k in id_keywords):
+            return FileResponse(str(f))
+    return JSONResponse({"error": "not_found", "msg": "未找到脱敏身份证图片"}, status_code=404)
 
 
 @app.post("/api/cookie")
