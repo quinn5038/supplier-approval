@@ -195,7 +195,7 @@ body {
 .action-stack {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    align-items: flex-end;
     gap: 4px;
     min-height: 30px;
 }
@@ -252,7 +252,7 @@ body {
 .todo-table-head,
 .todo-item {
     display: grid;
-    grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.4fr);
+    grid-template-columns: minmax(0, 2.0fr) minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr);
     gap: 16px;
     align-items: center;
     padding: 10px 20px;
@@ -277,8 +277,8 @@ body {
 .todo-item .col-time {
     padding-left: 12px;
 }
-/* 9/7：表头"操作"与按钮左端对齐（左对齐，与数据行按钮一致） */
-.todo-table-head .col-head-action { text-align: left; }
+/* 9/7：表头"操作"与数据行按钮同侧对齐（右对齐） */
+.todo-table-head .col-head-action { text-align: right; }
 
 /* 数据行 */
 .todo-item {
@@ -333,8 +333,8 @@ body {
     white-space: nowrap;
 }
 
-/* 第 4 列：操作按钮（9/7 左对齐，与表头"操作"左端对齐） */
-.todo-item .col-action { text-align: left; }
+/* 第 4 列：操作按钮（右对齐，与表头"操作"一致） */
+.todo-item .col-action { text-align: right; }
 
 /* ===== 进度指示器 ===== */
 .progress-bar {
