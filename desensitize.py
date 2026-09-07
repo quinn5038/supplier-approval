@@ -232,25 +232,39 @@ def _desensitize_financial_pdf(src, dst):
 # 身份证图片脱敏
 # ============================================================
 # 9/7 重写：仅保留「姓名」+「身份证有效期」两项，其余全部打码。
-# 身份证为「上下拼版」扫描件：
-#   - 上半部分为人像页正面（顶部约 45%），含姓名/性别/民族/出生/住址/公民身份号码+头像
-#   - 下半部分为国徽页背面（底部约 55%），含国徽+"中华人民共和国居民身份证"+签发机关+有效期限
-# 保留矩形（基于图像宽高比例）：
-#   - 姓名：top 5%-13%, left 5%-58%（姓名行宽度，按标准排版估算）
-#   - 有效期限：top 84%-94%, left 22%-72%（底部居中行）
-# 全部其余区域：白色覆盖 + 「[DESENSITIZED]」水印 + 头像马赛克
+# 身份证扫描件版式不统一，需按宽高比自适应：
+#   - 竖排（高 > 宽，如 285x579）：上下拼版，正面在上、背面在下
+#   - 横排（宽 > 高，如 746x229）：左右拼版，正面在左、背面在右
+# 9/7 排查结论：固定比例矩形只适用于竖排，横排身份证的"有效期"在右侧，
+#   被错误打码 → OCR 识别不到有效期 → 误判"缺背面"。
 
-# 保留矩形坐标（基于图像宽高比例）
-_KEEP_NAME_BOX = (0.03, 0.58, 0.03, 0.24)          # left, right, top, bottom（正面姓名区）
-_KEEP_EXPIRY_BOX = (0.18, 0.75, 0.76, 0.97)        # 背面有效期限区
-_HEAD_PHOTO_BOX = (0.62, 0.98, 0.02, 0.42)        # 头像估算区域
+# 头像估算区域（仅竖排有效，横排头像在左上角，随姓名区一并保留）
+_HEAD_PHOTO_BOX = (0.62, 0.98, 0.02, 0.42)
+
+
+def _id_card_keep_boxes(w, h):
+    """根据宽高比返回 (name_box, expiry_box) 像素坐标。
+
+    横排（w > h）：姓名在左半区，有效期在右半区。
+    竖排（h >= w）：姓名在顶部（正面），有效期在底部（背面）。
+    """
+    if w > h:
+        # 横排（左右拼版）：左=正面(姓名)，右=背面(有效期)
+        name_box = (int(w * 0.02), int(h * 0.06), int(w * 0.48), int(h * 0.94))
+        expiry_box = (int(w * 0.52), int(h * 0.06), int(w * 0.98), int(h * 0.94))
+    else:
+        # 竖排（上下拼版）：上=正面(姓名)，下=背面(有效期)
+        name_box = (int(w * 0.03), int(h * 0.03), int(w * 0.58), int(h * 0.24))
+        expiry_box = (int(w * 0.18), int(h * 0.76), int(w * 0.75), int(h * 0.97))
+    return name_box, expiry_box
 
 
 def _desensitize_id_card_image(src, dst):
     """身份证图片脱敏：保留 姓名 + 有效期限，其余打码
 
-    依据：9/7 与保密专员共识——身份证扫描件只暴露这两两个字段给 AI，
+    依据：9/7 与保密专员共识——身份证扫描件只暴露「姓名」「有效期限」两个字段给 AI，
     其余敏感信息（性别/民族/出生/住址/身份证号/头像/签发机关）一律打码。
+    按宽高比自适应横排/竖排版式（见 _id_card_keep_boxes）。
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -263,15 +277,8 @@ def _desensitize_id_card_image(src, dst):
         w, h = img.size
         draw = ImageDraw.Draw(img)
 
-        # 解析保留矩形的像素坐标
-        name_box = (
-            int(w * _KEEP_NAME_BOX[0]), int(h * _KEEP_NAME_BOX[2]),
-            int(w * _KEEP_NAME_BOX[1]), int(h * _KEEP_NAME_BOX[3]),
-        )
-        expiry_box = (
-            int(w * _KEEP_EXPIRY_BOX[0]), int(h * _KEEP_EXPIRY_BOX[2]),
-            int(w * _KEEP_EXPIRY_BOX[1]), int(h * _KEEP_EXPIRY_BOX[3]),
-        )
+        # 按版式解析保留矩形（横排/竖排自适应）
+        name_box, expiry_box = _id_card_keep_boxes(w, h)
         photo_box = (
             int(w * _HEAD_PHOTO_BOX[0]), int(h * _HEAD_PHOTO_BOX[2]),
             int(w * _HEAD_PHOTO_BOX[1]), int(h * _HEAD_PHOTO_BOX[3]),
@@ -317,7 +324,7 @@ def _desensitize_id_card_image(src, dst):
 
         img.save(dst, quality=85)
         log.info(f"[身份证脱敏] {src.name} → {dst.name}（{w}x{h}，"
-                 f"姓名/有效期限保留，其余打码）")
+                 f"{'横排' if w > h else '竖排'}版式，姓名/有效期限保留，其余打码）")
         return True
     except Exception as e:
         log.warning(f"[身份证脱敏] {src.name} 失败：{e}，原样复制")

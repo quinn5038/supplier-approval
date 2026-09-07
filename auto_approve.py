@@ -1940,19 +1940,29 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
         issues = r.get("issues") or []
         fields = r.get("fields") or {}
 
-        # 通用：有 issues → fail；全 pass → pass；混合 → partial；无 checks → pending
+        # 通用：有明确 false（不符/过期）→ fail；有 issues 但无 false（识别失败/需人工）→ manual；
+        # 全 pass → pass；混合 → partial；无 checks → pending
         true_keys = [k for k, v in checks.items() if v is True]
         false_keys = [k for k, v in checks.items() if v is False]
         none_keys = [k for k, v in checks.items() if v is None]
 
-        if issues or false_keys:
-            # 取最具体的 issue 描述（限制长度）
-            descs = issues if issues else [f"{k}={v}" for k, v in checks.items() if v is False]
+        if false_keys:
+            # 明确的"不符合"（check=False，如已过期/不一致）→ fail（退回）
+            descs = issues + [f"{k}={v}" for k, v in checks.items() if v is False]
             short = "；".join(descs[:3])
             if len(descs) > 3:
                 short += f"（另有{len(descs)-3}项）"
             c["status"] = "fail"
             c["detail"] = f"OCR核验发现问题：{short}"
+            textin_issues.append(f"{c.get('name', doc_type)}：{short}")
+        elif issues:
+            # 有 issues 但无明确 false → "识别失败/需人工核验"类（9/7 修复：
+            # 如身份证只识别到一面，不武断退回，转人工）→ manual
+            short = "；".join(issues[:3])
+            if len(issues) > 3:
+                short += f"（另有{len(issues)-3}项）"
+            c["status"] = "manual"
+            c["detail"] = f"OCR核验需人工：{short}"
             textin_issues.append(f"{c.get('name', doc_type)}：{short}")
         elif true_keys and not none_keys:
             # 全 pass：标 pass，描述抽取出的关键字段

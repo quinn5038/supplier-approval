@@ -426,19 +426,24 @@ def extract_legal_person_id(text, supplier, detail=None):
 
     checks = {}
 
-    # ---- 正反面完整性检测（9/7 新增）----
-    # 姓名缺失 → 缺正面；有效期缺失 → 缺背面
-    missing_sides = []
-    if not fields["姓名"]:
-        missing_sides.append("正面（姓名）")
-    if not longterm and exp is None:
-        missing_sides.append("背面（有效期限）")
-    if missing_sides:
-        checks["正反面齐全"] = False
-        issues.append(
-            f"身份证缺少{'、'.join(missing_sides)}，请供应商重新上传完整的身份证正反面")
-    else:
+    # ---- 正反面完整性检测（9/7 修复：区分「真缺面」与「识别失败」）----
+    # 姓名=正面，有效期限=背面
+    name_ok = bool(fields["姓名"])
+    expiry_ok = bool(longterm or exp)
+    if name_ok and expiry_ok:
         checks["正反面齐全"] = True
+    elif not name_ok and not expiry_ok:
+        # 两面都识别不到 → 可能是真缺、或文件根本不是身份证/严重不清晰，标 fail
+        checks["正反面齐全"] = False
+        issues.append("身份证正反面均未能识别，请确认是否上传了完整的身份证正反面")
+    else:
+        # 只识别到一面 → 另一面可能缺、也可能被打码/不清晰导致识别失败，转人工核验
+        # （不武断判「缺少XX面请重新上传」，避免脱敏打码/OCR识别率低导致的误判）
+        checks["正反面齐全"] = None
+        if not name_ok:
+            issues.append("身份证正面（姓名）未能识别，需人工核验是否缺面或图片不清晰")
+        if not expiry_ok:
+            issues.append("身份证背面（有效期限）未能识别，需人工核验是否缺面或图片不清晰")
 
     # ---- 姓名一致性核验 ----
     sys_legal = _norm(supplier.get("legal_person", ""))
