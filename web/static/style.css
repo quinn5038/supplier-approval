@@ -55,6 +55,7 @@ body {
     font-size: 13px;
     font-family: inherit;
     font-weight: 500;
+    line-height: 1.5;
     transition: background 0.2s;
 }
 .btn-primary { background: var(--color-primary); color: #fff; box-shadow: 0 0 0 3px var(--color-primary-light); }
@@ -148,15 +149,14 @@ body {
 }
 .btn.btn-running { background: var(--color-text-muted); cursor: default; }
 
-/* 审批完成："查看结果"按钮（#009876 绿） */
+/* 审批完成："查看结果"按钮（#009876 绿）
+   9/7 统一：padding/font-size/font-weight 均继承 .btn 基类（8px 18px / 13px / 500），
+   与"后台审批"(.btn-primary) 完全一致；仅保留 a 标签所需的 display/text-decoration
+   及本按钮独有的配色/光圈/动画。 */
 .btn.btn-done {
     background: var(--color-done);
     color: #fff;
     display: inline-block;
-    padding: 7px 16px;
-    border-radius: var(--radius);
-    font-size: 13px;
-    font-weight: 600;
     text-decoration: none;
     box-shadow: 0 0 0 3px var(--color-done-bg);
     animation: pulse-done 1.6s ease-in-out 2;
