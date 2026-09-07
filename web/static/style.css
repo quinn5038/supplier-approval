@@ -195,7 +195,7 @@ body {
 .action-stack {
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: 4px;
     min-height: 30px;
 }
@@ -265,10 +265,20 @@ body {
     border-bottom: none;
     border-radius: var(--radius) var(--radius) 0 0;
     color: var(--color-primary-dark);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 12px;
+    font-weight: 600;
 }
-.todo-table-head .col-head-action { text-align: right; }
+/* 9/7：审批业务/申请时间两列右移（加左内边距），其他列位置不变 */
+.todo-table-head .col-head-bill,
+.todo-item .col-bill {
+    padding-left: 12px;
+}
+.todo-table-head .col-head-time,
+.todo-item .col-time {
+    padding-left: 12px;
+}
+/* 9/7：表头"操作"与按钮左端对齐（左对齐，与数据行按钮一致） */
+.todo-table-head .col-head-action { text-align: left; }
 
 /* 数据行 */
 .todo-item {
@@ -323,8 +333,8 @@ body {
     white-space: nowrap;
 }
 
-/* 第 4 列：操作按钮（右对齐，与表头一致） */
-.todo-item .col-action { text-align: right; }
+/* 第 4 列：操作按钮（9/7 左对齐，与表头"操作"左端对齐） */
+.todo-item .col-action { text-align: left; }
 
 /* ===== 进度指示器 ===== */
 .progress-bar {
