@@ -13,9 +13,9 @@ echo.
 echo KEEP THIS WINDOW OPEN while using the webui.
 echo Close this window to stop the service.
 echo.
-cd /d "C:\Users\CHEC\WorkBuddy\2026-08-12-10-09-50\supplier_approval_starter"
+cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
-"C:\Users\CHEC\.workbuddy\binaries\python\envs\default\Scripts\uvicorn.exe" web.app:app --host 0.0.0.0 --port 8000
+python -m uvicorn web.app:app --host 0.0.0.0 --port 8000
 echo.
 echo ============================================
 echo   WebUI stopped. Press any key to close.

@@ -1,16 +1,16 @@
 """
-企业信息接口 独立客户端（不依赖 WorkBuddy 连接器）
+企业信息接口 独立客户端（独立于集成环境，可脱离连接器插件运行）
 ==================================================
 被 auto_approve.py 的 enhance_checklist_with_qcc 调用。
-当前为接入骨架（13个函数 stub），等 Quinn 提供 QCC_APP_KEY/QCC_SECRET_KEY 后填实。
+当前为接入骨架（13个函数 stub），等获取 QCC_APP_KEY/QCC_SECRET_KEY 后填实。
 
-接口实际归属（2026-09-04 Quinn 给的接口文档扫描确认）：
+接口实际归属（2026-09-04 接口文档扫描确认）：
 - 域名：https://ai-dataapi.ccccltd.cn  ← CCC=中国交建，港湾是中交子公司
 - 这不是企查查公开 API，是中交系内部接口
 - 鉴权方式：AppId + Timespan（Unix秒）+ Token=MD5(AppId+Timespan+secretKey).upper()
 - 响应码：200 成功 / 300000 无数据 / 300002 账号失效 / 300006 余额不足 / 300011 此IP无权限
 
-接入清单（共13个接口，按 Quinn 9/4 反馈：先做第一档+第二档围标串标留后续版本）：
+接入清单（共13个接口，按接入排期：先做第一档+第二档围标串标留后续版本）：
 - 第一档10个核心合规（A10 商业信誉硬拦截项）：
     工商: ic/verify/2.0, ic/baseinfoV3/2.0
     股东法人: ic/holder/2.0, ic/inverst/2.0, ic/staff/2.0
@@ -18,7 +18,7 @@
     经营违法: hi/abnormal/2.0, mr/illegalinfo (税收违法 mr/taxContravention/2.0)
 - 第一档扩展（财务三表，对应保密改造后 A08 财报合规）：
     cb/ic/balanceSheet/2.0, cb/ic/incomeStatement/2.0, cb/ic/cashFlow/2.0
-- 第二档3个围标串标（Quinn 决定先不做）：rela/shortPath/2.0, v3/investtree/ten, ic/humanholding/2.0
+- 第二档3个围标串标（先不做）：rela/shortPath/2.0, v3/investtree/ten, ic/humanholding/2.0
 
 设计原则：
 1. 失败返回空 dict/list，不抛异常 → enhance_checklist_with_qcc 走"数据缺失→人工复核"路径，不误判
@@ -109,8 +109,8 @@ def _increment_call_count(api_path: str):
 
 
 def _check_quota_warning():
-    """检查配额预警（占位，实际配额上限需 Quinn 申请后填入）"""
-    # TODO: Quinn 申请 AppKey 后填入每日配额上限（企业版通常 1000-10000次/天）
+    """检查配额预警（占位，实际配额上限需申请后填入）"""
+    # TODO: 申请 AppKey 后填入每日配额上限（企业版通常 1000-10000次/天）
     pass
 
 
@@ -307,7 +307,7 @@ def fetch_first_tier(name: str) -> dict:
         "reg_info": baseinfo(name),
         "accuracy": verify_ic(name, "", ""),
         "shareholders": holders(name).get("result", []),
-        "actual_controller": {},  # 围标串标接口，Quinn 决定先不做
+        "actual_controller": {},  # 围标串标接口，先不做
         "dishonest": dishonest_person(name).get("result", []),
         "executed": [],  # 历史被执行人，需单查
         "consumption_restriction": consumption_restriction(name).get("result", []),
@@ -331,4 +331,4 @@ if __name__ == "__main__":
         print("[QCC] 鉴权方式: MD5(AppId + Timespan + secretKey).upper()")
     else:
         print(f"[QCC] 已配置 AppKey={QCC_APP_KEY[:8]}...")
-        # TODO: Quinn 申请到 AppKey 后，这里加一个端到端自检
+        # TODO: 申请到 AppKey 后，这里加一个端到端自检

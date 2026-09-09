@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 log = logging.getLogger("desensitize")
@@ -145,18 +146,18 @@ def _looks_like_id_card_name(name_lower):
 # 身份证粗比例打码已删除（2026-09-09）：改由下方 desensitize_id_cards_with_paddle 用 PaddleOCR 精确打码
 # PaddleOCR 精确打码（2026-09-09 接入 idcard_masker.py，替换粗比例矩形）
 # ============================================================
-# PaddleOCR 脱敏的三个路径：优先读环境变量（便于换机器/移交复用），否则用默认值
+# PaddleOCR 脱敏的三个路径：优先读环境变量（便于换机器/移交复用），否则用默认值。
 _IDCARD_MASKER_SCRIPT = os.environ.get(
     "IDCARD_MASKER_SCRIPT",
     r"E:\OneDrive\工作\05 证书、竞赛\人工智能创新大赛\离线脱敏程序\idcard_masker.py",
 )
 _PADDLE_PYTHON = os.environ.get(
     "PADDLE_PYTHON",
-    r"C:\Users\CHEC\AppData\Local\Temp\idcard_env\Scripts\python.exe",
+    os.path.join(tempfile.gettempdir(), "idcard_env", "Scripts", "python.exe"),
 )
 _PADDLE_MODEL_DIR = os.environ.get(
     "PADDLE_MODEL_DIR",
-    r"C:\Users\CHEC\AppData\Local\Temp\paddleocr-models",
+    os.path.join(tempfile.gettempdir(), "paddleocr-models"),
 )
 
 
@@ -176,7 +177,7 @@ def desensitize_id_cards_with_paddle(src_dir, dst_dir):
     import tempfile
     import os
 
-    script = Path(_IDCARD_MASKER_SCRIPT)
+    script = Path(_IDCARD_MASKER_SCRIPT) if _IDCARD_MASKER_SCRIPT else None
     paddle_python = Path(_PADDLE_PYTHON)
     model_dir = Path(_PADDLE_MODEL_DIR)
 
@@ -205,7 +206,7 @@ def desensitize_id_cards_with_paddle(src_dir, dst_dir):
         id_cards.append((rel, f))
 
     # 环境缺失：所有待打码身份证统一报错（不再回退粗比例）
-    if not script.exists() or not paddle_python.exists():
+    if not script or not script.exists() or not paddle_python.exists():
         log.warning("[PaddleOCR] 未找到 idcard_masker.py 或 Python 3.11 环境")
         for rel, f in id_cards:
             result.setdefault(rel.as_posix(), {
