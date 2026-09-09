@@ -1,26 +1,19 @@
 """
-离线材料脱敏助手（2026-09-04 保密合规改造·改造点③）
+离线材料脱敏助手（身份证 PaddleOCR 精确打码）
 ==============================================
 
-按保密专员共识：供应商未公开披露的财报、类似法人身份证的敏感文件
-不能直接发给 AI 处理。本模块提供本地纯 Python 脱敏处理，
-输出到 cache_v4_desens/ 给后续 textin / AI 识别使用。
+按保密专员共识：法人身份证等敏感文件不能直接发给 AI 处理。
+本模块只负责身份证的离线脱敏——通过调用外部 PaddleOCR 脚本
+（idcard_masker.py）在本地精确打码，仅保留「姓名」+「有效期限」，
+其余（证号/住址/头像等）按文字框黑遮，敏感信息不离开本机。
 
-设计原则：
-- 本地处理：不调任何云端 OCR/AI（这就是"脱敏"的核心）
-- 文件名加 _desens 后缀与原文件区分
-- 失败时返回原文件 + warning，不抛异常
-- 输出到 cache_v4_desens/（不进 .gitignore，与 files_cache 同等待遇）
-
-按文件类型分四类处理：
-- 财报 PDF：保留数字（财务指标需要），人名/签字/银行账号打码
-- 身份证 JPG/PNG：人脸马赛克 + 姓名/证号/地址打码
-- 营业执照：原样保留（公开信息）
-- 其他（ISO/授权/声明）：原样保留
+9/9 简化：移除财报 PDF 脱敏（各公司财报格式差异大，难以统一离线脱敏），
+财报按保密合规要求不通过 OCR 解析，改走企查查/人工核验。
 
 调用方式：
-    from desensitize import desensitize_dir
+    from desensitize import desensitize_dir, desensitize_id_cards_with_paddle
     desensitize_dir(Path("cache_v4"), Path("cache_v4_desens"))
+    desensitize_id_cards_with_paddle(Path("cache_v4"), Path("cache_v4_desens"))
 
     # 或命令行：
     python desensitize.py --src cache_v4 --dst cache_v4_desens
@@ -39,16 +32,16 @@ log = logging.getLogger("desensitize")
 # 公开 API
 # ============================================================
 def desensitize_dir(src_dir, dst_dir):
-    """脱敏整个目录的供应商材料。
+    """将供应商材料原样复制到脱敏目录。
 
     src_dir: 原始材料目录（如 cache_v4/{todoId}/）
     dst_dir: 输出目录（如 cache_v4_desens/{todoId}/）
 
-    9/6 修复：不再 shutil.rmtree(dst) 整目录删除——
-    files_cache_desens/ 下累积 50+ 文件时触发 WorkBuddy 沙箱
-    SAFE_DELETE_BULK_CONFIRM 批量删除保护直接杀子进程。
-    改为逐文件覆盖写入（同名文件覆盖，stale 文件保留无害）。
+    9/9 简化：移除财报 PDF 脱敏，本函数只做原样复制；身份证的精确打码
+    由 desensitize_id_cards_with_paddle 单独覆盖。逐文件覆盖写入（同名文件
+    覆盖，stale 文件保留无害），避免整目录删除触发沙箱批量删除保护。
     """
+    import shutil
     src = Path(src_dir)
     dst = Path(dst_dir)
     if not src.exists():
@@ -56,41 +49,16 @@ def desensitize_dir(src_dir, dst_dir):
         return
     dst.mkdir(parents=True, exist_ok=True)
 
-    n_total = 0
-    n_desens = 0
+    n = 0
     for f in src.rglob("*"):
         if f.is_file():
-            n_total += 1
             rel = f.relative_to(src)
             dst_file = dst / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-            if _desensitize_one(f, dst_file):
-                n_desens += 1
-            else:
-                # 原样复制（不阻塞流程）
-                import shutil
-                shutil.copy2(f, dst_file)
+            shutil.copy2(f, dst_file)
+            n += 1
 
-    log.info(f"[脱敏完成] {src} → {dst}：共 {n_total} 个文件，实际脱敏 {n_desens} 个")
-
-
-def _desensitize_one(src, dst):
-    """根据文件类型分派脱敏函数。返回 True 表示已脱敏，False 表示原样复制。"""
-    ext = src.suffix.lower()
-    name_lower = src.name.lower()
-
-    if ext == ".pdf":
-        if any(k in name_lower for k in ["财务", "审计", "财报", "审计报告", "financial"]):
-            return _desensitize_financial_pdf(src, dst)
-        return False  # 其他 PDF 原样保留
-
-    if ext in (".jpg", ".jpeg", ".png", ".bmp", ".gif"):
-        # 9/9：删除粗比例打码——身份证不再走固定比例矩形（成功率极低、误伤字段），
-        # 改由 desensitize_id_cards_with_paddle（PaddleOCR 精确打码）覆盖。
-        # 这里原样复制，保留后续 PaddleOCR 覆盖通道。
-        return False  # 图片原样保留（身份证由 PaddleOCR 精确打码覆盖）
-
-    return False
+    log.info(f"[复制完成] {src} → {dst}：共 {n} 个文件（身份证随后由 PaddleOCR 精确打码覆盖）")
 
 
 # cache_v4 的身份证/非身份证文件名集合（types 交叉验证，懒加载）
@@ -173,62 +141,7 @@ def _looks_like_id_card_name(name_lower):
     return bool(m)
 
 
-# ============================================================
-# 财报 PDF 脱敏
-# ============================================================
-SENSITIVE_PATTERNS = [
-    (re.compile(r"\b\d{19}\b"), "银行账号"),                       # 19 位银行账号
-    (re.compile(r"\b\d{17}[\dXx]\b"), "身份证号"),                  # 18 位身份证号
-    (re.compile(r"签字|盖章|经办人|复核人|主管|会计|出纳|审计师"),
-     "签字栏"),
-    (re.compile(r"法定代表人\s*签字"), "法人签字"),
-]
-
-
-def _is_sensitive_text(text):
-    """判断 span 文本是否含敏感字段"""
-    for pat, _ in SENSITIVE_PATTERNS:
-        if pat.search(text):
-            return True
-    return False
-
-
-def _desensitize_financial_pdf(src, dst):
-    """财报 PDF 脱敏：保留数字表格，打码人名/签字/银行账号"""
-    try:
-        import pymupdf
-    except ImportError:
-        log.warning("[财报 PDF 脱敏] PyMuPDF 未安装，跳过")
-        return False
-
-    try:
-        doc = pymupdf.open(str(src))
-        n_redacted = 0
-        for page in doc:
-            text_dict = page.get_text("dict")
-            for block in text_dict.get("blocks", []):
-                for line in block.get("lines", []):
-                    for char in line.get("spans", []):
-                        text = char.get("text", "")
-                        if _is_sensitive_text(text):
-                            # 用白色矩形覆盖该 span
-                            rect = pymupdf.Rect(char["bbox"])
-                            page.add_redact_rect(rect, fill=(1, 1, 1))
-                            n_redacted += 1
-            page.apply_redactions()
-
-        if n_redacted > 0:
-            doc.save(str(dst))
-            log.info(f"[财报 PDF 脱敏] {src.name} → {dst.name}（打码 {n_redacted} 处）")
-            return True
-        doc.close()
-        # 没有敏感字段，原样复制
-        return False
-    except Exception as e:
-        log.warning(f"[财报 PDF 脱敏] {src.name} 失败：{e}，原样复制")
-        return False
-
-
+# 财报 PDF 脱敏已删除（2026-09-09）：各公司财报格式差异大，难以统一离线脱敏，改走企查查/人工核验
 # 身份证粗比例打码已删除（2026-09-09）：改由下方 desensitize_id_cards_with_paddle 用 PaddleOCR 精确打码
 # PaddleOCR 精确打码（2026-09-09 接入 idcard_masker.py，替换粗比例矩形）
 # ============================================================

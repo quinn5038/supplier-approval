@@ -142,7 +142,7 @@ def _run_pipeline_for_one(todo_id: str):
             print(f"[download] 文件下载失败（不阻塞流程，OCR可能空）：{e}")
 
         # 2026-09-04 保密合规改造：下载完成后自动脱敏（与 textin_pipeline.py 集成一致）
-        _update("正在本地脱敏敏感材料（身份证/财报）...", progress=50)
+        _update("正在本地脱敏身份证（PaddleOCR 精确打码）...", progress=50)
         try:
             from desensitize import desensitize_dir
             desensitize_dir(BASE_DIR / "files_cache" / str(todo_id),
