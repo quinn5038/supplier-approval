@@ -41,6 +41,11 @@ CL_ID_TO_DOC_TYPE = {
     "C1_04": [("iso45001",           "ISO45001 职业健康安全证书")],
     "C1_05": [("production_license", "生产许可证/强制认证")],
     "A13":  [("inspection_cert",     "检验检测机构资质认定证书（CMA/CNAS）")],
+    # 9/8 补：境内贸易商 ISO 三认证 + 授权资质（此前缺失，导致 D1 行"材料未上传/无核验数据"误报）
+    "D1_03": [("iso9001",            "ISO9001 质量管理体系认证证书")],
+    "D1_04": [("iso14001",           "ISO14001 环境管理体系证书")],
+    "D1_05": [("iso45001",           "ISO45001 职业健康安全证书")],
+    "D1_06": [("authorization",       "产品代理协议或销售授权")],
 }
 # 中文 doc_type 名（表头用）
 DOC_TYPE_LABEL = {
@@ -110,19 +115,6 @@ def render_supplier(tid, s2, textin, cache):
                 continue
             # 9/5：决策依据从 rules.yaml 读 requirement（避免与 cache 内置字段脱节）
             decision_basis = _load_decision_basis(cid, cname)
-            # 缺失材料：D 类（贸易经销商）单独处理
-            if cid.startswith("D1_03"):
-                miss_items.append((cid, cname, "ISO 9001 质量管理体系认证证书（可上传其代理厂家的认证，须在有效期内）"))
-                continue
-            if cid.startswith("D1_04"):
-                miss_items.append((cid, cname, "ISO 14001 环境管理体系认证证书（须为该贸易公司自己的认证且在有效期内）"))
-                continue
-            if cid.startswith("D1_05"):
-                miss_items.append((cid, cname, "ISO 45001 职业健康安全管理体系认证证书（须为该贸易公司自己的认证且在有效期内）"))
-                continue
-            if cid.startswith("D1_06"):
-                miss_items.append((cid, cname, "产品生产企业的代理协议或产品销售授权资质（授权一方须为该贸易公司且在有效期内）"))
-                continue
             if cid.startswith("D2_"):
                 continue  # D2 国外贸易商不适用
             need = CL_ID_TO_DOC_TYPE.get(cid)
@@ -176,14 +168,37 @@ def render_supplier(tid, s2, textin, cache):
         need = CL_ID_TO_DOC_TYPE.get(cid, [])
         mat_status_parts = []
         check_detail_parts = []  # 核验结果列（material 类型：OCR 字段）
+        idcard_desens_ok = False  # A02 身份证脱敏是否真正成功（决定是否显示「已脱敏」+查看链接）
         for doc_type, label in need:
             if doc_type in uploaded_types:
-                if doc_type in ("legal_person_id", "financial_report"):
-                    desens = "✓已脱敏"
-                else:
-                    desens = "原样"
                 td = t_data.get(doc_type) if isinstance(t_data, dict) else None
-                if td and not td.get("_deprecated"):
+                fields_td = (td or {}).get("fields") or {}
+                # ---- 材料状态 note（按 doc_type 差异化，不再一刀切「已脱敏」）----
+                if doc_type == "legal_person_id":
+                    # 身份证：只有 PaddleOCR 真识别到姓名/有效期才算脱敏成功；
+                    # 识别失败（如 gif 格式不支持）→ 未脱敏；只识别到一面 → 列明缺哪面
+                    has_name = bool(fields_td.get("姓名"))
+                    has_expiry = bool(fields_td.get("有效期至"))
+                    if has_name and has_expiry:
+                        note = "已脱敏"
+                        idcard_desens_ok = True
+                    elif has_name:
+                        note = "已脱敏，仅正面缺背面"
+                        idcard_desens_ok = True
+                    elif has_expiry:
+                        note = "已脱敏，仅背面缺正面"
+                        idcard_desens_ok = True
+                    else:
+                        note = "未脱敏，打码识别失败"
+                elif doc_type == "financial_report":
+                    # 财报按保密合规不 OCR 解析（脱敏程序也不可靠），转人工核实
+                    note = "按保密合规要求不通过 OCR 解析，需人工核实：是否为上年度经审计财报、是否指标达标"
+                else:
+                    note = "原样"
+                if td and td.get("error"):
+                    # 9/9：OCR 报错时核验结果列显示错误信息，而非「无核验数据」
+                    check_detail_parts.append(f"<span class='issue'>{esc(td['error'])}</span>")
+                elif td and not td.get("_deprecated"):
                     fields = td.get("fields") or {}
                     checks = td.get("checks") or {}
                     iss = td.get("issues") or []
@@ -211,14 +226,38 @@ def render_supplier(tid, s2, textin, cache):
                         for it in iss[:2]:
                             check_detail_parts.append(f"<span class='issue'>{esc(it)}</span>")
                     elif doc_type == "business_license":
+                        f_code = fields.get("统一社会信用代码")
+                        f_name = fields.get("名称")
                         f_legal = fields.get("法定代表人")
                         f_cap = fields.get("注册资本_万")
+                        # 9/7 修复：统一社会信用代码是 A01 判定通过的核心字段，必须展示；
+                        # 此前只展示法定代表人/注册资本，且正向「一致」结论不展示，
+                        # 导致「只识别到信用代码」时核验结果列空 → 显示「无核验数据」
+                        if f_code:
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>统一社会信用代码</span>=<span class='v'>{esc(f_code)}</span></span>")
+                        if f_name:
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>名称</span>=<span class='v'>{esc(f_name)}</span></span>")
                         if f_legal:
                             check_detail_parts.append(
                                 f"<span class='kv'><span class='k'>法定代表人</span>=<span class='v'>{esc(f_legal)}</span></span>")
                         if f_cap:
                             check_detail_parts.append(
                                 f"<span class='kv'><span class='k'>注册资本</span>=<span class='v'>{esc(str(f_cap))}万</span></span>")
+                        # 正向「一致」结论（此前只在 False 时显示「不一致」，True 时不显示）
+                        if checks.get("信用代码一致") is True:
+                            check_detail_parts.append(
+                                f"<span class='ok-mini'>信用代码与系统一致</span>")
+                        if checks.get("名称一致") is True:
+                            check_detail_parts.append(
+                                f"<span class='ok-mini'>名称与系统一致</span>")
+                        if checks.get("法人一致") is True:
+                            check_detail_parts.append(
+                                f"<span class='ok-mini'>法定代表人与系统一致</span>")
+                        if checks.get("注册资本一致") is True:
+                            check_detail_parts.append(
+                                f"<span class='ok-mini'>注册资本与系统一致</span>")
                         if checks.get("法人一致") is False:
                             sys_legal = supplier.get("legal_person", "")
                             check_detail_parts.append(
@@ -226,6 +265,13 @@ def render_supplier(tid, s2, textin, cache):
                         if checks.get("信用代码一致") is False:
                             check_detail_parts.append(
                                 f"<span class='ng-mini'>信用代码：执照与系统不一致</span>")
+                        if checks.get("经营范围一致") is False:
+                            check_detail_parts.append(
+                                f"<span class='ng-mini'>经营范围与系统不一致</span>")
+                        # 9/8 修复：展示 fail 原因（issues）。此前漏了，导致 A01 红叉时
+                        # 核验结果列只显示正向「一致」结论，看不到「经营范围差异/字段缺失」等未通过原因
+                        for it in iss[:3]:
+                            check_detail_parts.append(f"<span class='issue'>{esc(it)}</span>")
                     else:
                         # 通用：fields 前 3 个
                         for k, v in list(fields.items())[:3]:
@@ -251,18 +297,22 @@ def render_supplier(tid, s2, textin, cache):
                                     f"<span class='ng-mini'>{ng} 项不符</span>"
                                 )
                 elif td and td.get("_deprecated"):
-                    desens += "+OCR禁用"
-                else:
-                    desens += "+未OCR"
-                mat_status_parts.append(f"<span class='mat-item'>{label}：{desens}</span>")
-        # ---- 9/6 修复：材料状态列按 check_type 区分 ----
-        # material 类才需要供应商上传材料；qichacha/auto/skip 类不需要
-        if check_type and check_type != "material":
+                    # 财报 OCR 已禁用：note 已在 financial_report 分支写清，不再追加
+                    check_detail_parts.append(
+                        "<span class='verify-skip'>OCR 已禁用（保密合规），核验改走企查查/人工</span>")
+                elif doc_type not in ("legal_person_id", "financial_report"):
+                    # 其他材料未 OCR 才标注（身份证/财报的 note 已含状态，不再叠加）
+                    note += "+未OCR"
+                mat_status_parts.append(f"<span class='mat-item'>✓已提交：{label}（{note}）</span>")
+        # ---- 9/9 修复：材料状态列按「是否需要提交材料」区分（而非 check_type）----
+        # 凡 CL_ID_TO_DOC_TYPE 有映射（需要提交材料）的项都检查材料提交情况，
+        # 包括 A08 财报这类「企查查核验 + 需上传材料」的混合项——已上传则显示「✓已提交」。
+        if not need:
             mat_status = "<span class='mat-muted'>无需提交材料</span>"
         elif mat_status_parts:
             mat_status = "<br>".join(mat_status_parts)
-            # 9/6：A02 身份证脱敏后，加「点击查看脱敏后证件」链接（跳转展示脱敏图片）
-            if cid == "A02":
+            # 9/9：仅在身份证脱敏真正成功后才加「点击查看脱敏后证件」链接
+            if cid == "A02" and idcard_desens_ok:
                 mat_status += (
                     f"<br><a href='/api/desens_image/{esc(tid)}' target='_blank' "
                     f"class='desens-link'>点击查看脱敏后证件</a>"
@@ -331,10 +381,10 @@ def render_supplier(tid, s2, textin, cache):
             "<table class='big-table'>"
             "<tr>"
             "<th style='width:40px'></th>"
-            "<th style='width:60px'>编号</th>"
-            "<th style='width:140px'>项目</th>"
-            "<th style='width:200px'>决策依据</th>"
-            "<th style='width:220px'>材料状态（脱敏 + OCR）</th>"
+            "<th style='width:56px'>编号</th>"
+            "<th style='width:96px'>项目</th>"
+            "<th style='width:150px'>决策依据</th>"
+            "<th style='width:150px'>材料状态（脱敏 + OCR）</th>"
             "<th>核验结果（OCR/企查查/系统对比）</th>"
             "</tr>"
             + big_rows + "</table>"

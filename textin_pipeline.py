@@ -360,14 +360,30 @@ def extract_business_license(text, supplier):
         else:
             from difflib import SequenceMatcher
             ratio = SequenceMatcher(None, f_scope, sys_scope).ratio()
-            checks["经营范围一致"] = ratio >= 0.9
-            if not checks["经营范围一致"]:
-                if ratio >= 0.7:
-                    issues.append(f"执照经营范围与系统填写高度相似但有差异"
-                                  f"（相似度{ratio:.0%}），需人工确认")
-                else:
-                    issues.append(f"执照经营范围与系统基本信息栏填写不一致"
-                                  f"（相似度{ratio:.0%}）")
+            if ratio >= 0.9:
+                checks["经营范围一致"] = True
+            elif ratio >= 0.7:
+                # 9/8 降级：高度相似但有差异（0.7~0.9，常见是系统多/少了
+                # 「依法须经批准的项目…」这类标准结尾提示语）不再判 fail（退回），
+                # 改为 checks=None → enhance_checklist_with_textin 走 manual（转人工复核）。
+                checks["经营范围一致"] = None
+                issues.append(f"执照经营范围与系统填写高度相似但有差异"
+                              f"（相似度{ratio:.0%}），需人工确认")
+            else:
+                checks["经营范围一致"] = False
+                issues.append(f"执照经营范围与系统基本信息栏填写不一致"
+                              f"（相似度{ratio:.0%}）")
+    # 9/7 修复：关键字段（名称/法定代表人/注册资本/经营范围）任一缺失 → 识别不完整，转人工。
+    # 此前只在「全部字段都空」时报 issue，导致「只识别到信用代码」这种部分识别
+    # 被 enhance_checklist_with_textin 误判为 pass（A01 要求名称/注册资本/法人/经营范围全一致，
+    # 只核到信用代码一项远远不够）。
+    _missing = [label for key, label in (
+        ("名称", "名称"), ("法定代表人", "法定代表人"),
+        ("注册资本_万", "注册资本"), ("经营范围", "经营范围"))
+        if not fields.get(key)]
+    if _missing:
+        issues.append("营业执照识别不完整，缺少字段：" + "、".join(_missing)
+                      + "（需人工核验扫描件清晰度，或改用企查查比对）")
     return {"fields": fields, "checks": checks, "issues": issues}
 
 
@@ -464,6 +480,72 @@ def extract_legal_person_id(text, supplier, detail=None):
             issues.append(f"身份证已过期（{exp}）")
     else:
         fields["有效期至"] = None
+
+    return {"fields": fields, "checks": checks, "issues": issues}
+
+
+def build_idcard_from_paddle(cards, supplier=None):
+    """用 PaddleOCR 的 cards 构造 legal_person_id 结果（2026-09-09 方案B）。
+
+    idcard_masker.py（PaddleOCR）打码时已识别出正反面字段，cards 形如：
+      [{"card_index":1,"side":"front","name":"陈永泉","valid_until":null,"status":"已脱敏"},
+       {"card_index":2,"side":"back","name":null,"valid_until":"2007.02.24-2027.02.24",...}]
+
+    本函数把 cards 映射成与 extract_legal_person_id 相同的返回结构，
+    替代「TextIn 读打码图 → 提取」链路（打码图只剩值没标签，TextIn 提取不到）。
+    """
+    name = None
+    valid_until = None
+    for c in cards or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("side") == "front" and c.get("name"):
+            name = c["name"]
+        elif c.get("side") == "back" and c.get("valid_until"):
+            valid_until = c["valid_until"]
+
+    fields = {"姓名": name, "有效期至": None}
+    checks = {}
+    issues = []
+
+    # 正反面完整性（name=正面，valid_until=背面）
+    name_ok = bool(name)
+    expiry_ok = bool(valid_until)
+    if name_ok and expiry_ok:
+        checks["正反面齐全"] = True
+    elif not name_ok and not expiry_ok:
+        checks["正反面齐全"] = False
+        issues.append("身份证正反面均未能识别，请确认是否上传了完整的身份证正反面")
+    else:
+        checks["正反面齐全"] = None
+        if not name_ok:
+            issues.append("身份证正面（姓名）未能识别，需人工核验是否缺面或图片不清晰")
+        if not expiry_ok:
+            issues.append("身份证背面（有效期限）未能识别，需人工核验是否缺面或图片不清晰")
+
+    # 姓名一致性
+    sys_legal = _norm((supplier or {}).get("legal_person", ""))
+    if name and sys_legal:
+        checks["姓名与法人一致"] = name == sys_legal
+        if not checks["姓名与法人一致"]:
+            issues.append(f"身份证姓名「{name}」与系统法人「{sys_legal}」不一致")
+
+    # 有效期核验（valid_until 格式：2007.02.24-2027.02.24 或 长期）
+    today = date.today()
+    if valid_until:
+        if "长期" in valid_until or "永久" in valid_until:
+            checks["在有效期内"] = True
+            fields["有效期至"] = "长期"
+        else:
+            # valid_until 格式：起始日-结束日（如 2007.02.24-2027.02.24），取结束日期（最后一个）
+            dates = re.findall(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", valid_until)
+            if dates:
+                y, mo, d = dates[-1]  # 结束日期（有效期至）
+                exp = date(int(y), int(mo), int(d))
+                checks["在有效期内"] = exp >= today
+                fields["有效期至"] = str(exp)
+                if not checks["在有效期内"]:
+                    issues.append(f"身份证已过期（{exp}）")
 
     return {"fields": fields, "checks": checks, "issues": issues}
 
@@ -622,14 +704,25 @@ def extract_iso_cert(text, supplier, iso_code):
     fields = {}
     fields["获证组织"] = _grab(t, ["获证组织", "认证委托人", "受审核方", "组织名称",
                                    "证书持有者"], r"[^\n:：]{2,60}?")
+    # 9/9 修复：ISO 证书底部常印「获证组织必须定期接受监督审核并经审核合格后，
+    # 方可保持证书有效性」这类固定提示语，_grab 会把句首的「获证组织」误当字段标签、
+    # 把整句提示语当值，导致持有人被错误显示成提示语。校验：值含提示语特征词则判无效。
+    if fields["获证组织"] and re.search(
+            r"必须|定期接受监督|监督审核|方可保持|有效性|经审核合格", fields["获证组织"]):
+        fields["获证组织"] = None
     if not fields["获证组织"]:
-        # 兜底：证书上没有"获证组织"标签时，取标题后第一行独立的公司名
-        # （认证机构名通常在证书底部，取首个匹配可避开）
-        m = re.search(r"(?m)^([\u4e00-\u9fa5（）()A-Za-z0-9]{4,40}"
-                      r"(?:公司|集团|中心|厂))\s*$", t)
+        # 优先：ISO 证书标准格式「兹证明：XXX公司」——获证组织的权威来源
+        m = re.search(r"兹证明\s*[:：]?\s*([^\n:：]{4,40}?(?:公司|集团|中心|厂))", t)
         if m:
-            fields["获证组织"] = m.group(1)
-            fields["获证组织_来源"] = "证书版面推断（无标签）"
+            fields["获证组织"] = m.group(1).strip(" 　。，,；;、")
+            fields["获证组织_来源"] = "兹证明"
+        else:
+            # 兜底：取标题后第一行独立的公司名（认证机构名通常在证书底部，取首个可避开）
+            m = re.search(r"(?m)^([\u4e00-\u9fa5（）()A-Za-z0-9]{4,40}"
+                          r"(?:公司|集团|中心|厂))\s*$", t)
+            if m:
+                fields["获证组织"] = m.group(1)
+                fields["获证组织_来源"] = "证书版面推断（无标签）"
     m = re.search(r"证书编号\s*[:：]?\s*([A-Za-z0-9\-]{6,30})", t)
     fields["证书编号"] = m.group(1) if m else None
     exp, longterm = _valid_until(t)
@@ -896,17 +989,26 @@ def scan_files():
         for f in sorted(todo_dir.iterdir()):
             if f.suffix.lower() not in FILE_EXTS:
                 continue
-            doc_type = classify_file(f.name)
-            if not doc_type:
-                # 文件名分类失败 → 用缓存兜底（下载文件名带 uploadId_ 前缀，需去掉）
-                m = re.match(r"^\d+_(.+)$", f.name)
-                bare = m.group(1) if m else f.name
-                types = cache_types.get(bare) or cache_types.get(f.name)
-                if types:
-                    doc_type = types[0] if isinstance(types, list) else types
-            if not doc_type:
+            # 去 uploadId_ 前缀，匹配缓存 types（materials_detail 的权威分类）
+            m = re.match(r"^\d+_(.+)$", f.name)
+            bare = m.group(1) if m else f.name
+            cached_types = cache_types.get(bare) or cache_types.get(f.name) or []
+            if isinstance(cached_types, str):
+                cached_types = [cached_types]
+            cached_types = [t for t in cached_types if t]
+            if cached_types:
+                # 9/9 修复：缓存 types 优先（系统权威分类），且一个文件可能对应多个材料类型
+                # （如「财务报表&纳税信用等级&售后服务.pdf」types=[after_sales_cert, tax_credit]），
+                # 为每个类型各生成一个 task——同一文件 OCR 一次（.md 缓存复用）、按类型分别抽取。
+                # 此前只按文件名分类成单一 doc_type，导致合并文件里的 tax_credit/after_sales
+                # 漏核验（A03/A07「无核验数据」）。
+                for dt in cached_types:
+                    tasks.append((todo_id, f, dt))
                 continue
-            tasks.append((todo_id, f, doc_type))
+            # 缓存无分类 → 文件名兜底
+            doc_type = classify_file(f.name)
+            if doc_type:
+                tasks.append((todo_id, f, doc_type))
     return tasks
 
 
@@ -917,11 +1019,18 @@ def run_parse(only_todo=None):
     然后 scan_files 改读脱敏目录，OCR 永远不接触原始敏感数据。
     """
     # 阶段 1.5：脱敏（缺库时优雅降级——不改任何文件，正常返回）
-    if FILES_DIR.exists():
+    idcard_fields = {}  # PaddleOCR 识别的身份证字段（方案B：替代 TextIn 二次 OCR）
+    # 9/9 优化：单家审批（only_todo）时只脱敏该家目录，不再全量跑 PaddleOCR
+    # 打码全部身份证——此前单家审批却全量打码 19 张身份证，是「卡在 70%」的主因
+    desens_src = (FILES_DIR / only_todo) if only_todo else FILES_DIR
+    desens_dst = (FILES_DESENS_DIR / only_todo) if only_todo else FILES_DESENS_DIR
+    if desens_src.exists():
         try:
-            from desensitize import desensitize_dir
-            desensitize_dir(FILES_DIR, FILES_DESENS_DIR)
-            log.info(f"已脱敏到 {FILES_DESENS_DIR}，OCR 将读取脱敏后的文件")
+            from desensitize import desensitize_dir, desensitize_id_cards_with_paddle
+            desensitize_dir(desens_src, desens_dst)
+            log.info(f"已脱敏到 {desens_dst}，OCR 将读取脱敏后的文件")
+            # 2026-09-09：PaddleOCR 精确打码身份证，覆盖粗比例结果（失败自动保留粗比例兜底）
+            idcard_fields = desensitize_id_cards_with_paddle(desens_src, desens_dst)
         except ImportError:
             log.warning("desensitize 模块未找到，跳过脱敏（不推荐——敏感信息可能泄露）")
         except Exception as e:
@@ -957,6 +1066,52 @@ def run_parse(only_todo=None):
             if reg.get("企业名称"):
                 supplier = dict(supplier)
                 supplier["full_name"] = reg["企业名称"]
+            else:
+                # 9/9 补：企查查无数据时，用待办申请单位全称/标题补 full_name，
+                # 避免 ISO「持有人一致」用简称（如 ZPMC沈阳伟宸）误判为不一致。
+                todo = cache.get(todo_id, {}).get("todo", {}) or {}
+                apply_unit = str(todo.get("applyUnitName") or "").strip()
+                title = str(todo.get("title") or "").strip()
+                full = None
+                if apply_unit and not re.search(r"其他|部门|项目经理部|项目部", apply_unit):
+                    full = apply_unit
+                elif title:
+                    full = title.split("/")[0].strip()
+                if full and len(full) > 4:
+                    supplier = dict(supplier)
+                    supplier["full_name"] = full
+        # 2026-09-09 方案B：身份证用 PaddleOCR 识别结果，跳过 TextIn 二次 OCR
+        if doc_type == "legal_person_id":
+            try:
+                rel_key = fpath.relative_to(FILES_DESENS_DIR).as_posix()
+            except ValueError:
+                rel_key = fpath.name
+            paddle_info = idcard_fields.get(rel_key) or idcard_fields.get(fpath.name)
+            if paddle_info and paddle_info.get("cards"):
+                r = build_idcard_from_paddle(paddle_info["cards"], supplier)
+                r["file"] = fpath.name
+                r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
+                results.setdefault(todo_id, {})[doc_type] = r
+                n_ok += 1
+                nm = r.get("fields", {}).get("姓名") or ""
+                vu = r.get("fields", {}).get("有效期至") or ""
+                print(f"  [PaddleOCR] legal_person_id: 姓名={nm} / 有效期至={vu}")
+                continue
+            # PaddleOCR 失败（error）或无结果 → 明确写失败原因转人工，不再回退 TextIn
+            reason = ((paddle_info or {}).get("error")
+                      if isinstance(paddle_info, dict) else None) or "PaddleOCR 未返回识别结果"
+            r = {
+                "fields": {"姓名": None, "有效期至": None},
+                "checks": {"正反面齐全": None},
+                "issues": [f"身份证打码识别失败：{reason}（转人工核验，请供应商确认身份证格式/清晰度）"],
+            }
+            r["file"] = fpath.name
+            r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
+            results.setdefault(todo_id, {})[doc_type] = r
+            n_ok += 1
+            print(f"  [PaddleOCR] legal_person_id 失败转人工：{reason}")
+            continue
+
         # 同目录已有缓存的 .md 就直接用（extract 模式 / 重跑不烧额度）
         md_path = fpath.with_suffix(fpath.suffix + ".md")
         detail_path = fpath.with_suffix(fpath.suffix + ".detail.json")

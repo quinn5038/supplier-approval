@@ -27,6 +27,7 @@
 """
 import logging
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -84,10 +85,10 @@ def _desensitize_one(src, dst):
         return False  # 其他 PDF 原样保留
 
     if ext in (".jpg", ".jpeg", ".png", ".bmp", ".gif"):
-        # 身份证判断（9/7 精确化：用 cache_v4 的 types 交叉验证，避免营业执照被误判）
-        if _is_id_card_image(src):
-            return _desensitize_id_card_image(src, dst)
-        return False  # 其他图片原样保留
+        # 9/9：删除粗比例打码——身份证不再走固定比例矩形（成功率极低、误伤字段），
+        # 改由 desensitize_id_cards_with_paddle（PaddleOCR 精确打码）覆盖。
+        # 这里原样复制，保留后续 PaddleOCR 覆盖通道。
+        return False  # 图片原样保留（身份证由 PaddleOCR 精确打码覆盖）
 
     return False
 
@@ -195,13 +196,13 @@ def _is_sensitive_text(text):
 def _desensitize_financial_pdf(src, dst):
     """财报 PDF 脱敏：保留数字表格，打码人名/签字/银行账号"""
     try:
-        import fitz  # PyMuPDF
+        import pymupdf
     except ImportError:
         log.warning("[财报 PDF 脱敏] PyMuPDF 未安装，跳过")
         return False
 
     try:
-        doc = fitz.open(str(src))
+        doc = pymupdf.open(str(src))
         n_redacted = 0
         for page in doc:
             text_dict = page.get_text("dict")
@@ -211,7 +212,7 @@ def _desensitize_financial_pdf(src, dst):
                         text = char.get("text", "")
                         if _is_sensitive_text(text):
                             # 用白色矩形覆盖该 span
-                            rect = fitz.Rect(char["bbox"])
+                            rect = pymupdf.Rect(char["bbox"])
                             page.add_redact_rect(rect, fill=(1, 1, 1))
                             n_redacted += 1
             page.apply_redactions()
@@ -228,107 +229,146 @@ def _desensitize_financial_pdf(src, dst):
         return False
 
 
+# 身份证粗比例打码已删除（2026-09-09）：改由下方 desensitize_id_cards_with_paddle 用 PaddleOCR 精确打码
+# PaddleOCR 精确打码（2026-09-09 接入 idcard_masker.py，替换粗比例矩形）
 # ============================================================
-# 身份证图片脱敏
-# ============================================================
-# 9/7 重写：仅保留「姓名」+「身份证有效期」两项，其余全部打码。
-# 身份证扫描件版式不统一，需按宽高比自适应：
-#   - 竖排（高 > 宽，如 285x579）：上下拼版，正面在上、背面在下
-#   - 横排（宽 > 高，如 746x229）：左右拼版，正面在左、背面在右
-# 9/7 排查结论：固定比例矩形只适用于竖排，横排身份证的"有效期"在右侧，
-#   被错误打码 → OCR 识别不到有效期 → 误判"缺背面"。
+# PaddleOCR 脱敏的三个路径：优先读环境变量（便于换机器/移交复用），否则用默认值
+_IDCARD_MASKER_SCRIPT = os.environ.get(
+    "IDCARD_MASKER_SCRIPT",
+    r"E:\OneDrive\工作\05 证书、竞赛\人工智能创新大赛\离线脱敏程序\idcard_masker.py",
+)
+_PADDLE_PYTHON = os.environ.get(
+    "PADDLE_PYTHON",
+    r"C:\Users\CHEC\AppData\Local\Temp\idcard_env\Scripts\python.exe",
+)
+_PADDLE_MODEL_DIR = os.environ.get(
+    "PADDLE_MODEL_DIR",
+    r"C:\Users\CHEC\AppData\Local\Temp\paddleocr-models",
+)
 
-# 头像估算区域（仅竖排有效，横排头像在左上角，随姓名区一并保留）
-_HEAD_PHOTO_BOX = (0.62, 0.98, 0.02, 0.42)
 
+def desensitize_id_cards_with_paddle(src_dir, dst_dir):
+    """用 idcard_masker.py（PaddleOCR）批量精确打码身份证图片。
 
-def _id_card_keep_boxes(w, h):
-    """根据宽高比返回 (name_box, expiry_box) 像素坐标。
+    2026-09-09 接入：粗比例矩形已删除，身份证统一走 PaddleOCR 精确到文字框的打码，
+    只保留「姓名/有效期限」，其余黑遮。
 
-    横排（w > h）：姓名在左半区，有效期在右半区。
-    竖排（h >= w）：姓名在顶部（正面），有效期在底部（背面）。
+    返回 dict：{rel.as_posix(): {"cards": [...]}}  成功（含 PaddleOCR 识别结果）
+              {rel.as_posix(): {"error": "原因"}}   失败
+    调用方（textin_pipeline.run_parse）据此区分成功/失败：成功用识别结果核验，
+    失败则明确写失败原因并转人工审批。
     """
-    if w > h:
-        # 横排（左右拼版）：左=正面(姓名)，右=背面(有效期)
-        name_box = (int(w * 0.02), int(h * 0.06), int(w * 0.48), int(h * 0.94))
-        expiry_box = (int(w * 0.52), int(h * 0.06), int(w * 0.98), int(h * 0.94))
-    else:
-        # 竖排（上下拼版）：上=正面(姓名)，下=背面(有效期)
-        name_box = (int(w * 0.03), int(h * 0.03), int(w * 0.58), int(h * 0.24))
-        expiry_box = (int(w * 0.18), int(h * 0.76), int(w * 0.75), int(h * 0.97))
-    return name_box, expiry_box
+    import subprocess
+    import shutil
+    import tempfile
+    import os
 
+    script = Path(_IDCARD_MASKER_SCRIPT)
+    paddle_python = Path(_PADDLE_PYTHON)
+    model_dir = Path(_PADDLE_MODEL_DIR)
 
-def _desensitize_id_card_image(src, dst):
-    """身份证图片脱敏：保留 姓名 + 有效期限，其余打码
+    src = Path(src_dir)
+    dst = Path(dst_dir)
 
-    依据：9/7 与保密专员共识——身份证扫描件只暴露「姓名」「有效期限」两个字段给 AI，
-    其余敏感信息（性别/民族/出生/住址/身份证号/头像/签发机关）一律打码。
-    按宽高比自适应横排/竖排版式（见 _id_card_keep_boxes）。
-    """
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        log.warning("[身份证脱敏] Pillow 未安装，跳过")
-        return False
+    # 1. 收集身份证图片（保留相对路径，供回写用），区分「支持/不支持」的格式
+    _load_type_name_sets()
+    id_cards = []  # [(相对路径, 绝对路径)] 支持的格式，交给 PaddleOCR
+    result = {}    # {rel.as_posix(): {"cards": [...]} 或 {"error": "..."}}
+    for f in src.rglob("*"):
+        if not f.is_file():
+            continue
+        if not _is_id_card_image(f):
+            continue
+        rel = f.relative_to(src)
+        # 9/9 修复：白名单补上 .pdf（及 .tif/.tiff/.webp）——idcard_masker.py 实际支持
+        # PDF（fitz 渲染成图再 OCR，此前批量测试柯力发/王文巍 PDF 均成功），此前漏了
+        # .pdf 导致 PDF 身份证被误判「格式不受支持」。
+        if f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".bmp",
+                                    ".tif", ".tiff", ".webp", ".pdf"):
+            result[rel.as_posix()] = {
+                "error": f"身份证文件格式 {f.suffix} 不受支持（仅支持 jpg/png/bmp/tif/webp/pdf），无法打码识别"
+            }
+            continue
+        id_cards.append((rel, f))
 
-    try:
-        img = Image.open(src).convert("RGB")
-        w, h = img.size
-        draw = ImageDraw.Draw(img)
+    # 环境缺失：所有待打码身份证统一报错（不再回退粗比例）
+    if not script.exists() or not paddle_python.exists():
+        log.warning("[PaddleOCR] 未找到 idcard_masker.py 或 Python 3.11 环境")
+        for rel, f in id_cards:
+            result.setdefault(rel.as_posix(), {
+                "error": "PaddleOCR 打码环境未就绪（缺少 idcard_masker.py 或 Python 3.11）"
+            })
+        return result
 
-        # 按版式解析保留矩形（横排/竖排自适应）
-        name_box, expiry_box = _id_card_keep_boxes(w, h)
-        photo_box = (
-            int(w * _HEAD_PHOTO_BOX[0]), int(h * _HEAD_PHOTO_BOX[2]),
-            int(w * _HEAD_PHOTO_BOX[1]), int(h * _HEAD_PHOTO_BOX[3]),
-        )
+    if not id_cards:
+        return result
 
-        # 1) 头像马赛克（先做，确保后续白色覆盖不影响视觉效果）
-        if (photo_box[2] > photo_box[0] and photo_box[3] > photo_box[1]
-                and photo_box[2] <= w and photo_box[3] <= h):
-            face = img.crop(photo_box)
-            small_size = (max(1, face.width // 12), max(1, face.height // 12))
-            small = face.resize(small_size)
-            face_mosaic = small.resize(face.size, Image.NEAREST)
-            img.paste(face_mosaic, photo_box)
-            draw.rectangle(photo_box, fill=(255, 255, 255))
+    n = 0
+    with tempfile.TemporaryDirectory(prefix="idcard_paddle_") as tmp:
+        tmp_root = Path(tmp)
+        tmp_in = tmp_root / "in"
+        tmp_out = tmp_root / "out"
+        # 复制身份证到临时输入目录（保留相对路径，文件名原样）
+        for rel, f in id_cards:
+            (tmp_in / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, tmp_in / rel)
 
-        # 2) 整图打白色背景（保留姓名/有效期两个矩形）
-        # 先整图覆盖
-        draw.rectangle((0, 0, w, h), fill=(255, 255, 255))
-        # 再还原姓名矩形和有效期矩形的原图内容
-        img_org = Image.open(src).convert("RGB")
-        if (name_box[2] > name_box[0] and name_box[3] > name_box[1]
-                and name_box[2] <= w and name_box[3] <= h):
-            name_crop = img_org.crop(name_box)
-            img.paste(name_crop, name_box)
-        if (expiry_box[2] > expiry_box[0] and expiry_box[3] > expiry_box[1]
-                and expiry_box[2] <= w and expiry_box[3] <= h):
-            expiry_crop = img_org.crop(expiry_box)
-            img.paste(expiry_crop, expiry_box)
-
-        # 3) 加 [DESENSITIZED] 水印（在姓名矩形下方，不遮挡关键字段）
+        # 2. subprocess 调 idcard_masker.py（独立 Python 3.11 环境）
+        env = dict(os.environ)
+        env["PROCESSOR_ARCHITECTURE"] = "AMD64"
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
-            font = ImageFont.truetype("arial.ttf", max(18, h // 32))
-        except OSError:
-            font = ImageFont.load_default()
-        text = "[DESENSITIZED]"
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_x = (w - text_w) // 2
-        # 水印 y 位置：姓名矩形下方到有效期限矩形上方之间的中间
-        text_y = (name_box[3] + expiry_box[2]) // 2
-        # 浅灰文字
-        draw.text((text_x, text_y), text, fill=(170, 170, 170), font=font)
+            proc = subprocess.run(
+                [str(paddle_python), str(script), str(tmp_in), str(tmp_out),
+                 "--output-mode", "both", "--model-dir", str(model_dir)],
+                capture_output=True, text=True, env=env, timeout=1800,
+            )
+        except Exception as e:
+            log.warning(f"[PaddleOCR] idcard_masker 调用异常：{e}")
+            for rel, f in id_cards:
+                result[rel.as_posix()] = {"error": f"PaddleOCR 打码调用异常：{e}"}
+            return result
+        if proc.returncode != 0:
+            log.warning(f"[PaddleOCR] idcard_masker 失败：{proc.stderr[-300:]}")
+            reason = (proc.stderr or "").strip()[-200:]
+            for rel, f in id_cards:
+                result[rel.as_posix()] = {"error": f"PaddleOCR 打码失败：{reason or '未知错误'}"}
+            return result
 
-        img.save(dst, quality=85)
-        log.info(f"[身份证脱敏] {src.name} → {dst.name}（{w}x{h}，"
-                 f"{'横排' if w > h else '竖排'}版式，姓名/有效期限保留，其余打码）")
-        return True
-    except Exception as e:
-        log.warning(f"[身份证脱敏] {src.name} 失败：{e}，原样复制")
-        return False
+        # 3. 回写 + 收集识别结果：images/..._masked.png → dst/{rel}；fields/*.json → result
+        for rel, f in id_cards:
+            stem = Path(rel)
+            out_stem = stem.with_suffix("").parent / f"{stem.stem}__page-001"
+            masked = tmp_out / "images" / out_stem.with_name(f"{out_stem.name}__masked.png")
+            fields_json = tmp_out / "fields" / out_stem.with_name(f"{out_stem.name}__fields.json")
+            if not masked.exists():
+                log.warning(f"[PaddleOCR] 未找到打码结果：{masked.name}（{rel}）")
+                result[rel.as_posix()] = {"error": "PaddleOCR 未产出打码结果"}
+                continue
+            dst_file = dst / rel
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                # 直接复制打码结果（PNG 内容；TextIn/PIL 按内容识别格式，扩展名不影响解析）
+                shutil.copy2(masked, dst_file)
+                n += 1
+            except Exception as e:
+                log.warning(f"[PaddleOCR] 回写失败 {rel}：{e}")
+                result[rel.as_posix()] = {"error": f"打码结果回写失败：{e}"}
+                continue
+            # 收集 PaddleOCR 识别结果（cards：side/name/valid_until）
+            if fields_json.exists():
+                try:
+                    info = json.loads(fields_json.read_text(encoding="utf-8"))
+                    result[rel.as_posix()] = {"cards": info.get("cards", [])}
+                except Exception as e:
+                    log.warning(f"[PaddleOCR] 读取 fields.json 失败 {rel}：{e}")
+                    result[rel.as_posix()] = {"error": f"读取识别结果失败：{e}"}
+            else:
+                result[rel.as_posix()] = {"error": "PaddleOCR 未产出识别结果（fields.json 缺失）"}
+
+    n_ok = sum(1 for v in result.values() if "cards" in v)
+    log.info(f"[PaddleOCR] 精确打码身份证 {n}/{len(id_cards)} 张，成功识别 {n_ok} 份")
+    return result
 
 
 # ============================================================
