@@ -111,11 +111,54 @@ python desensitize.py --src cache_v4 --dst cache_v4_desens
 
 按文件类型分四类处理：
 - 财报 PDF（PyMuPDF）：保留数字表格，打码人名/签字/银行账号
-- 身份证 JPG/PNG（Pillow）：保留国徽页，整片打码人像页（姓名/性别/出生/住址/证号/头像）
+- 身份证（PaddleOCR 精确打码）：本地离线识别文字框坐标，**只保留「姓名」+「有效期限」两个字段**，其余（性别/民族/出生/住址/证号/头像/签发机关）按文字框精确黑遮，敏感信息不离开本机
 - 营业执照：原样保留（公开信息）
 - 其他（ISO/授权/声明）：原样保留
 
-缺库时优雅降级：PyMuPDF 未装 → 财报 PDF 原样复制 + warning；Pillow 未装 → 身份证原样复制 + warning。**绝不抛异常阻塞流程**。
+缺库时优雅降级：PyMuPDF 未装 → 财报 PDF 原样复制 + warning；PaddleOCR 环境未就绪 → 身份证转人工核验并写明失败原因。**绝不抛异常阻塞流程**。
+
+### 5.6 身份证 PaddleOCR 离线精确脱敏（保密合规核心）
+
+身份证脱敏独立于主项目，用飞桨 PaddleOCR 在**本地离线**完成：先识别文字框坐标，再只保留「姓名」+「有效期限」，其余按框黑遮。主项目通过 `subprocess` 调用外部脱敏脚本 `idcard_masker.py`（路径由环境变量 `IDCARD_MASKER_SCRIPT` 指定，默认指向离线脱敏程序目录）。
+
+**依赖环境（独立于主项目，需 Python 3.11 + PaddleOCR 2.x）**：
+
+```bash
+# 1. 装 Python 3.11（PaddleOCR 2.9.1 不支持 Python 3.13，两者不可共存）
+winget install Python.Python.3.11
+
+# 2. 建独立 venv（与主项目 3.13 隔离）
+"C:\Users\<用户>\AppData\Local\Programs\Python\Python311\python.exe" -m venv idcard_env
+
+# 3. 装 PaddlePaddle CPU 版（国内源，约 500MB）
+idcard_env\Scripts\python.exe -m pip install paddlepaddle==2.6.2 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+
+# 4. 装 PaddleOCR 2.9.1 + 依赖（清华源）
+idcard_env\Scripts\python.exe -m pip install paddleocr==2.9.1 -i https://pypi.tuna.tsinghua.edu.cn/simple
+idcard_env\Scripts\python.exe -m pip install opencv-python pymupdf pillow
+```
+
+**首次运行自动下载中文模型**（det/rec/cls 三个 PP-OCRv4 模型，约 100MB），并直接对身份证目录批量打码：
+
+```bash
+PROCESSOR_ARCHITECTURE=AMD64 PYTHONIOENCODING=utf-8 \
+idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
+  --output-mode both --model-dir <模型缓存目录>
+```
+
+**Windows 环境三个关键坑（务必注意）**：
+
+1. **venv 和模型目录建议放系统 Temp**（`%TEMP%`）下——否则 pip 装包 / 模型解压会被 WorkBuddy 沙箱的「批量删除守卫」拦截而失败；
+2. 运行时加 `PROCESSOR_ARCHITECTURE=AMD64`——规避 `platform.machine()` 在部分运行环境下返回空值导致的误判；
+3. 模型首次下载走国内网络**直连**，不要走代理。
+
+主项目侧三个环境变量（缺省有默认值，换机器可覆盖）：
+
+| 环境变量 | 含义 | 默认值 |
+|---|---|---|
+| `IDCARD_MASKER_SCRIPT` | 离线脱敏脚本路径 | `E:\OneDrive\...\离线脱敏程序\idcard_masker.py` |
+| `PADDLE_PYTHON` | PaddleOCR 独立 venv 的 python | `%TEMP%\idcard_env\Scripts\python.exe` |
+| `PADDLE_MODEL_DIR` | 模型缓存目录 | `%TEMP%\paddleocr-models` |
 
 ## 六、工作流程
 
