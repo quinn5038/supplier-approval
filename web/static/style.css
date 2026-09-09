@@ -295,6 +295,12 @@ body {
     background: var(--color-primary-light);
     border-color: var(--color-primary);
 }
+/* 9/8 修复：上边框采用「共用上一行下边框」设计（border-top:none），
+   hover 时单独让上一行的下边框也变蓝，使当前 hover 行的上边视觉上同样高亮，
+   实现四边颜色一致（:has(+ .todo-item:hover) 选中「下一兄弟被 hover 的行」= 上一行） */
+.todo-item:has(+ .todo-item:hover) {
+    border-bottom-color: var(--color-primary);
+}
 
 /* 第 1 列：供应商名称 + todoId */
 .todo-item .col-name { min-width: 0; }   /* 配合 ellipsis 生效 */
@@ -380,8 +386,8 @@ body {
     background: #f8f9fa;
     text-align: left;
     padding: 8px 10px;
-    font-weight: 600;
-    color: #5f6368;
+    font-weight: 700;
+    color: #1a1a1a;
     font-size: 12px;
     border-bottom: 2px solid #e8eaed;
 }
@@ -402,14 +408,14 @@ body {
     width: 32px;
 }
 .big-table .cid-cell {
-    font-size: 12px;
+    font-size: 13px;
     font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
-    color: var(--color-text-muted);
+    color: var(--color-text);
     white-space: nowrap;
 }
 .big-table .name-cell {
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 400;
     color: var(--color-text);
 }
 .big-table .basis-cell {
@@ -424,8 +430,8 @@ body {
     line-height: 1.7;
 }
 /* 材料状态列内的各类标签 */
-.mat-item { font-size: 13px; color: var(--color-text-muted); }
-.mat-muted { font-size: 13px; color: var(--color-text-muted); }
+.mat-item { font-size: 13px; color: var(--color-text); }
+.mat-muted { font-size: 13px; color: var(--color-text); }
 .mat-warn  { font-size: 13px; color: var(--color-warning); }
 .mat-miss  { font-size: 13px; color: var(--color-danger); }
 .desens-link {
@@ -435,8 +441,8 @@ body {
 }
 .desens-link:hover { text-decoration: underline; }
 /* 核验结果列内：skip 说明 / 空提示 */
-.verify-skip  { font-size: 13px; color: var(--color-text-muted); }
-.verify-empty { font-size: 12px; color: var(--color-text-muted); }
+.verify-skip  { font-size: 13px; color: var(--color-text); }
+.verify-empty { font-size: 13px; color: var(--color-text); }
 .sup-type {
     background: var(--color-primary-light);
     color: var(--color-primary-dark);
@@ -451,7 +457,7 @@ body {
     margin-left: 8px;
 }
 .auto-gen {
-    padding: 0 20px 12px;
+    padding: 8px 20px;
     color: var(--color-text-muted);
     font-size: 12px;
     border-bottom: 1px solid #e8eaed;
@@ -546,12 +552,12 @@ body {
     border-bottom: 1px solid #eee;
     vertical-align: top;
 }
-.kv { display: inline-block; margin: 1px 4px 1px 0; font-size: 12px; }
-.kv .k { color: var(--color-text-muted); }
-.kv .v { color: var(--color-text); font-weight: 500; }
-.issue { display: inline-block; color: #a52834; font-size: 12px; }
-.ok-mini { display: inline-block; color: #1e7e34; font-size: 12px; }
-.ng-mini { display: inline-block; color: #a52834; font-weight: 600; font-size: 12px; }
+.kv { display: inline-block; margin: 1px 4px 1px 0; font-size: 13px; }
+.kv .k { color: var(--color-text); }
+.kv .v { color: var(--color-text); font-weight: 400; }
+.issue { display: inline-block; color: #a52834; font-size: 13px; }
+.ok-mini { display: inline-block; color: #1e7e34; font-size: 13px; }
+.ng-mini { display: inline-block; color: #a52834; font-weight: 400; font-size: 13px; }
 .opinion-area { margin: 16px 20px 16px; }
 .opinion-area h3 { margin-bottom: 8px; font-size: 15px; color: var(--color-text); }
 
@@ -620,7 +626,8 @@ body {
     border-radius: var(--radius);
 }
 .empty .icon {
-    font-size: 40px;
+    /* 9/8 修复：外层圆盘（背景圆），内圈改用 ::after 绘制，保证两圆严格同心
+       （此前内圈用 ○ 字符，字符字形受基线影响在 em-box 内偏上，无法与背景圆同心） */
     margin: 0 auto 12px;
     opacity: 0.55;
     display: flex;
@@ -630,7 +637,18 @@ body {
     height: 72px;
     border-radius: 50%;
     background: var(--color-bg);
-    line-height: 1;
+    font-size: 0;
+    line-height: 0;
+    position: relative;
+}
+.empty .icon::after {
+    content: '';
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--color-border);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
 }
 
 /* 响应式 */

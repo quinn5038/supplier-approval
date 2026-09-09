@@ -743,11 +743,71 @@ def classify_uploaded_materials(file_list):
     }
 
 
-def _build_skip_result(tid, entry, decision_reason):
+# 申请部门兜底值（「信息变更审批」类单据的 applyUnitName 会被填成这类值，不是供应商名）
+_DEPT_NAME_EXACT = {"其他部门", "其他单位", "其他"}
+# 申请主体关键词（「合作意向审批」的申请主体是项目部，不是供应商）
+_DEPT_NAME_KEYWORDS = ("项目经理部", "项目部")
+
+
+def _is_department_name(name):
+    """applyUnitName 是否为「申请部门/申请主体」而非供应商真实名称。
+
+    「信息变更审批」单据的申请主体是部门，applyUnitName 会被填成「其他部门」；
+    「合作意向审批」单据的申请主体是项目部，会被填成「xxx项目经理部」。
+    这两类值都不是供应商名称，应回退到 A01 核验结果或简称。
+    """
+    n = str(name or "").strip()
+    if not n:
+        return False
+    if n in _DEPT_NAME_EXACT:
+        return True
+    if any(k in n for k in _DEPT_NAME_KEYWORDS):
+        return True
+    return False
+
+
+def _resolve_supplier_name(supplier, todo, textin_for_todo=None):
+    """供应商名称统一取值（2026-09-08）。
+
+    优先级（与首页列表展示完全一致）：
+      1. A01 核验结果（营业执照 OCR 的「名称」）——最权威，来自执照原件
+      2. 待办标题 title（title.split("/")[0]）——首页同款，供应商姓名
+      3. applyUnitName（排除「其他部门」「项目经理部」等申请部门/主体名）
+      4. 兜底：supplier.name 简称
+
+    边界处理：
+      - 核验结果为空/缺失 → 落到 title
+      - title 为空 → 落到 applyUnitName（非部门名）
+      - applyUnitName 为空或是部门/项目部名 → 落到 supplier.name
+      - supplier.name 也为空 → 返回空串（由调用方兜底 todo_id）
+    """
+    # 1. A01 核验结果名称（营业执照 OCR）
+    bl = (textin_for_todo or {}).get("business_license") or {}
+    ocr_name = (bl.get("fields") or {}).get("名称")
+    if ocr_name:
+        return str(ocr_name).strip()
+
+    # 2. 待办标题 title（首页同款：取 "/" 前的供应商姓名）
+    title = str((todo or {}).get("title") or "").strip()
+    if title:
+        first = title.split("/")[0].strip()
+        if first:
+            return first
+
+    # 3. 系统填入的完整名称（排除申请部门/主体名）
+    apply_unit = str((todo or {}).get("applyUnitName") or "").strip()
+    if apply_unit and not _is_department_name(apply_unit):
+        return apply_unit
+
+    # 4. 兜底：简称
+    return str((supplier or {}).get("name") or "").strip()
+
+
+def _build_skip_result(tid, entry, decision_reason, textin_for_todo=None):
     """9/5 新增：分流供应商（国外/集团）也生成"不适用"结果，避免列表 31 家有点击报 no_result"""
     supplier = entry.get("supplier", {})
     todo = entry.get("todo", {})
-    name = supplier.get("name") or todo.get("applyUnitName") or tid
+    name = _resolve_supplier_name(supplier, todo, textin_for_todo) or tid
     return {
         "todoId": tid,
         "name": name,
@@ -1504,6 +1564,8 @@ def run():
                 "applyUnitName": apply_unit, "businessBillId": sup_info_apply_id,
                 "procInstId": proc_inst_id, "actInstId": act_inst_id,
                 "actInstName": act_inst_name, "taskId": task_id,
+                # 9/8：待办标题 title（格式"供应商姓名/businessBillId"），首页列表取 "/" 前作供应商姓名
+                "title": item.get("title", "") or "",
             }, supplier, mat_cls)
             if FETCH_ONLY:
                 log.info(f"[已缓存] #{todo_id} {sname}（共 {len(cache)} 家）")
@@ -2020,14 +2082,16 @@ def run_stage2():
         # 分流供应商（国外/港澳台/集团独有）不需要企查查增强
         if supplier.get("is_foreign") or supplier.get("is_hmt"):
             # 即使分流也生成"不适用"结果，让所有待办都能看到决策（9/6 报告页写不适用原因）
-            results[tid] = _build_skip_result(tid, entry, decision_reason="境外供应商不适用中国大陆合规审查")
+            results[tid] = _build_skip_result(tid, entry, decision_reason="境外供应商不适用中国大陆合规审查",
+                                              textin_for_todo=textin.get(tid))
             continue
         is_special, special_category = is_special_category(supplier)
         if is_special:
             # 9/6 修正：文案描述实际判定依据（集团独有类别名），不再误写"股东含中交关键词"
             results[tid] = _build_skip_result(
                 tid, entry,
-                decision_reason=f"该供应商属于集团独有类别（{special_category}），审查标准复杂，需转人工处理")
+                decision_reason=f"该供应商属于集团独有类别（{special_category}），审查标准复杂，需转人工处理",
+                textin_for_todo=textin.get(tid))
             continue
 
         # 匹配企查查结果（优先信用代码，其次企业名）
@@ -2090,7 +2154,7 @@ def run_stage2():
         if extra_parts:
             opinion += "\n\n" + "\n\n".join(extra_parts)
 
-        full_name = todo.get("applyUnitName") or supplier.get("name", "")
+        full_name = _resolve_supplier_name(supplier, todo, textin.get(tid)) or tid
         results[tid] = {
             "todoId": tid,
             "name": full_name,
