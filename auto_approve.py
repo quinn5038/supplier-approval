@@ -1138,7 +1138,7 @@ def is_special_category(supplier):
     special_keywords = {
         "平台": "平台类",
         # 9/6 移除「租赁」：机械设备租赁/销售本质是普通物资贸易，与贸易/经销商同规则，
-        # 不再算集团独有类别（Quinn 确认）
+        # 不再算集团独有类别（业务确认）
         "云服务": "云服务商",
         "软件服务": "软件服务商",
         "运输": "运输服务商",
@@ -2098,7 +2098,7 @@ def run_stage2():
         key = supplier.get("social_credit_code") or ""
         q = qcc.get(key) or qcc.get(supplier.get("name", "")) \
             or qcc.get(todo.get("applyUnitName", ""))
-        # 2026-09-05 修复（Quinn 反馈）：无企查查数据不再整体跳过——
+        # 2026-09-05 修复：无企查查数据不再整体跳过——
         # 以空数据继续跑规则引擎，材料齐全性检查照常，企查查相关核验项
         # 自然落入"待人工核验"。这样每家供应商都有审批结果（决策），
         # 而不是 no_result。

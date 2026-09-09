@@ -1,4 +1,4 @@
-# Python 依赖清单（参赛版 v1.3）
+# Python 依赖清单（v1.3）
 #
 # 最小化运行（只需要以下）：
 # - Web UI：FastAPI + Jinja2 + Uvicorn

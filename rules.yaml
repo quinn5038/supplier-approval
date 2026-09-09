@@ -266,7 +266,7 @@ part_2_by_type:
 part_3_special_categories:
   - name: 平台类
     requirements: 三体系认证；EDI/ICP许可证（第二类）；电商平台软件著作权；电商平台+自营产品
-  # 9/6 移除「租赁商」：机械设备租赁/销售按贸易/经销商规则审查（Quinn 确认）
+  # 9/6 移除「租赁商」：机械设备租赁/销售按贸易/经销商规则审查（业务确认）
   - name: 云服务商
     requirements: ISO 9001+22301；增值电信业务许可证；CSA STAR；等保四级；云安全一级；ITSS一级；可信云
   - name: 软件服务商

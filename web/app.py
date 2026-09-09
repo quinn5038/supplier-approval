@@ -155,7 +155,7 @@ def _run_pipeline_for_one(todo_id: str):
         _update("正在 OCR 识别证件文件（TextIn）...", progress=70)
         # 9/6 修复：必须传 parse <todo_id> 单家过滤——不带参数会 OCR 全部
         # files_cache_desens/ 下 33 家文件，跑 10+ 分钟，子进程超时报错，
-        # 前端永久卡在处理中（Quinn 9/6 反馈的"进度条不动"根因）
+        # 前端永久卡在处理中（"进度条不动"根因）
         r2 = subprocess.run(
             [PYTHON_EXE, str(BASE_DIR / "textin_pipeline.py"), "parse", str(todo_id)],
             cwd=str(BASE_DIR), env=env,
@@ -185,7 +185,7 @@ def _run_pipeline_for_one(todo_id: str):
         # 2026-09-04 修复：done 前校验该 todo 确实有审批结果——
         # run_stage2 只处理企查查缓存里有数据的供应商，新拉取的供应商没有企查查数据
         # 会被跳过 → stage2_results.json 里没有该条目 → 前端 report 404 显示
-        # "该供应商暂无审批结果"却不说原因（Quinn 反馈的 bug）
+        # "该供应商暂无审批结果"却不说原因（此前反馈的 bug）
         try:
             stage2_data = json.loads(stage2_path.read_text(encoding="utf-8"))
         except Exception:
@@ -210,7 +210,7 @@ def _has_valid_result(todo_id: str) -> bool:
     """判断某供应商是否有审批结果（decision 非空，含 skip「不适用」）。
 
     9/6：skip（境外/集团独有分流不适用）也视为有结果——首页显示「查看结果」，
-    报告页综合核验表处写出「不适用」及具体原因，与 Quinn 确认的需求一致。
+    报告页综合核验表处写出「不适用」及具体原因，与业务需求一致。
     """
     stage2_path = BASE_DIR / "stage2_results.json"
     if not stage2_path.exists():
