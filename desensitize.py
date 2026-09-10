@@ -153,11 +153,11 @@ _IDCARD_MASKER_SCRIPT = os.environ.get(
 )
 _PADDLE_PYTHON = os.environ.get(
     "PADDLE_PYTHON",
-    os.path.join(tempfile.gettempdir(), "idcard_env", "Scripts", "python.exe"),
+    r"D:\WorkBuddy\idcard_env311\Scripts\python.exe",
 )
 _PADDLE_MODEL_DIR = os.environ.get(
     "PADDLE_MODEL_DIR",
-    os.path.join(tempfile.gettempdir(), "paddleocr-models"),
+    r"D:\WorkBuddy\paddleocr-models",
 )
 
 
