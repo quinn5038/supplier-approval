@@ -386,6 +386,35 @@ async def api_desens_image(todo_id: str):
     desens_dir = BASE_DIR / "files_cache_desens" / str(todo_id)
     if not desens_dir.exists():
         return JSONResponse({"error": "not_found", "msg": "无脱敏文件"}, status_code=404)
+
+    def _serve(f: Path):
+        media_type = None
+        # 按文件头判断真实内容类型（PDF 身份证脱敏后是 PNG 内容）
+        try:
+            head = f.read_bytes()[:8]
+            if head == b"\x89PNG\r\n\x1a\n":
+                media_type = "image/png"
+        except Exception:
+            pass
+        return FileResponse(str(f), media_type=media_type)
+
+    # 9/10 修复：优先用 textin_results 里 legal_person_id 的 file 字段精确匹配，
+    # 避免身份证文件名不含「身份证/证件」关键词（如「柯力发(2)(1).pdf」）时查不到。
+    textin_path = BASE_DIR / "textin_results.json"
+    if textin_path.exists():
+        try:
+            textin = json.loads(textin_path.read_text(encoding="utf-8"))
+            id_file = (textin.get(str(todo_id), {})
+                       .get("legal_person_id", {})
+                       .get("file"))
+        except Exception:
+            id_file = None
+        if id_file:
+            target = desens_dir / id_file
+            if target.exists() and target.is_file():
+                return _serve(target)
+
+    # 兜底：文件名关键词匹配（身份证/证件/id_card/id_）
     id_keywords = ("身份证", "证件", "id_card", "id_")
     for f in sorted(desens_dir.iterdir()):
         if not f.is_file():
@@ -394,15 +423,7 @@ async def api_desens_image(todo_id: str):
         # 身份证可能是 PDF（脱敏后回写保持原扩展名，内容实为 PNG）
         if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".pdf") \
                 and any(k in name_lower for k in id_keywords):
-            media_type = None
-            # 按文件头判断真实内容类型（PDF 身份证脱敏后是 PNG 内容）
-            try:
-                head = f.read_bytes()[:8]
-                if head == b"\x89PNG\r\n\x1a\n":
-                    media_type = "image/png"
-            except Exception:
-                pass
-            return FileResponse(str(f), media_type=media_type)
+            return _serve(f)
     return JSONResponse({"error": "not_found", "msg": "未找到脱敏身份证图片"}, status_code=404)
 
 
