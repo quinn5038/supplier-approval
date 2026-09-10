@@ -147,9 +147,12 @@ def _looks_like_id_card_name(name_lower):
 # PaddleOCR 精确打码（2026-09-09 接入 idcard_masker.py，替换粗比例矩形）
 # ============================================================
 # PaddleOCR 脱敏的三个路径：优先读环境变量（便于换机器/移交复用），否则用默认值。
+# 9/10 修复：idcard_masker.py 随仓库分发到 offline_desens/，默认路径改为项目内相对路径，
+# 避免硬编码 OneDrive 绝对路径导致评委/换机器复现时脱敏脚本找不到。
+_PROJECT_ROOT = Path(__file__).resolve().parent
 _IDCARD_MASKER_SCRIPT = os.environ.get(
     "IDCARD_MASKER_SCRIPT",
-    r"E:\OneDrive\工作\05 证书、竞赛\人工智能创新大赛\离线脱敏程序\idcard_masker.py",
+    str(_PROJECT_ROOT / "offline_desens" / "idcard_masker.py"),
 )
 _PADDLE_PYTHON = os.environ.get(
     "PADDLE_PYTHON",
