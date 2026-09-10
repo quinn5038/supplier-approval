@@ -24,7 +24,7 @@ STATUS_MARK = {
 DECISION_LABEL = {
     "reject": ("退回", "#fce8e6", "#a52834"),
     "manual": ("转人工", "#fef7e0", "#8a6d00"),
-    "approve": ("建议同意", "#e6f4ea", "#1e7e34"),
+    "recommend": ("建议同意", "#e6f4ea", "#1e7e34"),
     "skip": ("不适用", "#f1f3f4", "#5f6368"),
 }
 

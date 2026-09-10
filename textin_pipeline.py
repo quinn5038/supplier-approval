@@ -1165,8 +1165,10 @@ def run_parse(only_todo=None):
                 "file": fpath.name, "error": str(e)}
             n_fail += 1
 
-    RESULTS_FILE.write_text(json.dumps(results, ensure_ascii=False, indent=1),
-                            encoding="utf-8")
+    # 避免 OCR 子进程被中断时破坏已有结果文件。
+    tmp = RESULTS_FILE.with_suffix(RESULTS_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, RESULTS_FILE)
     print(f"\n完成: 成功 {n_ok} | 失败 {n_fail} → {RESULTS_FILE.name}")
 
 
