@@ -1305,9 +1305,15 @@ def _load_cache():
     return {}
 
 
+def _atomic_write_json(path, data):
+    """先写同目录临时文件，再原子替换，避免进程中断留下半截 JSON。"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _save_cache(cache):
-    CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=1),
-                          encoding="utf-8")
+    _atomic_write_json(CACHE_FILE, cache)
 
 
 def _cache_supplier(cache, todo_id, todo_meta, supplier, mat_cls):
@@ -2141,7 +2147,7 @@ def run_stage2():
                 d = c.get("detail", "")
                 if "；" in d:
                     v = d.split("；", 1)[1]
-            elif st == "fail" and c.get("id") in ("A01", "A02", "A08", "A10"):
+            elif st == "fail":
                 v = c.get("detail", "")
             if v and v not in seen_v:
                 verify_items.append(v)
@@ -2183,8 +2189,7 @@ def run_stage2():
                  f"{'（企查查发现' + str(len(qcc_issues)) + '项问题）' if qcc_issues else ''}"
                  f"{n_textin_extra}")
 
-    STAGE2_FILE.write_text(json.dumps(results, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
+    _atomic_write_json(STAGE2_FILE, results)
     n_rej = sum(1 for r in results.values() if r["decision"] == "reject")
     n_man = sum(1 for r in results.values() if r["decision"] == "manual")
     n_rec = sum(1 for r in results.values() if r["decision"] == "recommend")

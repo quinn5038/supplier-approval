@@ -18,6 +18,7 @@ import shutil
 import logging
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 # 9/6 修复：/api/todos 重试路径用了 log.warning 但模块没定义 log（NameError）
 log = logging.getLogger("webui")
@@ -45,6 +46,8 @@ templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 # 审批任务进度追踪：todo_id → {status, step, error, started_at}
 _task_status: dict = {}
 _task_lock = threading.Lock()
+# 底层流水线使用同一组 JSON 缓存文件；串行执行可避免多个子进程互相覆盖。
+_pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="supplier-pipeline")
 
 # 9/6 修复：webui 重启时内存 _task_status 会被清空，但如果任务字典里
 # 遗留了 running 状态（线程随旧进程死亡但状态未清理），前端会永久
@@ -219,7 +222,7 @@ def _has_valid_result(todo_id: str) -> bool:
         stage2 = json.loads(stage2_path.read_text(encoding="utf-8"))
     except Exception:
         return False
-    return stage2.get(str(todo_id), {}).get("decision") in ("reject", "manual", "approve", "skip")
+    return stage2.get(str(todo_id), {}).get("decision") in ("reject", "manual", "recommend", "skip")
 
 
 def _load_stage2_for_todo(todo_id: str):
@@ -325,10 +328,15 @@ async def api_start_approve(todo_id: str):
         existing = _task_status.get(todo_id, {})
         if existing.get("status") == "running":
             return JSONResponse({"msg": "正在处理中，请勿重复点击", "step": existing.get("step")}, status_code=409)
+        # 必须在线程提交前占位；否则两个并发请求都会通过上面的 running 检查。
+        now = datetime.now().isoformat()
+        _task_status[todo_id] = {
+            "status": "running", "step": "已进入处理队列，等待前序任务完成...",
+            "error": None, "progress": 0, "started_at": now, "updated_at": now,
+        }
 
-    # 启动后台线程
-    t = threading.Thread(target=_run_pipeline_for_one, args=(todo_id,), daemon=True)
-    t.start()
+    # 单 worker 保证 cache_v4/textin_results/stage2_results 不发生并发写覆盖。
+    _pipeline_executor.submit(_run_pipeline_for_one, todo_id)
     return {"msg": "已开始处理", "todo_id": todo_id}
 
 
