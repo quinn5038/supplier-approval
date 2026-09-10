@@ -823,19 +823,26 @@ def extract_authorization(text, supplier):
 
 def extract_generic_cert(text):
     '''通用证书（生产许可证/机构认证等）→ 效期
-    若无明确有效期/失效日期标签，不取最后日期兜底（避免误报开票资料/执照等非证书材料）'''
+    若无明确有效期/失效日期标签，不取最后日期兜底（避免误报开票资料/执照等非证书材料）
+
+    （9/10 修复：安全生产许可证的「有效期」标签常被 TextIn 拆成
+    「**有** **效** **期：**」这种竖排/印章片段，_pre 删 ** 后仍残留字间空格
+    「有 效 期」，导致 _RE_VALID_DATE_RANGE 匹配不到连续的「有效期」。
+    改用 _norm 去空格/换行后再判断标签与提取效期。）
+    '''
     t = _pre(text)
+    tn = _norm(t)  # 去空格/换行，把"有 效 期"合并成"有效期"
     has_label = bool(
-        _RE_VALID_DATE_RANGE.search(t)
-        or _RE_EXPIRE_DATE.search(t)
-        or _RE_ISSUE_DATE.search(t)
+        _RE_VALID_DATE_RANGE.search(tn)
+        or _RE_EXPIRE_DATE.search(tn)
+        or _RE_ISSUE_DATE.search(tn)
     )
     if not has_label:
         return {"fields": {"有效期至": None, "备注": "未识别到有效期标签"},
                 "checks": {"在有效期内": None},
                 "issues": ["未识别到有效期标签（材料可能为开票资料/其他证明，"
                           "或 OCR 未能识别，需人工核验）"]}
-    exp, longterm = _valid_until(t)
+    exp, longterm = _valid_until(tn)
     fields = {"有效期至": str(exp) if exp else ("长期" if longterm else None)}
     checks, issues = {}, []
     today = date.today()
@@ -1445,6 +1452,16 @@ def run_test():
     assert auth["checks"].get("被授权方为本公司") and auth["checks"].get("在有效期内"), auth
     ok += 1
     print("  [✓] 授权书·被授权方一致且有效")
+
+    # 12. 生产许可证·竖排拆散有效期标签（"**有** **效** **期：**"）→ 识别范围取结束日
+    perm = extract("production_license",
+                   "安全生产许可证\n编号：（鲁）JZ安许证字［2018]012183\n"
+                   "**有** **效** **期：**2024年08月15日\n"
+                   "**至**2027年09月26日\n发证机关：山东省住房和城乡建设厅", supplier)
+    assert perm["checks"].get("在有效期内") is True, perm
+    assert perm["fields"]["有效期至"] == "2027-09-26", perm
+    ok += 1
+    print("  [✓] 生产许可证·竖排拆散有效期标签")
 
     print(f"\n== 全部 {ok} 项测试通过 ==")
 
