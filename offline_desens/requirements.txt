@@ -1,0 +1,6 @@
+# Install paddlepaddle separately for your OS first; see README.md.
+paddleocr==2.9.1
+opencv-python-headless>=4.10,<5
+Pillow>=10,<12
+PyMuPDF>=1.24,<2
+numpy>=1.26,<3
