@@ -292,14 +292,36 @@ def _find_dates(text):
 
 
 def _valid_until(text):
-    """抽取'有效期至/失效日期'类字段 → (date或None, 是否长期)"""
+    """抽取'有效期至/失效日期/有效日期'类字段 → (date或None, 是否长期)
+
+    （9/10 修复：再认证 ISO 证书常同时印「上周期有效期至：X」和「证书有效日期：Y 至 Z」。
+    旧正则 `有效期[至到]` 会命中「上周期有效期至」里的「有效期至」、把上一认证周期的
+    截止日（已过期）当当前有效期，导致有效证书被误判过期。现优先识别「有效日期」标签，
+    并对「有效期至」排除「上周期」等历史周期前缀。）
+    """
     if re.search(r"长期|永久|无固定期限", _norm(text)):
         return None, True
-    m = re.search(r"(有效期[至到]|失效[日日期]*|到期[日日期]*)[:：]?\s*" + _DATE, text)
+
+    # 1) "证书有效日期"——当前认证周期的权威字段。
+    #    支持"起始 至 结束"（取结束日）与单日期两种形态。
+    m = re.search(r"有效日期\s*[:：]?\s*" + _DATE, text)
+    if m:
+        tail = text[m.end():m.end() + 30]
+        # 中文日期"2025年03月19日"的"日"不在 _DATE 内，需在"至"前跳过可选"日"
+        m2 = re.match(r"\s*日?\s*[至到\-—~]\s*" + _DATE, tail)
+        d = _to_date(m2.groups()[-3:]) if m2 else _to_date(m.groups()[-3:])
+        if d:
+            return d, False
+
+    # 2) 标准"有效期至/失效日期/到期日期"标签，排除历史周期前缀
+    m = re.search(
+        r"(?<!上周期)(?<!上一周期)(?<!上期)(?<!原周期)(?<!上一年度)(?<!上一期)"
+        r"(有效期[至到]|失效[日日期]*|到期[日日期]*)[:：]?\s*" + _DATE, text)
     if m:
         d = _to_date(m.groups()[-3:])
         if d:
             return d, False
+
     # 兜底：文本里最晚的日期（证书类常只印一个截止日）
     dates = _find_dates(text)
     return (max(dates), False) if dates else (None, False)
@@ -1387,6 +1409,34 @@ def run_test():
     assert not iso2["checks"].get("持有人一致") and not iso2["checks"].get("在有效期内"), iso2
     ok += 1
     print("  [✓] ISO14001·过期+持有人不一致检出")
+
+    # 10b. ISO证书·再认证（上周期有效期至 + 证书有效日期范围）→ 取当前周期结束日
+    iso3 = extract("iso9001",
+                   "质量管理体系认证证书\n证书编号: 31625Q10127R1S\n"
+                   "兹证明\n山东杰控电气技术有限公司\n"
+                   "初次发证日期：2022年03月18日\n"
+                   "上周期有效期至：2025年03月17日\n"
+                   "再认证审核日期：2025年03月10日至2025年03月12日\n"
+                   "本次发证日期：2026年03月25日\n"
+                   "证书有效日期：2025年03月19日至2028年03月17日",
+                   {"name": "山东杰控电气技术有限公司",
+                    "full_name": "山东杰控电气技术有限公司"})
+    assert iso3["checks"].get("在有效期内") is True, iso3
+    assert iso3["fields"]["有效期至"] == "2028-03-17", iso3
+    ok += 1
+    print("  [✓] ISO9001·再认证取当前周期(排除上周期)")
+
+    # 10c. ISO证书·单日期"证书有效日期"（无范围）
+    iso4 = extract("iso14001",
+                   "环境管理体系认证证书\n兹证明\n山东杰控电气技术有限公司\n"
+                   "初次发证日期：2023年09月27日 本次发证日期：2026年03月25日 "
+                   "证书有效日期：2029年03月24日",
+                   {"name": "山东杰控电气技术有限公司",
+                    "full_name": "山东杰控电气技术有限公司"})
+    assert iso4["checks"].get("在有效期内") is True, iso4
+    assert iso4["fields"]["有效期至"] == "2029-03-24", iso4
+    ok += 1
+    print("  [✓] ISO14001·单日期证书有效日期")
 
     # 11. 授权书
     auth = extract("authorization",
