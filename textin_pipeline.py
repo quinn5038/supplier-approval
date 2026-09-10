@@ -190,6 +190,21 @@ def _norm(s):
     return re.sub(r"\s+", "", str(s or ""))
 
 
+def _name_close(a, b):
+    """两个中文姓名是否仅差 1 个字（疑似 OCR 形近字误差，如「昊」→「吴」）。
+    用于把「姓名与法人不一致」降级为转人工，而非直接退回。"""
+    a = _norm(a)
+    b = _norm(b)
+    if not a or not b:
+        return False
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    if abs(len(a) - len(b)) == 1:
+        longer, shorter = (a, b) if len(a) > len(b) else (b, a)
+        return any(longer[:i] + longer[i + 1:] == shorter for i in range(len(longer)))
+    return False
+
+
 def _pre(text):
     """预处理：删表格分隔线、竖线换空格、去加粗星号/标题井号——保留换行结构
     （TextIn 返回的 markdown 里字段通常按行/表格排列，行结构是字段边界的依据）
@@ -493,12 +508,18 @@ def extract_legal_person_id(text, supplier, detail=None):
         if not expiry_ok:
             issues.append("身份证背面（有效期限）未能识别，需人工核验是否缺面或图片不清晰")
 
-    # ---- 姓名一致性核验 ----
+    # ---- 姓名一致性核验（9/10：仅差1字时疑似OCR误差，转人工而非直接fail）----
     sys_legal = _norm(supplier.get("legal_person", ""))
     if fields["姓名"] and sys_legal:
-        checks["姓名与法人一致"] = fields["姓名"] == sys_legal
-        if not checks["姓名与法人一致"]:
-            issues.append(f"身份证姓名「{fields['姓名']}」与系统法人「{sys_legal}」不一致")
+        fname = fields["姓名"]
+        if fname == sys_legal:
+            checks["姓名与法人一致"] = True
+        elif _name_close(fname, sys_legal):
+            checks["姓名与法人一致"] = None
+            issues.append(f"身份证姓名「{fname}」与系统法人「{sys_legal}」仅差1字，疑似OCR识别误差，需人工复核")
+        else:
+            checks["姓名与法人一致"] = False
+            issues.append(f"身份证姓名「{fname}」与系统法人「{sys_legal}」不一致")
 
     # ---- 有效期核验 ----
     today = date.today()
@@ -555,11 +576,16 @@ def build_idcard_from_paddle(cards, supplier=None):
         if not expiry_ok:
             issues.append("身份证背面（有效期限）未能识别，需人工核验是否缺面或图片不清晰")
 
-    # 姓名一致性
+    # 姓名一致性（9/10：仅差1字时疑似OCR误差，转人工而非直接fail）
     sys_legal = _norm((supplier or {}).get("legal_person", ""))
     if name and sys_legal:
-        checks["姓名与法人一致"] = name == sys_legal
-        if not checks["姓名与法人一致"]:
+        if name == sys_legal:
+            checks["姓名与法人一致"] = True
+        elif _name_close(name, sys_legal):
+            checks["姓名与法人一致"] = None
+            issues.append(f"身份证姓名「{name}」与系统法人「{sys_legal}」仅差1字，疑似OCR识别误差，需人工复核")
+        else:
+            checks["姓名与法人一致"] = False
             issues.append(f"身份证姓名「{name}」与系统法人「{sys_legal}」不一致")
 
     # 有效期核验（valid_until 格式：2007.02.24-2027.02.24 或 长期）

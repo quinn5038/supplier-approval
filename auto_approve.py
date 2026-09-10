@@ -2133,6 +2133,12 @@ def run_stage2():
             checklist, textin_issues = enhance_checklist_with_textin(
                 checklist, supplier, textin[tid])
 
+        # 9/10 修复：OCR 增强可能把「缺材料 fail」降级为「转人工 manual」
+        # （材料其实已上传、只是识别不出）。此时应从 missing 移除，否则
+        # decision 仍按「缺材料」判 reject，出现「核验表无退回项却显示退回」。
+        fail_ids = {c["id"] for c in checklist if c.get("status") == "fail"}
+        missing = [r for r in missing if r.get("id") in fail_ids]
+
         # 重建 verify_items（完全基于增强后的清单，旧的作废——
         # 已增强为 pass 的不再贡献核验点，partial 只留残差）
         verify_items = []
@@ -2148,6 +2154,11 @@ def run_stage2():
                 if "；" in d:
                     v = d.split("；", 1)[1]
             elif st == "fail":
+                v = c.get("detail", "")
+            elif st == "manual":
+                # 9/10 修复：manual（转人工）项也要纳入核验点，否则
+                # 缺材料项被 OCR 降级为 manual 后 verify_items 为空，
+                # 决策会误判成 recommend（建议同意）。
                 v = c.get("detail", "")
             if v and v not in seen_v:
                 verify_items.append(v)
