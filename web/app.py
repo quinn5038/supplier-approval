@@ -1,5 +1,5 @@
 """
-ICCEC 供应商智能审批系统 - Web UI
+招采平台供应商智能辅助审批系统 - Web UI
 FastAPI 主入口，复用 auto_approve.py / textin_pipeline.py / gen_opinion.py / gen_stage2_report.py
 
 启动：
@@ -39,7 +39,7 @@ from fastapi.templating import Jinja2Templates
 WEB_DIR = Path(__file__).resolve().parent
 PYTHON_EXE = sys.executable
 
-app = FastAPI(title="ICCEC 供应商智能审批", version="1.0")
+app = FastAPI(title="招采平台供应商智能辅助审批", version="1.0")
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
