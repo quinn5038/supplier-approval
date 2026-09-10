@@ -220,39 +220,49 @@ _CN_UNIT = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 10
 
 
 def _cn2num(s):
-    """中文数字→数值：'贰仟'→2000、'壹佰贰拾'→120、'叁仟伍佰万'→35000000"""
-    total, num = 0, 0
+    """中文数字→数值（分段解析，正确支持亿/万组合）：
+    '贰仟'→2000、'壹佰贰拾'→120、'壹亿陆仟陆佰伍拾伍万'→166550000"""
+    result, section, num = 0, 0, 0
     for ch in s:
         if ch in _CN_NUM:
             num = _CN_NUM[ch]
         elif ch in _CN_UNIT:
-            num = num if num else 1
-            total += num * _CN_UNIT[ch]
+            if num == 0:
+                num = 1
+            section += num * _CN_UNIT[ch]
             num = 0
         elif ch == "万":
-            total = (total + num) * 10000
+            section += num
+            result += section * 10000
+            section = 0
             num = 0
         elif ch == "亿":
-            total = (total + num) * 100000000
+            section += num
+            result += section * 100000000
+            section = 0
             num = 0
         else:
             return None
-    return total + num
+    return result + section + num
 
 
 def _parse_capital(t):
-    """注册资本 → 万元数值。兼容'800万元'与中文大写'贰仟万元（人民币）'两种排版"""
-    m = re.search(r"注册资本\s*[:：]?\s*([\d,.，]+)\s*万", t)
+    """注册资本 → 万元数值。兼容多种排版：
+    '800万元' / '人民币1100万元' / 中文大写'人民币元 壹亿陆仟陆佰伍拾伍万元整'"""
+    # 阿拉伯数字（允许"注册资本"与金额间夹"人民币/人民币元"字样）
+    m = re.search(r"注册资本\s*[:：]?\s*(?:人民币(?:元)?)?\s*([\d,.，]+)\s*万", t)
     if m:
         try:
             return float(m.group(1).replace(",", "").replace("，", ""))
         except ValueError:
             return None
-    m = re.search(r"注册资本\s*[:：]?\s*([零〇一二两三四五六七八九十百千万亿"
-                  r"壹贰叁肆伍陆柒捌玖拾佰仟]+)\s*万", t)
+    # 中文大写（完整金额含亿/万，_cn2num 转"元"后 /10000 得"万元"）
+    m = re.search(r"注册资本\s*[:：]?\s*(?:人民币(?:元)?)?\s*"
+                  r"([零〇一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟]+)", t)
     if m:
         v = _cn2num(m.group(1))
-        return float(v) if v else None
+        if v:
+            return float(v) / 10000
     return None
 
 

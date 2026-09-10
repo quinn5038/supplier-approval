@@ -63,9 +63,9 @@ SUPPLEMENT_TEMPLATES = {
     "A07":  "售后服务证明（厂家出具的售后服务证明函，落款在3个月内；或售后服务五星认证证书）",
     "A08":  "上年度经审计的财报（须含资产负债表/利润表/现金流量表）",
     "A13":  "检验检测资质证明（CMA 资质认定证书 / CNAS 实验室认可证书等，须在有效期内）",
-    "C1_02": "ISO 9001、14001 和 45001 体系认证证书（须为该公司认证且在有效期内）",
-    "C1_03": "ISO 9001、14001 和 45001 体系认证证书（须为该公司认证且在有效期内）",
-    "C1_04": "ISO 9001、14001 和 45001 体系认证证书（须为该公司认证且在有效期内）",
+    "C1_02": "ISO 9001 认证证书（须为该公司认证且在有效期内）",
+    "C1_03": "ISO 14001 认证证书（须为该公司认证且在有效期内）",
+    "C1_04": "ISO 45001 认证证书（须为该公司认证且在有效期内）",
     "C1_05": "生产许可证或强制认证证明（须在有效期内）",
     "D1_06": "产品生产企业的代理协议或产品销售授权资质（授权一方须为该贸易公司且在有效期内）",
 }
@@ -239,14 +239,21 @@ def build_opinion(tid, s2, textin, cache):
     # 决策 1：退回（补材料清单 + 整改/人工项）
     if suggest_action == "退回":
         supplement_items = []
-        seen_iso = False
+        # ISO 三认证：只列实际失败的项（C1_02=9001 / C1_03=14001 / C1_04=45001；D1_03/04/05 同理）
+        iso_fail_map = {
+            "C1_02": "ISO 9001", "C1_03": "ISO 14001", "C1_04": "ISO 45001",
+            "D1_03": "ISO 9001", "D1_04": "ISO 14001", "D1_05": "ISO 45001",
+        }
+        failed_iso = []
         for cid, cname, desc in supplement_fails:
-            # ISO 三认证合并为一条（不论 C1 还是 D1）
-            if cid in ("C1_02", "C1_03", "C1_04", "D1_03", "D1_04", "D1_05"):
-                if not seen_iso:
-                    supplement_items.append(
-                        SUPPLEMENT_TEMPLATES.get("D1_03") or SUPPLEMENT_TEMPLATES["C1_02"])
-                    seen_iso = True
+            iso_name = iso_fail_map.get(cid)
+            if iso_name and iso_name not in failed_iso:
+                failed_iso.append(iso_name)
+        if failed_iso:
+            supplement_items.append(
+                "、".join(failed_iso) + " 体系认证证书（须为该公司认证且在有效期内）")
+        for cid, cname, desc in supplement_fails:
+            if cid in iso_fail_map:
                 continue
             tmpl = SUPPLEMENT_TEMPLATES.get(cid)
             if tmpl:
