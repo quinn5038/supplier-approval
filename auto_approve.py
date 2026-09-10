@@ -36,6 +36,7 @@ import json
 import time
 import logging
 import sys
+import re
 from datetime import datetime
 from pathlib import Path
 from eval import safe_eval_rule
@@ -647,11 +648,11 @@ CCC_SCOPE_KEYWORDS = [
     "家用电器", "家电", "玩具", "安全玻璃", "汽车零部件", "汽车配件",
     "低压电器", "插头", "插座", "电焊机",
 ]
-# 工业产品生产许可证目录（食品/化工/农药/危化品/水泥/压力容器/电梯/起重机械等）
+# 工业产品生产许可证目录（食品/化工/农药/危化品/水泥/压力容器/电梯/起重机械/医疗器械生产等）
 LICENSE_SCOPE_KEYWORDS = [
     "食品", "食品生产", "化工", "化学原料", "农药", "危险化学品", "危化",
     "水泥", "压力容器", "电梯", "起重机械", "起重设备", "制冷设备",
-    "燃气器具", "化肥", "饲料", "化妆品",
+    "燃气器具", "化肥", "饲料", "化妆品", "医疗器械生产",
 ]
 
 
@@ -661,12 +662,18 @@ def needs_production_license_by_scope(busi_scope):
     返回: (是否需要, 需要的证明类型描述)
     """
     scope = str(busi_scope or "")
-    for kw in CCC_SCOPE_KEYWORDS:
-        if kw in scope:
-            return True, "3C强制认证证书（经营范围涉及强制认证产品）"
+    # 剔除"不含/不包括/不涉及"等否定描述（如"销售（不含危险化学品）"），避免误判
+    scope = re.sub(r"不含[^；;，,）)]*", "", scope)
+    scope = re.sub(r"不包括[^；;，,）)]*", "", scope)
+    scope = re.sub(r"不涉及[^；;，,）)]*", "", scope)
+    # 生产许可证优先（更严格的许可项目，如医疗器械生产/危化品等）
     for kw in LICENSE_SCOPE_KEYWORDS:
         if kw in scope:
-            return True, "生产许可证（经营范围涉及强制许可产品）"
+            return True, f"生产许可证（经营范围涉及「{kw}」）"
+    # 再匹配 3C 强制认证
+    for kw in CCC_SCOPE_KEYWORDS:
+        if kw in scope:
+            return True, f"3C强制认证证书（经营范围涉及「{kw}」）"
     return False, ""
 
 

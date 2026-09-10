@@ -383,9 +383,18 @@ async def api_desens_image(todo_id: str):
         if not f.is_file():
             continue
         name_lower = f.name.lower()
-        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif") \
+        # 身份证可能是 PDF（脱敏后回写保持原扩展名，内容实为 PNG）
+        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".pdf") \
                 and any(k in name_lower for k in id_keywords):
-            return FileResponse(str(f))
+            media_type = None
+            # 按文件头判断真实内容类型（PDF 身份证脱敏后是 PNG 内容）
+            try:
+                head = f.read_bytes()[:8]
+                if head == b"\x89PNG\r\n\x1a\n":
+                    media_type = "image/png"
+            except Exception:
+                pass
+            return FileResponse(str(f), media_type=media_type)
     return JSONResponse({"error": "not_found", "msg": "未找到脱敏身份证图片"}, status_code=404)
 
 

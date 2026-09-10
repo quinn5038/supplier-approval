@@ -4,7 +4,7 @@ r"""从 stage2_results.json + textin_results.json 生成供应商材料审查对
 用法: python gen_stage2_report.py [todoId1] [todoId2] ...   (默认全部)
 输出: D:\WorkBuddy\供应商材料审查_YYYYMMDD.html
 """
-import json, sys, datetime
+import json, sys, datetime, re
 from datetime import date
 from pathlib import Path
 
@@ -336,6 +336,11 @@ def render_supplier(tid, s2, textin, cache):
         elif st == "skip" and detail:
             # 9/6：skip 项（如 C1_05 无需生产许可证）→ 核验结果列显示 detail
             check_detail = f"<span class='verify-skip'>{esc(detail)}</span>"
+        elif st == "fail" and detail and not check_detail_parts:
+            # 9/10：fail 缺材料项 → 核验结果列显示具体原因（detail 里的「【...】」附加说明，
+            # 如生产许可证「因经营范围涉及医疗器械生产」），而非笼统「无核验数据」
+            m = re.search(r"【(.+?)】", detail)
+            check_detail = f"<span class='issue'>{esc(m.group(1) if m else detail)}</span>"
         elif check_type == "qichacha":
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
