@@ -403,6 +403,19 @@ def render_supplier(tid, s2, textin, cache):
     today = date.today().strftime("%Y年%m月%d日")
     auto_gen = f"（自动生成于 {today}，依据《中港采购发〔2025〕161号》准入审查规则）"
 
+    # 9/10 新增：综合核验表标题右侧的状态图例（红=退回 / 黄=转人工 / 绿=通过），横向排列
+    # skip（不适用）时没有表格，不显示图例
+    if decision == "skip":
+        legend_html = ""
+    else:
+        legend_html = (
+            "<div class='status-legend'>"
+            "<span class='legend-item'><span class='legend-swatch' style='background:#fce8e6;border-color:#a52834'></span>退回</span>"
+            "<span class='legend-item'><span class='legend-swatch' style='background:#fef7e0;border-color:#8a6d00'></span>转人工</span>"
+            "<span class='legend-item'><span class='legend-swatch' style='background:#e6f4ea;border-color:#1e7e34'></span>通过</span>"
+            "</div>"
+        )
+
     return f"""
     <div class="card">
       <div class="card-head">
@@ -411,7 +424,10 @@ def render_supplier(tid, s2, textin, cache):
         <span class="decision" style="background:{dl[1]};color:{dl[2]}">{dl[0]}</span>
       </div>
       <div class="auto-gen">{auto_gen}</div>
-      <h3 style="margin:16px 20px 8px">综合核验表</h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:16px 20px 8px;">
+        <h3 style="margin:0;">综合核验表</h3>
+        {legend_html}
+      </div>
       <div style="padding:0 20px">{big_table}</div>
       <div class="grid">
         <div>
