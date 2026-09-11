@@ -229,6 +229,16 @@ def build_opinion(tid, s2, textin, cache):
     else:
         suggest_action = "同意"
 
+    # 9/11：A08 财报未传 + 企查查无数据 → 意见中独立列出「经审计的上年度财报」
+    a08_needs_financial = False
+    for c in manual_items:
+        if c.get("id") == "A08":
+            a08_detail = c.get("detail") or ""
+            if not supplier.get("has_financial_report") and \
+                    ("未查到" in a08_detail or "无数据" in a08_detail or "数据为空" in a08_detail):
+                a08_needs_financial = True
+            break
+
     # ---- 9/7 改造：完整列出所有异常（与综合核验表联动），单行分号分隔 ----
     lines = []
 
@@ -276,6 +286,8 @@ def build_opinion(tid, s2, textin, cache):
             cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
             desc = c.get("detail") or c.get("message") or "需人工核验"
             other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")
+        if a08_needs_financial:
+            lines.append("需补充：经审计的上年度财报。")
         if other_issues:
             lines.append("另需整改/核实：" + "；".join(other_issues) + "。")
     # 决策 2：转人工（完整列出所有异常项）
@@ -288,6 +300,8 @@ def build_opinion(tid, s2, textin, cache):
             cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
             desc = c.get("detail") or c.get("message") or "需人工核验"
             reasons.append(f"[{cid}]{cname}：{_clip(desc)}")
+        if a08_needs_financial:
+            lines.append("需补充：经审计的上年度财报。")
         if not reasons:
             reasons.append("部分审核项需人工核验")
         lines.append("转人工。" + "；".join(reasons))

@@ -1053,13 +1053,15 @@ def scan_files():
         if not todo_dir.is_dir():
             continue
         todo_id = todo_dir.name
-        # 该供应商缓存里的文件分类（fileName → types）
+        # 该供应商缓存里的文件分类（fileName → types 列表）
+        # 同一 fileName 可能在 materials_detail 出现多次（对应不同材料类型），
+        # 用 setdefault+extend 累积所有 types，避免后一条覆盖前一条导致漏分类
         cache_types = {}
         for d in cache.get(todo_id, {}).get("materials_detail", []):
             fn = d.get("fileName", "")
             types = d.get("types", [])
             if fn and types:
-                cache_types[fn] = types
+                cache_types.setdefault(fn, []).extend(types)
         for f in sorted(todo_dir.iterdir()):
             if f.suffix.lower() not in FILE_EXTS:
                 continue

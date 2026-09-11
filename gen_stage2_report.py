@@ -319,7 +319,14 @@ def render_supplier(tid, s2, textin, cache):
                 )
         elif st == "manual":
             # 9/6：转人工项（如 ISO 传错位置）→ 显示「上传异常」而非「材料未上传」误导
-            mat_status = "<span class='mat-warn'>上传异常（见核验结果列）</span>"
+            # 9/11：A08 财报未传（has_financial_report=False）→ 显示「材料未上传」
+            if cid == "A08" and not supplier.get("has_financial_report"):
+                mat_status = "<span class='mat-miss'>材料未上传</span>"
+            # 9/11：A02 身份证已脱敏（识别到姓名或有效期）但缺一面 → 显示「已脱敏（部分字段未识别）」
+            elif cid == "A02" and idcard_desens_ok:
+                mat_status = "<span class='mat-muted'>已脱敏（部分字段未识别，需人工核验）</span>"
+            else:
+                mat_status = "<span class='mat-warn'>上传异常（见核验结果列）</span>"
         elif st == "skip" and detail:
             # 9/6：skip 项（如 C1_05 无需生产许可证）→ 显示 detail 而非「材料未上传」
             mat_status = f"<span class='mat-muted'>{esc(detail)}</span>"
@@ -331,7 +338,11 @@ def render_supplier(tid, s2, textin, cache):
         # material 类 → 显示 OCR 抽取字段
         # auto/skip 类 → 显示规则判定结论（detail）或「无需核验」
         # 9/6：转人工项（manual，如 ISO 传错位置）→ 核验结果列直接显示 detail（人工核验说明）
-        if st == "manual" and detail:
+        if st == "manual" and check_detail_parts:
+            # 9/11：manual 但已有逐项渲染（如 A01 营业执照：已确认一致项 + 需人工项），
+            # 用逐项绿色/红色渲染，而非整段 detail 全红色——已确认项按图例显示绿色
+            check_detail = "<br>".join(check_detail_parts)
+        elif st == "manual" and detail:
             check_detail = f"<span class='issue'>{esc(detail)}</span>"
         elif st == "skip" and detail:
             # 9/6：skip 项（如 C1_05 无需生产许可证）→ 核验结果列显示 detail
