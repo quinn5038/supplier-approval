@@ -1047,6 +1047,12 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
     """
     sname = supplier.get("name", "")
 
+    # 9/11：A08 财报未传 + 企查查无数据 → 在意见中独立列出"经审计的上年度财报"
+    a08_needs_financial = (
+        not supplier.get("has_financial_report")
+        and any("经审计" in v or "A08" in v for v in verify_items)
+    )
+
     # ---- 统一汇总：全部检查完毕后一次性生成意见 ----
     # 优先级：存在问题(auto失败) + 缺材料 → 合并成一条退回意见
     #        无缺失但有未核验项 → 转人工
@@ -1111,6 +1117,12 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
                 opinion_parts.append(f"  {idx}. {desc}")
                 idx += 1
 
+            # 9/11：A08 财报未传 + 企查查无数据 → 独立列出"经审计的上年度财报"
+            if a08_needs_financial:
+                opinion_parts.append(
+                    f"  {idx}. 上年度经审计的财报（2026年须提交2025年财报）")
+                idx += 1
+
         opinion = "\n".join(opinion_parts)
         return opinion, "reject"
 
@@ -1123,6 +1135,9 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
                 unique_verifies.append(v)
                 seen.add(v)
         opinion_parts = ["转人工复核。材料齐全，以下核验点需人工/后续自动核验："]
+        # 9/11：A08 财报未传 + 企查查无数据 → 在核验点前独立列出
+        if a08_needs_financial:
+            opinion_parts.append("  0. 需补充：经审计的上年度财报（2026年须提交2025年财报）")
         for i, v in enumerate(unique_verifies, 1):
             opinion_parts.append(f"  {i}. {v}")
         opinion = "\n".join(opinion_parts)
@@ -2036,6 +2051,10 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
             short = "；".join(issues[:3])
             if len(issues) > 3:
                 short += f"（另有{len(issues)-3}项）"
+            # 9/11：逐项列出已确认一致的对比项，让核验结果完整呈现
+            # （如 A01 营业执照：信用代码/名称/法人/注册资本一致，仅经营范围需人工）
+            if true_keys:
+                short += "（已确认：" + "；".join(true_keys) + "）"
             c["status"] = "manual"
             c["detail"] = f"OCR核验需人工：{short}"
             textin_issues.append(f"{c.get('name', doc_type)}：{short}")

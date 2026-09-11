@@ -97,8 +97,17 @@ def is_name_value(value: str) -> bool:
 
 
 def is_validity_value(value: str) -> bool:
+    v = normalise_validity(value)
     date = r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}"
-    return bool(re.fullmatch(rf"{date}-(?:{date}|长期)", normalise_validity(value)))
+    if re.fullmatch(rf"{date}-(?:{date}|长期)", v):
+        return True
+    # 9/11 容错：OCR 常丢失日期分隔符（如「2011.01.11」被识别成「2011.0111」），
+    # 导致严格格式校验失败、背面有效期漏识别。提取所有数字判断是否组成
+    # 「8位起始日-8位结束日」或「8位起始日-长期」
+    digits = re.sub(r"\D", "", v)
+    if "长期" in v:
+        return bool(re.fullmatch(r"\d{8}", digits))
+    return bool(re.fullmatch(r"\d{16}", digits))
 
 
 def padded_box(box: tuple[int, int, int, int], width: int, height: int, min_x: int | None = None) -> tuple[int, int, int, int]:
@@ -228,6 +237,8 @@ def split_detected_long(source: np.ndarray, cards: list[np.ndarray]) -> list[np.
     """
     if not cards:
         return cards
+    if len(cards) >= 2:
+        return cards  # 9/11：已检测到多张卡（正反面已分离），不干预——避免误把正确检测的上下排身份证再二分
     h, w = source.shape[:2]
     total = sum(quad_area(q) for q in cards)
     if total >= h * w * 0.5:
@@ -238,7 +249,7 @@ def split_detected_long(source: np.ndarray, cards: list[np.ndarray]) -> list[np.
             order_quad(np.array([[0, 0], [split - 1, 0], [split - 1, h - 1], [0, h - 1]], np.float32)),
             order_quad(np.array([[split, 0], [w - 1, 0], [w - 1, h - 1], [split, h - 1]], np.float32)),
         ]
-    if h / w >= 2.0:  # 竖版长条：上下并排
+    if h / w >= 1.3:  # 9/11：上下排（h/w>=1.3 涵盖方图/接近方图）—— 湖北同方高科 h/w=1.41 上下两张卡粘连成 1 张竖版块
         split = h // 2
         return [
             order_quad(np.array([[0, 0], [w - 1, 0], [w - 1, split - 1], [0, split - 1]], np.float32)),
