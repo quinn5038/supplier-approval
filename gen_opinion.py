@@ -268,6 +268,10 @@ def build_opinion(tid, s2, textin, cache):
             tmpl = SUPPLEMENT_TEMPLATES.get(cid)
             if tmpl:
                 supplement_items.append(tmpl)
+        # 9/11：A08 财报未传 + 企查查无数据 → 纳入补充清单，与其他项一起编号
+        # （放在「补充后重新提交」前，不再单独成行）
+        if a08_needs_financial:
+            supplement_items.append("上年度经审计的财报（2026年须提交2025年财报）")
         # 去重保序
         seen = set()
         dedup = [x for x in supplement_items
@@ -286,8 +290,6 @@ def build_opinion(tid, s2, textin, cache):
             cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
             desc = c.get("detail") or c.get("message") or "需人工核验"
             other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")
-        if a08_needs_financial:
-            lines.append("需补充：经审计的上年度财报。")
         if other_issues:
             lines.append("另需整改/核实：" + "；".join(other_issues) + "。")
     # 决策 2：转人工（完整列出所有异常项）
