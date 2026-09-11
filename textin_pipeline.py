@@ -265,7 +265,7 @@ def _parse_capital(t):
     """注册资本 → 万元数值。兼容多种排版：
     '800万元' / '人民币1100万元' / 中文大写'人民币元 壹亿陆仟陆佰伍拾伍万元整'"""
     # 阿拉伯数字（允许"注册资本"与金额间夹"人民币/人民币元"字样）
-    m = re.search(r"注册资本\s*[:：]?\s*(?:人民币(?:元)?)?\s*([\d,.，]+)\s*万", t)
+    m = re.search(r"注册资本\s*[:：]?\s*(?:人民币(?:元)?|美元|港币|欧元|澳元)?\s*([\d,.，]+)\s*万", t)
     if m:
         try:
             return float(m.group(1).replace(",", "").replace("，", ""))
@@ -345,11 +345,20 @@ def _valid_until(text):
 def extract_business_license(text, supplier):
     """营业执照 → 字段+与系统信息比对（按行结构抽取，兼容md表格/加粗排版）"""
     t = _pre(text)
+    # 竖排标签被 OCR 拆散规整：TextIn 把「名称/类型」竖排标签拆成「名/类/称/型」
+    # 乱序，_pre 断行合并后「名称」变「名类称」、「类型」的「型」字被单独留下
+    t = t.replace("名类称", "名称")
+    t = re.sub(r"(?m)^型(?=\s)", "类型", t)
     fields = {}
     m = re.search(r"统一社会信用代码\s*[:：]?\s*([0-9A-Za-z]{15,18})", t)
-    fields["统一社会信用代码"] = m.group(1).upper() if m else None
+    code = m.group(1) if m else None
+    if not code:
+        # 兜底：标签被「营业执照」标题等隔断时，全文找 18 位统一社会信用代码
+        m2 = re.search(r"(?<![0-9A-Za-z])([0-9A-Z]{18})(?![0-9A-Za-z])", t)
+        code = m2.group(1) if m2 else None
+    fields["统一社会信用代码"] = code.upper() if code else None
     fields["名称"] = _grab(t, ["名称"], r"[^\n:：]{2,60}?")
-    fields["法定代表人"] = _grab(t, ["法定代表人"], r"[^\n:：]{2,15}?")
+    fields["法定代表人"] = _grab(t, ["法定代表人"], r"[^\n:：]{2,60}?")
     m = re.search(r"注册资本\s*[:：]?\s*([\d,.，]+)\s*万", t)
     fields["注册资本_万"] = _parse_capital(t)
 

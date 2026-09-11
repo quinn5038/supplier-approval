@@ -311,7 +311,9 @@ def redact_card(source: np.ndarray, quad: np.ndarray, ocr: CardOcr, card_index: 
 
 def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str, page: int) -> tuple[np.ndarray, PageResult]:
     cards = [full_image_card(source)] if layout == "single" else find_cards(source)
-    if not cards and layout == "stacked":
+    # 9/11：无清晰矩形边框的上下排身份证，find_cards 可能返回 0；
+    # auto 布局也应尝试上下二分兜底（此前仅 stacked 触发，导致「正反面均未识别」）
+    if not cards and layout != "single":
         cards = stacked_fallback(source)
     if not cards and 1.30 <= source.shape[1] / source.shape[0] <= 1.90:
         cards = [full_image_card(source)]
