@@ -543,6 +543,12 @@ FILEINFO_TYPE_MAP = {
     "检验检测机构资质认定证书": {"inspection_cert"},
     "资质认定证书": {"inspection_cert"},
     "CMA资质证书": {"inspection_cert"},
+    # 9/11：授权资质上传栏位（D1_06）——此前「经销代理资格证明图片」栏位未映射，
+    # 导致授权文件 types 为空、D1_06 误报「缺少经销授权」
+    "经销代理资格证明图片": {"authorization"},
+    "产品销售授权证明图片": {"authorization"},
+    "代理协议图片": {"authorization"},
+    "授权书图片": {"authorization"},
 }
 
 # 9/6：ISO 三体系「文件名编号 vs 上传位置」矛盾检测辅助
@@ -597,10 +603,11 @@ KEYWORD_MAP = [
     ("职业健康安全", {"iso45001"}),
     ("健康安全管理体系", {"iso45001"}),
     # 纳税信用等级
+    # 9/11：删除泛化关键词「信用评价」「信用等级」——它们会把「AAA级信用等级证书」
+    # 等第三方企业信用评级（公司荣誉文件）误判为「纳税信用等级」（A03 需为国税总局正规文件）。
+    # 正规纳税信用文件均含「纳税信用」字样，精确关键词已覆盖。
     ("纳税信用", {"tax_credit"}),
     ("纳税缴费信用", {"tax_credit"}),
-    ("信用评价", {"tax_credit"}),
-    ("信用等级", {"tax_credit"}),
     ("A级纳税人", {"tax_credit"}),
     ("B级纳税人", {"tax_credit"}),
     ("C级纳税人", {"tax_credit"}),
@@ -615,8 +622,9 @@ KEYWORD_MAP = [
     ("售后", {"after_sales_cert"}),
     ("五星", {"after_sales_cert"}),
     ("服务认证", {"after_sales_cert"}),
-    ("声明函", {"after_sales_cert"}),
-    ("说明函", {"after_sales_cert"}),
+    # 9/11：删除「声明函」「说明函」——过于宽泛，会把「无需生产许可证说明函」
+    # 「情况说明函」等非售后文件误判为售后服务证明（A07 误显示「已提交」）。
+    # 售后证明的规范文件名含「售后/五星/服务认证」，精确关键词已覆盖。
     # 授权/代理
     ("授权书", {"authorization"}),
     ("代理协议", {"authorization"}),
@@ -1221,6 +1229,13 @@ def determine_supplier_rules(supplier, cfg):
         else:
             type_rules = part2.get("domestic_trader", [])
             type_label = "境内贸易商"
+    elif "服务" in sup_type_name and not any(
+            k in sup_type_name for k in ("租赁", "生产", "制造", "贸易", "经销", "代理", "承运", "厂家")):
+        # 9/11：纯服务商（如「服务商」）不属于生产/贸易/经销/代理任一类，
+        # 只需核实 A 类基本材料，无需 D1 贸易商/厂家专属核验。
+        # 排除「租赁商/服务商」（租赁本质物资贸易，仍走贸易商）等混合类型。
+        type_rules = []
+        type_label = "服务商"
 
     all_rules = basic_rules
     # 9/5 改造：sup_type_name="其他"时按经营范围交叉验证推断类目

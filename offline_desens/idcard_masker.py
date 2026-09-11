@@ -230,31 +230,37 @@ def stacked_fallback(image: np.ndarray) -> list[np.ndarray]:
 def split_detected_long(source: np.ndarray, cards: list[np.ndarray]) -> list[np.ndarray]:
     """9/10 方案A：正反面拼图（左右/上下并排）检测不完整时，主动二分整图。
 
-    当 find_cards 只检出整图的一小部分（面积占比 < 50%），且整图是明显超出
-    单张身份证比例的长条时（横版宽/高 >= 2，或竖版高/宽 >= 2），说明是两张
-    身份证并排拼成的一张图、轮廓检测漏掉了另一张。此时按长宽比主动二分整图，
-    让正反面各自独立识别 + 独立打码，避免漏涂敏感区域。
+    当 find_cards 只检出 1 张卡，且该卡形状是明显超出单张身份证比例的长条时
+    （竖版高/宽 >= 1.3，或横版宽/高 >= 2.0），说明是两张身份证拼成的一张图、
+    轮廓检测漏掉了另一张。此时按长宽比主动二分整图，让正反面各自独立识别 + 打码。
     """
     if not cards:
         return cards
     if len(cards) >= 2:
         return cards  # 9/11：已检测到多张卡（正反面已分离），不干预——避免误把正确检测的上下排身份证再二分
     h, w = source.shape[:2]
-    total = sum(quad_area(q) for q in cards)
-    if total >= h * w * 0.5:
-        return cards  # 检测已覆盖大半，不干预
-    if w / h >= 2.0:  # 横版长条：左右并排
-        split = w // 2
-        return [
-            order_quad(np.array([[0, 0], [split - 1, 0], [split - 1, h - 1], [0, h - 1]], np.float32)),
-            order_quad(np.array([[split, 0], [w - 1, 0], [w - 1, h - 1], [split, h - 1]], np.float32)),
-        ]
-    if h / w >= 1.3:  # 9/11：上下排（h/w>=1.3 涵盖方图/接近方图）—— 湖北同方高科 h/w=1.41 上下两张卡粘连成 1 张竖版块
+    # 9/11：以「检测到的这张卡」的宽高比为准（而非整图），
+    # 覆盖 find_cards 把上下两张卡粘连成整图的情况（湛江安迪 1700x2338，h/w=1.37，
+    # 此前面积占比 100% 被 total>=50% 拦截，导致背面漏识别）。
+    q = cards[0]
+    xs = q[:, 0]; ys = q[:, 1]
+    qw = xs.max() - xs.min()
+    qh = ys.max() - ys.min()
+    if qw <= 0 or qh <= 0:
+        return cards
+    if qh / qw >= 1.3:  # 竖版长条卡 → 上下两张卡粘连，垂直二分
         split = h // 2
         return [
             order_quad(np.array([[0, 0], [w - 1, 0], [w - 1, split - 1], [0, split - 1]], np.float32)),
             order_quad(np.array([[0, split], [w - 1, split], [w - 1, h - 1], [0, h - 1]], np.float32)),
         ]
+    if qw / qh >= 2.0:  # 横版长条卡 → 左右两张卡并排，水平二分
+        split = w // 2
+        return [
+            order_quad(np.array([[0, 0], [split - 1, 0], [split - 1, h - 1], [0, h - 1]], np.float32)),
+            order_quad(np.array([[split, 0], [w - 1, 0], [w - 1, h - 1], [split, h - 1]], np.float32)),
+        ]
+    # 接近单张卡比例（横版 w/h≈1.58）→ 正常单卡，不干预
     return cards
 
 

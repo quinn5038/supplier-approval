@@ -88,7 +88,9 @@ FILENAME_KEYWORDS = [
     (("身份证",), {"legal_person_id"}),                  # 保留分类，OCR 禁用
     # 审计/审记（错别字）优先于纳税：供应商常把审计报告和纳税申报混在一起命名
     (("财务", "审计", "审记", "财报"), {"financial_report"}),  # 保留分类，OCR 禁用
-    (("纳税", "信用等级", "信用评价"), {"tax_credit"}),
+    # 9/11：删除「信用等级」「信用评价」关键词——它们会把「AAA级信用等级证书」等
+    # 第三方企业信用评级（公司荣誉）误判为「纳税信用等级」（A03 需为国税总局正规文件）。
+    (("纳税",), {"tax_credit"}),
     (("质量管理体系", "9001"), {"iso9001"}),
     (("环境", "14001"), {"iso14001"}),
     (("职业健康", "职业安全", "45001"), {"iso45001"}),
@@ -604,11 +606,20 @@ def build_idcard_from_paddle(cards, supplier=None):
             checks["在有效期内"] = True
             fields["有效期至"] = "长期"
         else:
-            # valid_until 格式：起始日-结束日（如 2007.02.24-2027.02.24），取结束日期（最后一个）
+            # valid_until 格式：起始日-结束日（如 2007.02.24-2027.02.24），取结束日期
+            # 9/11 容错：OCR 常丢失结束日的分隔符（如「2036.01.14」被识别成「203601.14」），
+            # 标准正则只匹配到起始日「2016.01.14」，把起始日误当结束日判过期。
+            # 加容错正则（YYYY + MM + 分隔符? + DD 连续，匹配「203601.14」），并取最大日期作结束日。
             dates = re.findall(r"(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", valid_until)
-            if dates:
-                y, mo, d = dates[-1]  # 结束日期（有效期至）
-                exp = date(int(y), int(mo), int(d))
+            dates += re.findall(r"(\d{4})(\d{2})[.\-/](\d{2})(?!\d)", valid_until)
+            candidates = []
+            for y, mo, d in dates:
+                try:
+                    candidates.append(date(int(y), int(mo), int(d)))
+                except ValueError:
+                    continue
+            if candidates:
+                exp = max(candidates)  # 结束日期（取最大，容错起始日<结束日）
                 checks["在有效期内"] = exp >= today
                 fields["有效期至"] = str(exp)
                 if not checks["在有效期内"]:
