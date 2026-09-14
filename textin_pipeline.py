@@ -28,19 +28,28 @@ TextIn xParse 材料解析管道（阶段3：材料内容核验）
     python textin_pipeline.py test                 # 离线自测（mock材料）
 """
 import json
+import logging
 import os
 import re
 import sys
 import time
-import logging
-from datetime import datetime, date
+from datetime import date, datetime
 from pathlib import Path
+
+import requests
+
+from material_policy import (
+    aggregate_materials,
+    digest,
+    file_types,
+    is_public_material,
+    load_cache,
+)
 
 # 9/5 修复：之前 run_parse 里用了 log.info 但模块没定义 log，导致 OCR 集成脱敏后崩溃
 log = logging.getLogger("textin-pipeline")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-import requests
 
 BASE = Path(__file__).parent
 FILES_DIR = BASE / "files_cache"
@@ -107,13 +116,19 @@ FILE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".pdf",
 # ============================================================
 # TextIn API 直连解析
 # ============================================================
-def parse_file_textin(path):
+def parse_file_textin(path, doc_type=None):
     """调 TextIn xParse 解析单个文件 → 返回 (markdown, detail)（失败抛异常）
 
     9/7 改造：markdown_details=1 以拿到字段坐标 detail（含 position + 纯文本 text）。
     - markdown：正文（身份证会返回 [DESENSITIZED] + HTML 注释敏感信息）
     - detail：结构化字段列表，text 是纯文本（无 HTML 注释包裹），供身份证提取姓名/有效期
     """
+    path = Path(path).resolve()
+    if not path.is_relative_to(FILES_DESENS_DIR.resolve()):
+        raise PermissionError("外部 OCR 只允许经检查的公开材料暂存目录")
+    types = file_types(path, load_cache(BASE))
+    if doc_type not in types or not is_public_material(path, types):
+        raise PermissionError("材料类型不在公开允许列表，禁止外发")
     if not TEXTIN_APP_ID or not TEXTIN_SECRET_CODE:
         raise RuntimeError("未配置 TEXTIN_APP_ID / TEXTIN_SECRET_CODE（.env），"
                            "无法直连TextIn解析")
@@ -132,8 +147,16 @@ def parse_file_textin(path):
         "get_image": "none",
         "markdown_details": 1,      # 9/7：拿 detail 坐标，身份证需要定位姓名/有效期
     }
+    # 审计先于网络请求落盘；失败时不发送。只存元数据，不存原文。
+    import hashlib
+
+    from state_store import record_event
+    record_event(BASE / "audit.sqlite3", "external_ocr", {
+        "types": sorted(types), "sha256": hashlib.sha256(data).hexdigest(),
+        "destination": TEXTIN_API, "desensitization": "public_allowlist",
+    })
     resp = requests.post(TEXTIN_API, headers=headers, params=params,
-                         data=data, timeout=120,
+                         data=data, timeout=120, allow_redirects=False,
                          proxies={"http": None, "https": None})  # 不走系统代理（防换网络后 ProxyError）
     resp.raise_for_status()
     result = resp.json()
@@ -694,86 +717,6 @@ def extract_financial_report(text):
     log.warning("[DEPRECATED] extract_financial_report 已废弃——按保密合规要求 "
                 "A08 财报改走企查查（公查信息），不发 AI 处理")
     return {"fields": {}, "checks": {}, "issues": [], "_deprecated": True}
-    fields, checks, issues = {}, {}, []
-
-    def find_item(label, alt=None):
-        """在文本中找 '项目 数字' 模式（取第一个匹配）"""
-        for lab in (label, alt or ""):
-            if not lab:
-                continue
-            m = re.search(re.escape(_norm(lab)) + r"[^\d\-（(]{0,12}([\d,\-（）()\.]+)",
-                          n)
-            if m:
-                v = _num(m.group(1))
-                if v is not None:
-                    return v
-        return None
-
-    # ① 优先取报表直接印出的比率
-    m = re.search(r"资产负债率[^\d%]{0,8}([\d.]+)\s*%?", n)
-    if m:
-        fields["资产负债率%"] = float(m.group(1).replace(",", ""))
-    m = re.search(r"流动比率[^\d%]{0,8}([\d.]+)\s*%?", n)
-    if m:
-        fields["流动比率%"] = float(m.group(1).replace(",", ""))
-
-    # ② 没有现成比率 → 用科目计算
-    if "资产负债率%" not in fields:
-        liab = find_item("负债合计", "负债总计")
-        asset = find_item("资产合计", "资产总计")
-        if liab is not None and asset and asset != 0:
-            fields["资产负债率%"] = round(liab / asset * 100, 2)
-            fields["资产负债率_计算依据"] = f"负债合计{liab:g}/资产合计{asset:g}"
-    if "流动比率%" not in fields:
-        ca = find_item("流动资产合计", "流动资产总计")
-        cl = find_item("流动负债合计", "流动负债总计")
-        if ca is not None and cl is not None and cl != 0:
-            fields["流动比率%"] = round(ca / cl * 100, 2)
-            fields["流动比率_计算依据"] = f"流动资产{ca:g}/流动负债{cl:g}"
-
-    # ③ 经营现金流
-    ocf = find_item("经营活动产生的现金流量净额", "经营活动现金流量净额")
-    if ocf is None:
-        m = re.search(r"经营活动[^\d\-（(]{0,20}净额[^\d\-（(]{0,10}([\d,\-（）()\.]+)", n)
-        ocf = _num(m.group(1)) if m else None
-    if ocf is not None:
-        fields["经营现金流净额"] = ocf
-
-    # 年度
-    m = re.search(r"(20\d{2})\s*年度", n)
-    if m:
-        fields["报告年度"] = m.group(1)
-    # 年度合规判定（161 号标准要求上年度财报）
-    # 当年审核 = 当前年份-1 即"上年度"；2026年审 → 应为 2025 年度财报
-    required_year = date.today().year - 1
-    if fields.get("报告年度"):
-        if fields["报告年度"] != str(required_year):
-            issues.append(f"上传为{fields['报告年度']}年度财报，"
-                          f"按161号标准应为{required_year}年度（上年度）财报")
-            checks[f"报告年度={required_year}"] = False
-        else:
-            checks[f"报告年度={required_year}"] = True
-
-    # 判定（阈值：资产负债率≤65%、流动比率≥100%、现金流>0，不符转人工）
-    if "资产负债率%" in fields:
-        checks["资产负债率≤65%"] = fields["资产负债率%"] <= 65.0
-        if not checks["资产负债率≤65%"]:
-            issues.append(f"资产负债率{fields['资产负债率%']}%，超过65%")
-    if "流动比率%" in fields:
-        checks["流动比率≥100%"] = fields["流动比率%"] >= 100.0
-        if not checks["流动比率≥100%"]:
-            issues.append(f"流动比率{fields['流动比率%']}%，低于100%")
-    if "经营现金流净额" in fields:
-        checks["经营现金流>0"] = fields["经营现金流净额"] > 0
-        if not checks["经营现金流>0"]:
-            issues.append(f"经营性现金流净额为{fields['经营现金流净额']:g}（应为正）")
-    if not checks:
-        if re.search(r"纳税申报表|纳税申报\s*A?\s*类", n):
-            issues.append("上传材料为《企业所得税年度纳税申报表》，非经审计财务报告——"
-                          "无法核算资产负债率/流动比率/现金流，需要求供应商补交经审计财报")
-        else:
-            issues.append("未能从财报中识别关键指标（需人工核验）")
-    return {"fields": fields, "checks": checks, "issues": issues}
 
 
 def extract_iso_cert(text, supplier, iso_code):
@@ -983,7 +926,7 @@ def download_supplier_files(todo_id=None, delay=25.0):
       → GET /apis/scpma/oss/downloadByUploadId?fileUrl=...&fileName=... （带 cookie）
     断点续下：已存在且大小一致的文件自动跳过，可直接重跑。
     """
-    from auto_approve import query_qualification_files, _scpma_headers
+    from auto_approve import _scpma_headers, query_qualification_files
 
     WAF_WAITS = [600, 900]          # 与主程序同款：被拦后等10/15分钟再试
 
@@ -1001,7 +944,7 @@ def download_supplier_files(todo_id=None, delay=25.0):
             fl = r.get("data", {}).get("supFilesBOList", []) or []
         except Exception as e:
             print(f"[中断] {tid} 拉文件列表失败: {e}（稍后重跑即可续传）")
-            return
+            raise RuntimeError("材料列表下载失败") from e
         dest = FILES_DIR / tid
         dest.mkdir(parents=True, exist_ok=True)
         print(f"[{tid}] {sup.get('name', '?')} 共 {len(fl)} 个附件")
@@ -1010,11 +953,8 @@ def download_supplier_files(todo_id=None, delay=25.0):
             if not fu or not fname:
                 continue
             uid = str(f.get("uploadId") or "")
-            out = dest / f"{uid}_{_safe_filename(fname)}"
+            out = dest / f"{_safe_filename(uid)}_{_safe_filename(fname)}"
             expect = int(float(f.get("fileSize") or 0))
-            if out.exists() and (not expect or out.stat().st_size == expect):
-                print(f"  [已有] {fname}")
-                continue
             for attempt in range(len(WAF_WAITS) + 1):
                 try:
                     resp = requests.get(
@@ -1028,7 +968,9 @@ def download_supplier_files(todo_id=None, delay=25.0):
                     resp = None
                 if resp is not None and resp.status_code == 200 \
                         and (not expect or len(resp.content) == expect):
-                    out.write_bytes(resp.content)
+                    partial = out.with_suffix(out.suffix + ".download")
+                    partial.write_bytes(resp.content)
+                    os.replace(partial, out)
                     print(f"  [下载] {fname} ({len(resp.content)} 字节)")
                     break
                 # 超时 / 非200 / 字节不符 → 疑似 WAF 限流，长冷却后重试
@@ -1038,68 +980,34 @@ def download_supplier_files(todo_id=None, delay=25.0):
                           f"（attempt {attempt + 1}/{len(WAF_WAITS)}）...")
                     time.sleep(wait)
                 else:
-                    print(f"  [放弃] {fname}: 多次重试失败，下次运行续传")
+                    raise RuntimeError("材料下载失败，停止处理并转人工")
             time.sleep(delay)          # 防 WAF：文件间留足间隔
     print("\n下载完成。下一步: python textin_pipeline.py parse")
 
 
 def scan_files():
-    """扫描 files_cache/<todoId>/ → [(todoId, path, doc_type, md_path)]
-    分类优先级：classify_file(文件名) → 失败则用缓存 materials_detail 兜底
-    （缓存分类基于附件说明，比纯文件名准——"李作发.jpg"这种人名命名的身份证
-      会被文件名分类漏掉，但缓存里有正确 legal_person_id 标记）
-
-    2026-09-04 保密合规改造：优先读 files_cache_desens/（脱敏后目录），
-    没有再 fallback 到 files_cache/（原始文件，仅用于 OCR 不能识别时人工补救）。
-    """
-    import re
+    """只根据当前原始文件生成任务；历史暂存文件不会被重新处理。"""
     tasks = []
-    # 优先用脱敏目录，没有再 fallback 到原始目录（保留兜底通道）
-    scan_dir = FILES_DESENS_DIR if FILES_DESENS_DIR.exists() else FILES_DIR
-    if not scan_dir.exists():
+    cache = load_cache(BASE)
+    if not FILES_DIR.exists():
         return tasks
-    cache = json.loads((BASE / "cache_v4.json").read_text(encoding="utf-8")) \
-        if (BASE / "cache_v4.json").exists() else {}
-    for todo_dir in sorted(scan_dir.iterdir()):
-        if not todo_dir.is_dir():
+    for todo_dir in sorted(FILES_DIR.iterdir()):
+        if not todo_dir.is_dir() or todo_dir.is_symlink():
             continue
-        todo_id = todo_dir.name
-        # 该供应商缓存里的文件分类（fileName → types 列表）
-        # 同一 fileName 可能在 materials_detail 出现多次（对应不同材料类型），
-        # 用 setdefault+extend 累积所有 types，避免后一条覆盖前一条导致漏分类
-        cache_types = {}
-        for d in cache.get(todo_id, {}).get("materials_detail", []):
-            fn = d.get("fileName", "")
-            types = d.get("types", [])
-            if fn and types:
-                cache_types.setdefault(fn, []).extend(types)
-        for f in sorted(todo_dir.iterdir()):
-            if f.suffix.lower() not in FILE_EXTS:
+        for source in sorted(todo_dir.iterdir()):
+            if not source.is_file() or source.is_symlink() or source.suffix.lower() not in FILE_EXTS:
                 continue
-            # 去 uploadId_ 前缀，匹配缓存 types（materials_detail 的权威分类）
-            m = re.match(r"^\d+_(.+)$", f.name)
-            bare = m.group(1) if m else f.name
-            cached_types = cache_types.get(bare) or cache_types.get(f.name) or []
-            if isinstance(cached_types, str):
-                cached_types = [cached_types]
-            cached_types = [t for t in cached_types if t]
-            if cached_types:
-                # 9/9 修复：缓存 types 优先（系统权威分类），且一个文件可能对应多个材料类型
-                # （如「财务报表&纳税信用等级&售后服务.pdf」types=[after_sales_cert, tax_credit]），
-                # 为每个类型各生成一个 task——同一文件 OCR 一次（.md 缓存复用）、按类型分别抽取。
-                # 此前只按文件名分类成单一 doc_type，导致合并文件里的 tax_credit/after_sales
-                # 漏核验（A03/A07「无核验数据」）。
-                for dt in cached_types:
-                    tasks.append((todo_id, f, dt))
+            types = file_types(source, cache)
+            if not types:
                 continue
-            # 缓存无分类 → 文件名兜底
-            doc_type = classify_file(f.name)
-            if doc_type:
-                tasks.append((todo_id, f, doc_type))
+            for doc_type in sorted(types):
+                # 身份证和被阻止材料也保留本地人工核验结果，但绝不调用外部 OCR。
+                staged = FILES_DESENS_DIR / todo_dir.name / source.name
+                tasks.append((todo_dir.name, staged, doc_type))
     return tasks
 
 
-def run_parse(only_todo=None):
+def run_parse(only_todo=None, *, offline=False):
     """解析 files_cache 下所有文件 → textin_results.json
 
     2026-09-04 保密合规改造：先调用 desensitize 助手脱敏到 files_cache_desens/，
@@ -1116,29 +1024,32 @@ def run_parse(only_todo=None):
             from desensitize import desensitize_dir, desensitize_id_cards_with_paddle
             desensitize_dir(desens_src, desens_dst)
             log.info(f"已脱敏到 {desens_dst}，OCR 将读取脱敏后的文件")
-            # 2026-09-09：PaddleOCR 精确打码身份证，覆盖粗比例结果（失败自动保留粗比例兜底）
+            # 2026-09-09：PaddleOCR 本地打码身份证；失败转人工，不提供原件预览
             idcard_fields = desensitize_id_cards_with_paddle(desens_src, desens_dst)
         except ImportError:
-            log.warning("desensitize 模块未找到，跳过脱敏（不推荐——敏感信息可能泄露）")
+            raise RuntimeError("脱敏模块缺失，停止处理并转人工")
         except Exception as e:
-            log.warning(f"脱敏失败：{e}，继续扫描原始目录（不推荐）")
+            raise RuntimeError("脱敏失败，停止处理并转人工") from e
 
     cache = json.loads((BASE / "cache_v4.json").read_text(encoding="utf-8")) \
         if (BASE / "cache_v4.json").exists() else {}
     tasks = [t for t in scan_files()
              if not only_todo or t[0] == only_todo]
-    if not tasks:
-        print(f"files_cache/ 下没有待解析文件"
-              f"{'（指定 ' + only_todo + '）' if only_todo else ''}。")
-        print("请先把供应商资质文件放入 files_cache/<todoId>/ 目录。")
-        return
-
     results = {}
     if RESULTS_FILE.exists():
         try:
             results = json.loads(RESULTS_FILE.read_text(encoding="utf-8"))
         except Exception:
             results = {}
+
+    for tid in ([only_todo] if only_todo else list(cache)):
+        results[tid] = {}
+    collected = {}
+
+    def store_result(tid, kind, result):
+        documents = collected.setdefault((tid, kind), [])
+        documents.append(result)
+        results.setdefault(tid, {})[kind] = aggregate_materials(documents)
 
     # 企查查结果：有企业全名（缓存里常只有简称，名称/持有人比对需要全名）
     qcc = json.loads((BASE / "qcc_results.json").read_text(encoding="utf-8")) \
@@ -1177,8 +1088,10 @@ def run_parse(only_todo=None):
             if paddle_info and paddle_info.get("cards"):
                 r = build_idcard_from_paddle(paddle_info["cards"], supplier)
                 r["file"] = fpath.name
+                if fpath.is_file():
+                    r["masked_sha256"] = digest(fpath)
                 r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
-                results.setdefault(todo_id, {})[doc_type] = r
+                store_result(todo_id, doc_type, r)
                 n_ok += 1
                 nm = r.get("fields", {}).get("姓名") or ""
                 vu = r.get("fields", {}).get("有效期至") or ""
@@ -1194,22 +1107,34 @@ def run_parse(only_todo=None):
             }
             r["file"] = fpath.name
             r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
-            results.setdefault(todo_id, {})[doc_type] = r
+            store_result(todo_id, doc_type, r)
             n_ok += 1
             print(f"  [PaddleOCR] legal_person_id 失败转人工：{reason}")
+            continue
+
+        types = file_types(fpath, cache)
+        if not is_public_material(fpath, types) or not fpath.is_file():
+            store_result(todo_id, doc_type, {
+                "file": fpath.name, "checks": {"允许外部OCR": None},
+                "issues": ["材料未通过公开类型检查，禁止外发，转人工核验"],
+            })
             continue
 
         # 同目录已有缓存的 .md 就直接用（extract 模式 / 重跑不烧额度）
         md_path = fpath.with_suffix(fpath.suffix + ".md")
         detail_path = fpath.with_suffix(fpath.suffix + ".detail.json")
-        if md_path.exists():
+        hash_path = fpath.with_suffix(fpath.suffix + ".sha256")
+        if md_path.exists() and hash_path.exists() and hash_path.read_text() == digest(fpath):
             md = md_path.read_text(encoding="utf-8")
             detail = json.loads(detail_path.read_text(encoding="utf-8")) \
                 if detail_path.exists() else None
         else:
+            if offline:
+                store_result(todo_id, doc_type, {"file": fpath.name, "issues": ["离线缓存缺失或已过期，转人工核验"]})
+                continue
             try:
                 print(f"[解析] {todo_id}/{fpath.name} ({doc_type}) ...")
-                md, detail = parse_file_textin(fpath)
+                md, detail = parse_file_textin(fpath, doc_type)
                 # 9/7：缓存 markdown——身份证过滤注释（敏感信息不落盘），
                 # 其他类型（营业执照等证照内容也在注释里）原样保留
                 if doc_type == "legal_person_id":
@@ -1221,25 +1146,24 @@ def run_parse(only_todo=None):
                     detail_path.write_text(
                         json.dumps(_sanitize_detail(doc_type, detail),
                                    ensure_ascii=False), encoding="utf-8")
+                hash_path.write_text(digest(fpath))
                 time.sleep(1)
             except Exception as e:
                 print(f"  [失败] {fpath.name}: {e}")
-                results.setdefault(todo_id, {})[doc_type] = {
-                    "file": fpath.name, "error": str(e)}
+                store_result(todo_id, doc_type, {"file": fpath.name, "error": type(e).__name__, "issues": ["OCR 失败，转人工核验"]})
                 n_fail += 1
                 continue
         try:
             r = extract(doc_type, md, supplier, detail)
             r["file"] = fpath.name
             r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
-            results.setdefault(todo_id, {})[doc_type] = r
+            store_result(todo_id, doc_type, r)
             n_ok += 1
-            status = "✓" if not r.get("issues") else "⚠ " + "；".join(r["issues"][:2])
+            status = "PASS" if not r.get("issues") else "WARN " + "；".join(r["issues"][:2])
             print(f"  [抽取] {doc_type}: {status}")
         except Exception as e:
             print(f"  [抽取失败] {fpath.name}: {e}")
-            results.setdefault(todo_id, {})[doc_type] = {
-                "file": fpath.name, "error": str(e)}
+            store_result(todo_id, doc_type, {"file": fpath.name, "error": type(e).__name__, "issues": ["抽取失败，转人工核验"]})
             n_fail += 1
 
     # 避免 OCR 子进程被中断时破坏已有结果文件。
@@ -1260,6 +1184,8 @@ def clean_files_cache(days=7, do_delete=False):
     if not FILES_DIR.exists():
         print("files_cache/ 还不存在，无内容可清。")
         return
+    if days < 0:
+        raise ValueError("days 必须非负")
     import time
     threshold = time.time() - days * 86400
     targets = []
@@ -1287,7 +1213,7 @@ def clean_files_cache(days=7, do_delete=False):
               f"缓存.md{len(cached)}个")
     print(f"\n合计原始文件 {total_raw_size:.1f}MB（清理后释放，.md 缓存保留）")
     if not do_delete:
-        print(f"\n→ 预演模式（未删）。确认要清理时执行：")
+        print("\n→ 预演模式（未删）。确认要清理时执行：")
         print(f"   python textin_pipeline.py clean --go --days {days}")
         return
     # 二次确认：列出每个待办 → 删除
@@ -1295,9 +1221,12 @@ def clean_files_cache(days=7, do_delete=False):
     deleted_files = deleted_bytes = 0
     for name, age, size, raw, cached in targets:
         for f in raw:
+            size_bytes = f.stat().st_size
+            if not f.resolve().is_relative_to(FILES_DIR.resolve()):
+                raise ValueError("清理路径越界")
             f.unlink()
             deleted_files += 1
-            deleted_bytes += f.stat().st_size
+            deleted_bytes += size_bytes
         print(f"  {name}: 删 {len(raw)} 个原始文件，保留 {len(cached)} 个 .md 缓存")
     print(f"\n清理完成：删除 {deleted_files} 个原始文件，"
           f"释放 {deleted_bytes/1024/1024:.1f}MB。")
@@ -1324,7 +1253,7 @@ def run_test():
     assert lic["checks"].get("信用代码一致") and lic["checks"].get("法人一致") \
         and lic["checks"].get("注册资本一致"), lic
     ok += 1
-    print("  [✓] 营业执照·信息一致")
+    print("  [PASS] 营业执照·信息一致")
 
     # 1b. 营业执照（TextIn 真实输出形态：md表格+加粗）
     lic_t = extract("business_license",
@@ -1334,7 +1263,7 @@ def run_test():
     assert lic_t["checks"].get("信用代码一致") and lic_t["checks"].get("法人一致") \
         and lic_t["checks"].get("注册资本一致") and lic_t["checks"].get("名称一致"), lic_t
     ok += 1
-    print("  [✓] 营业执照·md表格+加粗排版")
+    print("  [PASS] 营业执照·md表格+加粗排版")
 
     # 2. 营业执照（法人不一致）
     lic2 = extract("business_license",
@@ -1342,7 +1271,7 @@ def run_test():
                    "法定代表人: 李四\n注册资本: 800万元", supplier)
     assert lic2["issues"] and "法人" in lic2["issues"][0], lic2
     ok += 1
-    print("  [✓] 营业执照·法人不一致检出")
+    print("  [PASS] 营业执照·法人不一致检出")
 
     # 2b. 营业执照·经营范围一致（9/2 新增要点）
     lic3 = extract("business_license",
@@ -1352,7 +1281,7 @@ def run_test():
                    supplier)
     assert lic3["checks"].get("经营范围一致") is True, lic3
     ok += 1
-    print("  [✓] 营业执照·经营范围一致")
+    print("  [PASS] 营业执照·经营范围一致")
 
     # 2c. 营业执照·经营范围不一致检出
     lic4 = extract("business_license",
@@ -1363,7 +1292,7 @@ def run_test():
     assert not lic4["checks"].get("经营范围一致", False) \
         and any("经营范围" in i for i in lic4["issues"]), lic4
     ok += 1
-    print("  [✓] 营业执照·经营范围不一致检出")
+    print("  [PASS] 营业执照·经营范围不一致检出")
 
     # 2d. 营业执照·概括式经营范围（新版执照）→ 转人工
     lic5 = extract("business_license",
@@ -1375,7 +1304,7 @@ def run_test():
     assert lic5["checks"].get("经营范围一致") is None \
         and any("概括式" in i for i in lic5["issues"]), lic5
     ok += 1
-    print("  [✓] 营业执照·概括式经营范围转人工")
+    print("  [PASS] 营业执照·概括式经营范围转人工")
 
     # 2e. 售后承诺书·落款3个月内通过（9/2 确认规则）
     from datetime import timedelta
@@ -1386,7 +1315,7 @@ def run_test():
                     f"单位名称（盖章）：测试科技有限公司\n日期：{recent}")
     assert stmt1["checks"].get("落款时间在3个月内") is True, stmt1
     ok += 1
-    print("  [✓] 售后承诺书·落款3个月内通过")
+    print("  [PASS] 售后承诺书·落款3个月内通过")
 
     # 2f. 售后承诺书·落款超3个月检出
     stmt2 = extract("after_sales_statement",
@@ -1395,7 +1324,7 @@ def run_test():
     assert stmt2["checks"].get("落款时间在3个月内") is False \
         and any("超过3个月" in i for i in stmt2["issues"]), stmt2
     ok += 1
-    print("  [✓] 售后承诺书·落款超3个月检出")
+    print("  [PASS] 售后承诺书·落款超3个月检出")
 
     # 3. 身份证（姓名一致+有效期）
     idc = extract("legal_person_id",
@@ -1403,7 +1332,7 @@ def run_test():
                   "有效期限 2015.01.01 - 2035.01.01", supplier)
     assert idc["checks"].get("姓名与法人一致") and idc["checks"].get("在有效期内"), idc
     ok += 1
-    print("  [✓] 身份证·姓名一致且在有效期")
+    print("  [PASS] 身份证·姓名一致且在有效期")
 
     # 4. 身份证（过期）
     idc2 = extract("legal_person_id",
@@ -1411,7 +1340,7 @@ def run_test():
                    "有效期限 2010.01.01 - 2020.01.01", supplier)
     assert not idc2["checks"].get("在有效期内"), idc2
     ok += 1
-    print("  [✓] 身份证·过期检出")
+    print("  [PASS] 身份证·过期检出")
 
     # 5. 纳税等级A
     tax = extract("tax_credit",
@@ -1419,34 +1348,17 @@ def run_test():
                   "年度: 2025\n纳税信用级别: A")
     assert tax["checks"].get("C级及以上") and tax["fields"]["纳税信用级别"] == "A", tax
     ok += 1
-    print("  [✓] 纳税等级·A级通过")
+    print("  [PASS] 纳税等级·A级通过")
 
     # 6. 纳税等级D
     tax2 = extract("tax_credit", "纳税信用级别: D\n2025年度")
     assert not tax2["checks"].get("C级及以上") and tax2["issues"], tax2
     ok += 1
-    print("  [✓] 纳税等级·D级检出")
+    print("  [PASS] 纳税等级·D级检出")
 
-    # 7. 财报（三项全达标，比率直接印出）
-    fin = extract("financial_report",
-                  "2025年度审计报告\n流动比率 120%\n资产负债率 55%\n"
-                  "经营活动产生的现金流量净额 350.20 万元")
-    assert fin["checks"].get("资产负债率≤65%") and fin["checks"].get("流动比率≥100%") \
-        and fin["checks"].get("经营现金流>0"), fin
+    # 财报提取已禁用；传输层禁止外发的断言见 tests。
+    assert not extract("financial_report", "2025年度审计报告").get("checks")
     ok += 1
-    print("  [✓] 财报·三项达标")
-
-    # 8. 财报（科目计算：负债/资产=1300/2000=65%边界，流动比率90%，现金流负）
-    fin2 = extract("financial_report",
-                   "2025年度\n资产负债表\n资产合计 2,000\n负债合计 1,300\n"
-                   "流动资产合计 900\n流动负债合计 1,000\n"
-                   "现金流量表\n经营活动产生的现金流量净额 -50.5")
-    assert fin2["checks"].get("资产负债率≤65%"), fin2   # 65%整→True边界（≤含等号）
-    assert fin2["fields"]["资产负债率%"] == 65.0, fin2
-    assert not fin2["checks"].get("流动比率≥100%"), fin2
-    assert not fin2["checks"].get("经营现金流>0"), fin2
-    ok += 1
-    print("  [✓] 财报·科目计算+边界值(65%)+两项不符检出")
 
     # 9. ISO证书（持有人一致+效期）
     iso = extract("iso9001",
@@ -1456,14 +1368,14 @@ def run_test():
     assert iso["checks"].get("持有人一致") and iso["checks"].get("在有效期内") \
         and iso["checks"].get("证书状态有效"), iso
     ok += 1
-    print("  [✓] ISO9001·持有人一致且有效")
+    print("  [PASS] ISO9001·持有人一致且有效")
 
     # 10. ISO证书（过期+持有人不一致）
     iso2 = extract("iso14001",
                    "获证组织: 别的公司\n有效期至: 2020-01-01", supplier)
     assert not iso2["checks"].get("持有人一致") and not iso2["checks"].get("在有效期内"), iso2
     ok += 1
-    print("  [✓] ISO14001·过期+持有人不一致检出")
+    print("  [PASS] ISO14001·过期+持有人不一致检出")
 
     # 10b. ISO证书·再认证（上周期有效期至 + 证书有效日期范围）→ 取当前周期结束日
     iso3 = extract("iso9001",
@@ -1479,7 +1391,7 @@ def run_test():
     assert iso3["checks"].get("在有效期内") is True, iso3
     assert iso3["fields"]["有效期至"] == "2028-03-17", iso3
     ok += 1
-    print("  [✓] ISO9001·再认证取当前周期(排除上周期)")
+    print("  [PASS] ISO9001·再认证取当前周期(排除上周期)")
 
     # 10c. ISO证书·单日期"证书有效日期"（无范围）
     iso4 = extract("iso14001",
@@ -1491,7 +1403,7 @@ def run_test():
     assert iso4["checks"].get("在有效期内") is True, iso4
     assert iso4["fields"]["有效期至"] == "2029-03-24", iso4
     ok += 1
-    print("  [✓] ISO14001·单日期证书有效日期")
+    print("  [PASS] ISO14001·单日期证书有效日期")
 
     # 11. 授权书
     auth = extract("authorization",
@@ -1499,7 +1411,7 @@ def run_test():
                    "授权期限: 2026-01-01 至 2028-12-31", supplier)
     assert auth["checks"].get("被授权方为本公司") and auth["checks"].get("在有效期内"), auth
     ok += 1
-    print("  [✓] 授权书·被授权方一致且有效")
+    print("  [PASS] 授权书·被授权方一致且有效")
 
     # 12. 生产许可证·竖排拆散有效期标签（"**有** **效** **期：**"）→ 识别范围取结束日
     perm = extract("production_license",
@@ -1509,7 +1421,7 @@ def run_test():
     assert perm["checks"].get("在有效期内") is True, perm
     assert perm["fields"]["有效期至"] == "2027-09-26", perm
     ok += 1
-    print("  [✓] 生产许可证·竖排拆散有效期标签")
+    print("  [PASS] 生产许可证·竖排拆散有效期标签")
 
     print(f"\n== 全部 {ok} 项测试通过 ==")
 
@@ -1530,7 +1442,7 @@ if __name__ == "__main__":
     elif cmd == "parse":
         run_parse(sys.argv[2] if len(sys.argv) > 2 else None)
     elif cmd == "extract":
-        run_parse(sys.argv[2] if len(sys.argv) > 2 else None)  # 有.md缓存时不调API
+        run_parse(sys.argv[2] if len(sys.argv) > 2 else None, offline=True)
     elif cmd == "clean":
         # 用 argparse 风格：--go 确认 / --days N 自定义天数（默认 7）
         do_delete = "--go" in sys.argv
@@ -1538,8 +1450,7 @@ if __name__ == "__main__":
         if "--days" in sys.argv:
             i = sys.argv.index("--days")
             if i + 1 < len(sys.argv):
-                try: days = int(sys.argv[i + 1])
-                except: pass
+                days = int(sys.argv[i + 1])
         clean_files_cache(days=days, do_delete=do_delete)
     else:
         print(__doc__)

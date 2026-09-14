@@ -9,12 +9,14 @@
 # 财报按保密合规要求不通过 OCR 解析，改走企查查/人工核验。
 
 # Web 服务
-fastapi>=0.110
-uvicorn[standard]>=0.27
-jinja2>=3.1
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+jinja2>=3.1.6,<4
+requests>=2.32.4,<3
+python-multipart>=0.0.20,<1
 
 # 数据/配置
-PyYAML>=6.0
+PyYAML>=6.0.2,<7
 
 # 标准库自带但列出来方便对照：
 # - json, re, logging, pathlib, urllib, hashlib, threading, subprocess, datetime

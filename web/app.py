@@ -4,34 +4,36 @@ FastAPI 主入口，复用 auto_approve.py / textin_pipeline.py / gen_opinion.py
 
 启动：
     cd web
-    uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn app:app --host 127.0.0.1 --port 8000 --reload
 浏览器打开 http://<本机IP>:8000
 """
 
-import os
-import sys
 import json
-import subprocess
-import threading
-import time
-import shutil
 import logging
-from pathlib import Path
-from datetime import datetime
+import os
+import subprocess
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
 
 # 9/6 修复：/api/todos 重试路径用了 log.warning 但模块没定义 log（NameError）
-log = logging.getLogger("webui")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # 把父目录加入 sys.path，便于 import auto_approve 等模块
-BASE_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BASE_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+from state_store import get_state, put_state
+from web.security import install_security
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+log = logging.getLogger("webui")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # ============================================================
 # 配置
@@ -40,11 +42,15 @@ WEB_DIR = Path(__file__).resolve().parent
 PYTHON_EXE = sys.executable
 
 app = FastAPI(title="招采平台供应商智能辅助审批", version="1.0")
+
+install_security(app)
+
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 # 审批任务进度追踪：todo_id → {status, step, error, started_at}
-_task_status: dict = {}
+STATE_DB = BASE_DIR / "web_state.sqlite3"
+_task_status: dict = get_state(STATE_DB, "tasks")
 _task_lock = threading.Lock()
 # 底层流水线使用同一组 JSON 缓存文件；串行执行可避免多个子进程互相覆盖。
 _pipeline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="supplier-pipeline")
@@ -59,6 +65,7 @@ def _reset_stale_running():
                 st["status"] = "error"
                 st["error"] = "上次处理被中断（服务重启），请重新点击后台审批"
                 st["step"] = "stale_running_reset"
+                put_state(STATE_DB, "tasks", tid, st)
         log.info(f"[_reset_stale_running] 重置 {len(_task_status)} 条状态")
 
 _reset_stale_running()
@@ -70,31 +77,6 @@ _reset_stale_running()
 def _env_file_path():
     return BASE_DIR / ".env"
 
-
-def _backup_env_and_write(new_cookie: str, new_auth: str = ""):
-    """更新 .env 中的 SCPMA_COOKIE（和可选的 SCPMA_AUTH_TOKEN）"""
-    env_path = _env_file_path()
-    if not env_path.exists():
-        return False, ".env 文件不存在"
-
-    # 按用户备份规则：覆盖前备份 _R1 _R2 ...
-    i = 1
-    while (BASE_DIR / f".env_R{i}").exists():
-        i += 1
-    shutil.copy2(env_path, BASE_DIR / f".env_R{i}")
-
-    lines = env_path.read_text(encoding="utf-8").splitlines()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("SCPMA_COOKIE="):
-            new_lines.append(f"SCPMA_COOKIE={new_cookie}")
-        elif new_auth and stripped.startswith("SCPMA_AUTH_TOKEN="):
-            new_lines.append(f"SCPMA_AUTH_TOKEN={new_auth}")
-        else:
-            new_lines.append(line)
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    return True, f"已更新 .env（备份 .env_R{i}）"
 
 
 def _run_pipeline_for_one(todo_id: str):
@@ -112,11 +94,14 @@ def _run_pipeline_for_one(todo_id: str):
                 "started_at": prev.get("started_at", datetime.now().isoformat()),
                 "updated_at": datetime.now().isoformat(),
             }
+            put_state(STATE_DB, "tasks", todo_id, _task_status[todo_id])
 
     try:
         _update("正在拉取供应商数据（下载材料入缓存）...", progress=20)
         env = os.environ.copy()
         env["FETCH_ONLY"] = "true"
+        env["DRY_RUN"] = "true"
+        env["ENABLE_LIVE_APPROVAL"] = "false"
         env["FETCH_IDS"] = str(todo_id)
         env["PYTHONIOENCODING"] = "utf-8"
         r1 = subprocess.run(
@@ -141,19 +126,8 @@ def _run_pipeline_for_one(todo_id: str):
             files_dir = BASE_DIR / "files_cache" / str(todo_id)
             files_dir.mkdir(parents=True, exist_ok=True)
             _tp.download_supplier_files(str(todo_id), delay=2.0)
-        except Exception as e:
-            print(f"[download] 文件下载失败（不阻塞流程，OCR可能空）：{e}")
-
-        # 2026-09-04 保密合规改造：下载完成后自动脱敏（与 textin_pipeline.py 集成一致）
-        _update("正在本地脱敏身份证（PaddleOCR 精确打码）...", progress=50)
-        try:
-            from desensitize import desensitize_dir
-            desensitize_dir(BASE_DIR / "files_cache" / str(todo_id),
-                            BASE_DIR / "files_cache_desens" / str(todo_id))
-        except ImportError:
-            pass  # 脱敏模块未装时跳过（不阻塞）
-        except Exception as e:
-            print(f"[desens] 脱敏失败（不阻塞流程）：{e}")
+        except Exception:
+            raise RuntimeError("材料下载失败，停止处理并转人工核验") from None
 
         _update("正在 OCR 识别证件文件（TextIn）...", progress=70)
         # 9/6 修复：必须传 parse <todo_id> 单家过滤——不带参数会 OCR 全部
@@ -215,6 +189,9 @@ def _has_valid_result(todo_id: str) -> bool:
     9/6：skip（境外/集团独有分流不适用）也视为有结果——首页显示「查看结果」，
     报告页综合核验表处写出「不适用」及具体原因，与业务需求一致。
     """
+    with _task_lock:
+        if _task_status.get(str(todo_id), {}).get("status") in ("running", "error"):
+            return False
     stage2_path = BASE_DIR / "stage2_results.json"
     if not stage2_path.exists():
         return False
@@ -227,6 +204,9 @@ def _has_valid_result(todo_id: str) -> bool:
 
 def _load_stage2_for_todo(todo_id: str):
     """加载某家供应商的 stage2 + textin + cache 数据"""
+    if os.getenv("DEMO_MODE", "false").lower() == "true":
+        from demo import cases
+        return cases().get(str(todo_id), {}), {}, {}
     stage2_path = BASE_DIR / "stage2_results.json"
     textin_path = BASE_DIR / "textin_results.json"
     cache_path = BASE_DIR / "cache_v4.json"
@@ -254,12 +234,20 @@ async def index(request: Request):
 
 
 @app.get("/api/todos")
-async def api_todos():
+def api_todos():
     """AJAX：拉取待办列表（2026-09-05 加重试防偶发 ConnectionResetError）"""
+    if os.getenv("DEMO_MODE", "false").lower() == "true":
+        from demo import cases
+        items = [{"todoId": tid, "name": row["name"], "billName": "离线演示",
+                  "billType": "P0702", "applyTime": "", "applyTimeShort": "合成样例",
+                  "hasResult": True, "decision": row["decision"]} for tid, row in cases().items()]
+        return {"total": len(items), "count": len(items), "items": items}
     try:
         import auto_approve
     except Exception as e:
         return JSONResponse({"error": "module_load_failed", "msg": f"auto_approve 模块加载失败：{e}"}, status_code=500)
+    if not auto_approve._scpma_cookie() or not auto_approve._scpma_auth():
+        return JSONResponse({"error": "cookie_expired", "msg": "请先粘贴 Authorization 和 Cookie"}, 401)
     # 单次尝试 + 失败重试（Connection 类错误自动 5 秒后重试一次）
     for attempt in (1, 2):
         try:
@@ -284,6 +272,7 @@ async def api_todos():
                     "applyTime": raw_time,
                     "applyTimeShort": apply_time_short,
                     "hasResult": _has_valid_result(todo_id),
+                    "decision": _load_stage2_for_todo(todo_id)[0].get("decision", ""),
                 })
             return {"total": total, "count": len(items), "items": items}
         except auto_approve.SessionExpiredError as e:
@@ -324,6 +313,8 @@ async def approve(request: Request, todo_id: str):
 @app.post("/api/approve/{todo_id}")
 async def api_start_approve(todo_id: str):
     """触发审批流水线（后台线程）"""
+    if os.getenv("DEMO_MODE", "false").lower() == "true":
+        return {"msg": "离线演示样例已就绪", "todo_id": todo_id}
     with _task_lock:
         existing = _task_status.get(todo_id, {})
         if existing.get("status") == "running":
@@ -335,6 +326,8 @@ async def api_start_approve(todo_id: str):
             "error": None, "progress": 0, "started_at": now, "updated_at": now,
         }
 
+    put_state(STATE_DB, "tasks", todo_id, _task_status[todo_id])
+
     # 单 worker 保证 cache_v4/textin_results/stage2_results 不发生并发写覆盖。
     _pipeline_executor.submit(_run_pipeline_for_one, todo_id)
     return {"msg": "已开始处理", "todo_id": todo_id}
@@ -343,6 +336,10 @@ async def api_start_approve(todo_id: str):
 @app.get("/api/status/{todo_id}")
 async def api_status(todo_id: str):
     """查询审批进度"""
+    if os.getenv("DEMO_MODE", "false").lower() == "true":
+        from demo import cases
+        if todo_id in cases():
+            return {"status": "done", "step": "离线合成演示完成", "progress": 100}
     with _task_lock:
         st = _task_status.get(todo_id, {"status": "idle", "step": "未开始"})
     return st
@@ -361,13 +358,16 @@ async def api_status_all():
 @app.get("/api/report/{todo_id}")
 async def api_report(todo_id: str):
     """返回审查报告 HTML 片段 + 审批意见纯文本"""
+    with _task_lock:
+        if _task_status.get(todo_id, {}).get("status") in ("running", "error"):
+            return JSONResponse({"error": "stale_result", "msg": "本次处理尚未成功，历史报告不可作为当前审批依据。"}, 409)
     s2, textin, cache = _load_stage2_for_todo(todo_id)
     if not s2:
         return JSONResponse({"error": "no_data", "msg": "该供应商暂无审批结果，请先点击审批按钮"}, status_code=404)
 
     try:
-        import gen_stage2_report
         import gen_opinion
+        import gen_stage2_report
         report_html = gen_stage2_report.render_supplier(str(todo_id), s2, textin, cache)
         opinion_text = gen_opinion.build_opinion(str(todo_id), s2, textin, cache)
         return {
@@ -411,36 +411,40 @@ async def api_desens_image(todo_id: str):
             id_file = None
         if id_file:
             target = desens_dir / id_file
-            if target.exists() and target.is_file():
+            record = textin.get(str(todo_id), {}).get("legal_person_id", {})
+            if (target.resolve().is_relative_to(desens_dir.resolve())
+                    and target.exists() and target.is_file()
+                    and record.get("masked_sha256")
+                    and __import__("hashlib").sha256(target.read_bytes()).hexdigest() == record["masked_sha256"]):
                 return _serve(target)
 
-    # 兜底：文件名关键词匹配（身份证/证件/id_card/id_）
-    id_keywords = ("身份证", "证件", "id_card", "id_")
-    for f in sorted(desens_dir.iterdir()):
-        if not f.is_file():
-            continue
-        name_lower = f.name.lower()
-        # 身份证可能是 PDF（脱敏后回写保持原扩展名，内容实为 PNG）
-        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".pdf") \
-                and any(k in name_lower for k in id_keywords):
-            return _serve(f)
     return JSONResponse({"error": "not_found", "msg": "未找到脱敏身份证图片"}, status_code=404)
 
 
 @app.post("/api/cookie")
-async def api_update_cookie(cookie: str = Form(...), auth_token: str = Form("")):
-    """更新 .env 中的 Cookie"""
-    cookie = cookie.strip()
-    if not cookie:
-        return JSONResponse({"error": "cookie 为空"}, status_code=400)
-    ok, msg = _backup_env_and_write(cookie, auth_token.strip())
-    if not ok:
-        return JSONResponse({"error": msg}, status_code=500)
-    # 重新加载环境变量到当前进程
-    os.environ["SCPMA_COOKIE"] = cookie
-    if auth_token.strip():
-        os.environ["SCPMA_AUTH_TOKEN"] = auth_token.strip()
-    return {"msg": msg, "ok": True}
+async def api_update_cookie(cookie: str = Form(...), auth_token: str = Form(""),
+                            app_token: str = Form(""), agent_id: str = Form("")):
+    """仅更新当前进程；子进程继承，不写入文件或返回凭证。"""
+    cookie, auth_token = cookie.strip(), auth_token.strip()
+    if any(not value or len(value) > 32768 or "\r" in value or "\n" in value for value in (cookie, auth_token)):
+        return JSONResponse({"error": "请填写完整的 Authorization 和 Cookie，值中不要换行。"}, 400)
+    extra = {"APP_TOKEN": app_token.strip(), "AGENT_ID": agent_id.strip()}
+    if any(len(value) > 8192 or "\r" in value or "\n" in value for value in extra.values()):
+        return JSONResponse({"error": "高级配置不应包含换行或过长的值。"}, 400)
+    with _task_lock:
+        if any(task.get("status") == "running" for task in _task_status.values()):
+            return JSONResponse({"error": "请等待当前任务结束后再更新凭证。"}, 409)
+        os.environ["SCPMA_COOKIE"] = cookie
+        os.environ["SCPMA_AUTH_TOKEN"] = auth_token
+        for key, value in extra.items():
+            if value:
+                os.environ[key] = value
+        # 待办列表可能已导入模块；同步更新本进程的配置，子进程继承环境。
+        import auto_approve
+        for key, value in extra.items():
+            if value:
+                setattr(auto_approve, key, value)
+    return {"ok": True, "msg": "凭证已更新，仅本次运行有效"}
 
 
 @app.get("/health")
@@ -448,6 +452,16 @@ async def health():
     return {"status": "ok", "time": datetime.now().isoformat()}
 
 
+@app.get("/preflight", response_class=HTMLResponse)
+def preflight(request: Request):
+    from preflight import checks, describe_checks
+    rows = describe_checks(checks(BASE_DIR))
+    core = [row for row in rows if row["kind"] == "core"]
+    return templates.TemplateResponse(request, "preflight.html", {"rows": rows,
+                                      "ready_count": sum(row["ready"] for row in core),
+                                      "total_count": len(core)})
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

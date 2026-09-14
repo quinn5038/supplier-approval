@@ -4,10 +4,9 @@
 
 用法:
     pip install pyyaml requests
-    # 在 .env 或环境变量中设置:
+    # 按接口需要在 .env 或环境变量中设置:
     export APP_TOKEN="你的APP_TOKEN"
     export AGENT_ID="你的agentId"
-    export CODE="你的CODE"
     python auto_approve.py
 
 断点续跑:
@@ -31,16 +30,16 @@ WAF熔断:
     - 默认 dry_run=True，只模拟不真审批，确认规则无误后改 False
 """
 
-import os
 import json
-import time
 import logging
-import sys
+import os
 import re
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
-from eval import safe_eval_rule
 
+from eval import safe_eval_rule
 
 # ============================================================
 # 自动加载 .env 文件（不需要安装额外依赖）
@@ -71,7 +70,6 @@ except ImportError:
 # ============================================================
 APP_TOKEN = os.getenv("APP_TOKEN", "")           # asca 域名用
 AGENT_ID  = os.getenv("AGENT_ID", "")             # 请求体里的 agentId（URL 参数 a 的值）
-CODE      = os.getenv("CODE", "")                 # URL 参数 CODE 的值
 # 修复：改为函数动态读取，webui 更新 os.environ 后立即生效（不再需要重启）
 # 之前是模块级常量，import 时读一次锁死，导致 webui 粘贴 cookie 后仍显示过期
 def _scpma_cookie() -> str:
@@ -290,7 +288,7 @@ def query_todo_detail(todo_id):
 
 
 def get_approval_buttons(todo_id, bill_id, proc_inst_id, act_inst_id, act_inst_name,
-                          work_item_id, current_oper_user_id, current_oper_user_dept_id):
+                          work_item_id, current_oper_user_id, current_oper_user_dept_id, *, business_bill_type):
     """
     ⑩ 获取审批按钮（返回可用的操作：通过/退回等）
     POST /scpma/approve/get/button
@@ -301,7 +299,7 @@ def get_approval_buttons(todo_id, bill_id, proc_inst_id, act_inst_id, act_inst_n
         businessAppId=BUSINESS_APP_ID,
         businessBillId=str(bill_id),
         businessCode=BUSINESS_CODE,
-        businessBillTypeCode=BUSINESS_BILL_TYPE,
+        businessBillTypeCode=business_bill_type,
         procInstId=str(proc_inst_id),
         actInstId=str(act_inst_id),
         actInstName=act_inst_name,
@@ -465,7 +463,8 @@ def query_selectable_persons(proc_inst_id, act_inst_id, task_id, bill_id,
 
 
 def execute_approval(proc_inst_id, act_inst_id, act_inst_name, task_id, bill_id,
-                      opinion, oper_code, business_para_bo=None, participant_list=None):
+                      opinion, oper_code, business_para_bo=None, participant_list=None,
+                      *, business_bill_type, todo_id, confirmed_digest=None):
     """
     ⑫ 执行审批操作
     POST /scpma/mtc/approvalOperate
@@ -476,6 +475,12 @@ def execute_approval(proc_inst_id, act_inst_id, act_inst_name, task_id, bill_id,
 
     business_para_bo: 供应商类型信息（从查询接口获取，含 suptypeQualId 等）
     """
+    from approval_guard import ApprovalIdentity, approval_digest, verify_fresh_task
+    from state_store import claim_operation, record_event
+    identity = ApprovalIdentity(
+        todo_id=str(todo_id), bill_id=str(bill_id), task_id=str(task_id),
+        proc_inst_id=str(proc_inst_id), act_inst_id=str(act_inst_id),
+        business_bill_type=business_bill_type, oper_code=oper_code)
     url = f"{SCPMA_BASE}/mtc/approvalOperate"
     body = _common_body(
         procInstId=str(proc_inst_id),
@@ -489,7 +494,7 @@ def execute_approval(proc_inst_id, act_inst_id, act_inst_name, task_id, bill_id,
         participantList=participant_list or [],
         businessBillId=str(bill_id),
         businessCode=BUSINESS_CODE,
-        businessBillType=BUSINESS_BILL_TYPE,
+        businessBillType=business_bill_type,
         businessAppId=BUSINESS_APP_ID,
         orgId=ORG_ID,
         bizState=0,
@@ -499,9 +504,37 @@ def execute_approval(proc_inst_id, act_inst_id, act_inst_name, task_id, bill_id,
 
     if DRY_RUN:
         log.info(f"[DRY-RUN] 模拟审批 operCode={oper_code} opinion={opinion[:50]}")
-        return {"_dry_run": True, "oper_code": oper_code}
+        return {"_dry_run": True, "oper_code": oper_code, "payload": body,
+                "confirmation_digest": approval_digest(body)}
 
-    return _post(url, _scpma_headers(), body)
+    if os.getenv("ENABLE_LIVE_APPROVAL", "false").lower() != "true":
+        raise PermissionError("真实回写未启用；请在平台人工审批")
+    if not confirmed_digest or confirmed_digest != approval_digest(body):
+        raise PermissionError("必须人工复核完整模拟载荷并提供对应确认摘要")
+    fresh = query_todo_detail(todo_id).get("data") or {}
+    verify_fresh_task(identity, fresh)
+    required = ("workItemId", "currentOperUserId", "currentOperUserDeptId")
+    if any(not fresh.get(k) for k in required):
+        raise ValueError("平台未返回完整操作人信息，禁止回写")
+    buttons = get_approval_buttons(
+        todo_id, bill_id, proc_inst_id, act_inst_id, act_inst_name,
+        *(fresh[k] for k in required), business_bill_type=business_bill_type).get("data")
+    if not isinstance(buttons, list) or not any(
+            isinstance(b, dict) and str(b.get("operCode")) == str(oper_code)
+            and b.get("disabled") in (None, False, 0) for b in buttons):
+        raise ValueError("平台未明确允许该操作，禁止回写")
+    # 身份决定幂等键；改变意见或操作码也不能重复提交同一个任务。
+    key = identity.model_dump_json(exclude={"oper_code"})
+    claim_operation(BASE_DIR / "audit.sqlite3", key)
+    record_event(BASE_DIR / "audit.sqlite3", "approval_attempt", {
+        "identity": identity.model_dump(), "payload_sha256": approval_digest(body)})
+    # 写请求绝不自动重试；超时也保留幂等记录，交人工查询实际状态。
+    result = _post(url, _scpma_headers(), body, retry_waits=[])
+    record_event(BASE_DIR / "audit.sqlite3", "approval_response", {
+        "identity": identity.model_dump(), "code": result.get("code")})
+    if str(result.get("code")) not in ("0", "200"):
+        raise RuntimeError("审批响应未确认成功，请人工核实平台状态")
+    return result
 
 
 # ============================================================
@@ -1053,7 +1086,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
         verify_items: 准确性核验点描述列表
     返回: (意见文本, 决策reject/manual/recommend)
     """
-    sname = supplier.get("name", "")
+    supplier.get("name", "")
 
     # 9/11：A08 财报未传 + 企查查无数据 → 在意见中独立列出"经审计的上年度财报"
     a08_needs_financial = (
@@ -1163,7 +1196,7 @@ def is_special_category(supplier):
     返回: (是否特殊类别, 类别名称)
     """
     sup_type = supplier.get("sup_type", "")
-    name_lower = sup_type.lower()
+    sup_type.lower()
     
     special_keywords = {
         "平台": "平台类",
@@ -1273,7 +1306,7 @@ def _print_result(sname, todo_id, type_desc, mat_cls, certifications, opinion, d
     # 核查清单（哪项通过/不通过/待核，以及原因）
     if checklist:
         icons = {"pass": "[✓]", "fail": "[✗]", "pending": "[待核]", "skip": "[跳过]"}
-        print(f"--- 核查清单 ---")
+        print("--- 核查清单 ---")
         for c in checklist:
             icon = icons.get(c.get("status"), "[?]")
             print(f"  {icon} {c.get('id','')} {c.get('name','')} — {c.get('detail','')}")
@@ -1286,7 +1319,7 @@ def _print_result(sname, todo_id, type_desc, mat_cls, certifications, opinion, d
     if certifications:
         print(f"--- 认证: {', '.join(certifications)} ---")
     print(f"{'='*60}")
-    print(f"审批意见：")
+    print("审批意见：")
     print(opinion)
     print(f"{'='*60}\n")
 
@@ -1393,6 +1426,7 @@ def run():
         log.info(f"断点续跑: 进度文件已有 {len(processed)} 条记录，本次自动跳过")
 
     rejected, reviewed, errored, skipped = 0, 0, 0, 0
+    fetched_ids = set()
     waf_blocked = False
     session_expired = False
     cache = _load_cache()
@@ -1404,7 +1438,7 @@ def run():
 
     for item in todo_list:
         # asca返回的ID字段是 id，不是 todoId；businessBillId/procInstId/actInstId/taskId 也在列表里
-        todo_id = item.get("id") or item.get("todoId")
+        todo_id = str(item.get("id") or item.get("todoId") or "")
         bill_id = item.get("businessBillId", "")
         proc_inst_id = item.get("procInstId", "")
         act_inst_id = item.get("actInstId", "")
@@ -1414,7 +1448,7 @@ def run():
         apply_unit = item.get("applyUnitName", "") or item.get("applyUserName", "")
         
         if not todo_id:
-            log.warning(f"跳过无 id 的项")
+            log.warning("跳过无 id 的项")
             continue
 
         # 断点续跑：已处理的直接跳过（不耗请求）
@@ -1428,11 +1462,6 @@ def run():
 
         # fetch-only 指定名单过滤
         if FETCH_ONLY and FETCH_IDS and todo_id not in FETCH_IDS:
-            continue
-        # fetch-only 且已有缓存（且未指定强制刷新）→ 跳过
-        if FETCH_ONLY and todo_id in cache:
-            log.info(f"[已缓存跳过] #{todo_id} {apply_unit}")
-            skipped += 1
             continue
 
         log.info(f"--- 待办 #{todo_id}: {apply_unit} ({bill_name}) ---")
@@ -1458,6 +1487,8 @@ def run():
             if not sup_info_apply_id:
                 log.warning(f"[跳过] todoId={todo_id} 无法获取 supInfoApplyId")
                 continue
+
+            bill_id = sup_info_apply_id
 
             # 3. 查询供应商基本信息（三种审批类型都查）
             # 业务确认：三种审核流程一样，都能看到基本信息
@@ -1610,6 +1641,7 @@ def run():
                 # 9/8：待办标题 title（格式"供应商姓名/businessBillId"），首页列表取 "/" 前作供应商姓名
                 "title": item.get("title", "") or "",
             }, supplier, mat_cls)
+            fetched_ids.add(todo_id)
             if FETCH_ONLY:
                 log.info(f"[已缓存] #{todo_id} {sname}（共 {len(cache)} 家）")
                 continue
@@ -1638,6 +1670,7 @@ def run():
                             proc_inst_id, act_inst_id, act_inst_name,
                             task_id, bill_id, opinion,
                             oper_code=OPER_CODE_REJECT,
+                            business_bill_type=bill_type, todo_id=todo_id,
                         )
                     rejected += 1
                 else:
@@ -1702,6 +1735,7 @@ def run():
                         proc_inst_id, act_inst_id, act_inst_name,
                         task_id, bill_id, opinion,
                         oper_code=OPER_CODE_REJECT,
+                            business_bill_type=bill_type, todo_id=todo_id,
                     )
                 log.info(f"[退回] {sname} (todoId={todo_id})")
                 rejected += 1
@@ -1739,6 +1773,9 @@ def run():
             sys.exit(3)
         if waf_blocked:
             sys.exit(2)
+        if errored or (FETCH_IDS and not FETCH_IDS <= fetched_ids):
+            log.error("部分指定待办未刷新成功，禁止使用历史缓存继续审批")
+            sys.exit(1)
         return
 
     total_done = len(processed) + rejected + reviewed
@@ -1838,6 +1875,13 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
 
         # ---- A01 法律主体资格：执照真伪 + 基本信息一致性 ----
         if cid == "A01" and reg:
+            if not acc or acc.get("核验结果是否一致") != "一致" or any(
+                    not reg.get(k) for k in ("企业名称", "法定代表人", "注册资本", "登记状态")):
+                if c.get("status") != "fail":
+                    c["status"] = "manual"
+                    c["detail"] = "企查查身份核验不完整或不一致，需人工核验"
+                qcc_issues.append("法律主体资格：公开信息不足以确认一致")
+                continue
             issues = []
             if acc:
                 if acc.get("核验结果是否一致") != "一致":
@@ -1890,88 +1934,12 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
         # ---- A08 资金财务状况（2026-09-04 保密合规改造）----
         # 改走企查查财务数据（公开披露），不再依赖 TextIn 解析供应商上传的财报（敏感数据）
         elif cid == "A08":
-            financial = qcc.get("financial") or {}
-            # 适配企查查多种数据形态：
-            #   {"搜索结果": "未发现任何记录"} → 非上市公司常见
-            #   {"财务数据信息": [{"报告期": ..., "指标详情": {"分析数据": {"偿还能力": {资产负债率, 流动比率, ...}}}}]}
-            #   {"资产负债率": ..., "流动比率": ..., "经营性现金流": ...} → 扁平指标
-            no_data = (
-                not financial
-                or "搜索结果" in financial
-                or "财务数据信息" not in financial
-            )
-            if no_data:
-                c["status"] = "manual"
-                c["detail"] = ("企查查未查到上年度财报数据（非上市公司常见，公开披露数据有限），"
-                               "已按保密合规要求不再 OCR 解析上传财报；转人工要求供应商补交经审计财报")
-                qcc_issues.append("A08 财报：企查查无数据，转人工要求补交")
-            else:
-                # 提取嵌套指标——取最新报告期（财务数据信息[0]）
-                info_list = financial.get("财务数据信息") or []
-                if not info_list:
-                    c["status"] = "manual"
-                    c["detail"] = "企查查财报数据为空，转人工要求供应商补交"
-                    qcc_issues.append("A08 财报：企查查数据为空，转人工要求补交")
-                else:
-                    # 取最新报告期（按报告期字符串倒序）
-                    try:
-                        latest = max(info_list, key=lambda x: x.get("报告期", ""))
-                    except Exception:
-                        latest = info_list[0]
-                    indicators = (
-                        latest.get("指标详情", {})
-                        .get("分析数据", {})
-                    )
-                    # 三项指标
-                    debt_ratio = indicators.get("资产负债率") or indicators.get("负债率")
-                    liq_ratio = indicators.get("流动比率")
-                    ocf = indicators.get("经营性现金流") or indicators.get("经营活动现金流净额")
-
-                    # 保护：若三项指标全是空（企查查披露等级"指标稀少"），按无数据转人工
-                    if (not debt_ratio or debt_ratio == "") and (not liq_ratio or liq_ratio == "") and (not ocf or ocf == ""):
-                        c["status"] = "manual"
-                        c["detail"] = (f"企查查财报披露不完整（{latest.get('报告期', '?')}，"
-                                       f"披露等级：{latest.get('披露等级', '稀少')}），"
-                                       "转人工要求供应商补交经审计财报")
-                        qcc_issues.append(f"A08 财报：企查查数据披露稀少（{latest.get('报告期', '?')}），转人工要求补交")
-                    else:
-                        # 计算指标
-                        ratio_issues = []
-                        if debt_ratio not in (None, ""):
-                            try:
-                                dr = float(str(debt_ratio).rstrip("%"))
-                                if dr > 65:
-                                    ratio_issues.append(f"资产负债率{dr:.1f}%超阈值65%")
-                            except (ValueError, TypeError):
-                                pass
-                        if liq_ratio not in (None, ""):
-                            try:
-                                lr = float(liq_ratio)
-                                if lr < 100:
-                                    ratio_issues.append(f"流动比率{lr:.1f}%不足100%")
-                            except (ValueError, TypeError):
-                                pass
-                        if ocf not in (None, ""):
-                            try:
-                                ocf_val = float(str(ocf).replace(",", ""))
-                                if ocf_val <= 0:
-                                    ratio_issues.append(f"经营性现金流{ocf_val:g}为负或零")
-                            except (ValueError, TypeError):
-                                pass
-
-                        if ratio_issues:
-                            c["status"] = "manual"
-                            c["detail"] = f"企查查财报数据（{latest.get('报告期', '?')}）指标不符：" + "；".join(ratio_issues)
-                            qcc_issues.append("A08 财报：" + "；".join(ratio_issues))
-                        else:
-                            c["status"] = "pass"
-                            c["detail"] = (
-                                f"企查查财报指标核算通过（{latest.get('报告期', '?')}）："
-                                f"资产负债率{debt_ratio or 'N/A'}、"
-                                f"流动比率{liq_ratio or 'N/A'}、"
-                                f"经营性现金流{ocf or 'N/A'}"
-                            )
-                            c["qcc_finance_ok"] = True
+            from financial_data import assess_financial
+            assessment = assess_financial(qcc.get("financial") or {})
+            c["status"] = "manual"
+            c["detail"] = assessment["detail"]
+            c["evidence"] = assessment
+            qcc_issues.append("A08 财报：" + assessment["detail"])
 
         # ---- A10 商业信誉：企查查数据核验（9/7 优化：明确有/无数据）----
         elif cid == "A10":
@@ -2032,6 +2000,7 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
     返回 (checklist, textin_issues) — textin_issues 为 OCR 发现的问题汇总
     """
     textin_issues = []
+    previous = {}
 
     for doc_type, kws in _TEXTIN_DOC_TYPE_KEYWORDS.items():
         r = textin_for_todo.get(doc_type)
@@ -2041,6 +2010,8 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
         if not c:
             continue
 
+        original = dict(c)
+        prior = previous.get(c.get("id"))
         checks = r.get("checks") or {}
         issues = r.get("issues") or []
         fields = r.get("fields") or {}
@@ -2078,9 +2049,11 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
             sample = []
             for k in list(fields.keys())[:4]:
                 v = fields[k]
-                if v is None: continue
+                if v is None:
+                    continue
                 s = str(v)
-                if len(s) > 30: s = s[:30] + "…"
+                if len(s) > 30:
+                    s = s[:30] + "…"
                 sample.append(f"{k}={s}")
             c["status"] = "pass"
             c["detail"] = "OCR核验通过：" + "，".join(sample)
@@ -2089,7 +2062,15 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
             c["status"] = "partial"
             c["detail"] = (f"OCR核验：自动确认{len(true_keys)}项，"
                            f"{len(none_keys)}项需人工核验（{'; '.join(none_keys)}）")
-        # else: 保持原 status（pending 等）
+        # 独立证据均须满足；后一种材料不能覆盖先前风险或公开信息冲突。
+        rank = {"fail": 4, "manual": 3, "partial": 2, "pending": 2, "pass": 1, "skip": 0}
+        if prior and rank.get(prior.get("status"), 3) > rank.get(c.get("status"), 3):
+            c.update(prior)
+        if original.get("status") in ("fail", "manual", "partial") and "企查查" in original.get("detail", ""):
+            if c.get("status") == "pass":
+                c["status"] = original["status"]
+            c["detail"] += "；" + original["detail"]
+        previous[c.get("id")] = dict(c)
 
     return checklist, textin_issues
 
@@ -2126,8 +2107,14 @@ def run_stage2():
         # 补全 is_inspection / has_inspection_cert（旧 cache 没有，新版新增）
         _ensure_inspection_fields(supplier, entry)
 
+        if supplier.get("is_hmt"):
+            result = _build_skip_result(tid, entry, "港澳台地区供应商需人工审批", textin.get(tid))
+            result.update(decision="manual", type_desc="港澳台供应商", opinion="转人工复核。港澳台地区供应商需人工审批。")
+            results[tid] = result
+            continue
+
         # 分流供应商（国外/港澳台/集团独有）不需要企查查增强
-        if supplier.get("is_foreign") or supplier.get("is_hmt"):
+        if supplier.get("is_foreign"):
             # 即使分流也生成"不适用"结果，让所有待办都能看到决策（9/6 报告页写不适用原因）
             results[tid] = _build_skip_result(tid, entry, decision_reason="境外供应商不适用中国大陆合规审查",
                                               textin_for_todo=textin.get(tid))

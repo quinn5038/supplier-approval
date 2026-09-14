@@ -15,7 +15,12 @@ echo Close this window to stop the service.
 echo.
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
-python -m uvicorn web.app:app --host 0.0.0.0 --port 8000
+if not exist ".venv\Scripts\python.exe" (
+    echo Python environment missing. Run setup.ps1 once to install dependencies.
+    pause
+    exit /b 1
+)
+".venv\Scripts\python.exe" launch_web.py
 echo.
 echo ============================================
 echo   WebUI stopped. Press any key to close.

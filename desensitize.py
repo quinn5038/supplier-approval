@@ -18,11 +18,10 @@
     # 或命令行：
     python desensitize.py --src cache_v4 --dst cache_v4_desens
 """
-import logging
 import json
+import logging
 import os
 import re
-import sys
 import tempfile
 from pathlib import Path
 
@@ -33,33 +32,23 @@ log = logging.getLogger("desensitize")
 # 公开 API
 # ============================================================
 def desensitize_dir(src_dir, dst_dir):
-    """将供应商材料原样复制到脱敏目录。
-
-    src_dir: 原始材料目录（如 cache_v4/{todoId}/）
-    dst_dir: 输出目录（如 cache_v4_desens/{todoId}/）
-
-    9/9 简化：移除财报 PDF 脱敏，本函数只做原样复制；身份证的精确打码
-    由 desensitize_id_cards_with_paddle 单独覆盖。逐文件覆盖写入（同名文件
-    覆盖，stale 文件保留无害），避免整目录删除触发沙箱批量删除保护。
-    """
+    """只复制明确公开的允许类型；身份证仅由本地打码成功后写入。"""
     import shutil
-    src = Path(src_dir)
-    dst = Path(dst_dir)
+
+    from material_policy import file_types, is_public_material, load_cache
+    src, dst = Path(src_dir), Path(dst_dir)
     if not src.exists():
-        log.warning(f"源目录不存在：{src}")
-        return
+        raise FileNotFoundError(src)
+    cache = load_cache(Path(__file__).parent)
     dst.mkdir(parents=True, exist_ok=True)
-
-    n = 0
     for f in src.rglob("*"):
-        if f.is_file():
-            rel = f.relative_to(src)
-            dst_file = dst / rel
-            dst_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, dst_file)
-            n += 1
-
-    log.info(f"[复制完成] {src} → {dst}：共 {n} 个文件（身份证随后由 PaddleOCR 精确打码覆盖）")
+        if not f.is_file() or f.is_symlink():
+            continue
+        if not is_public_material(f, file_types(f, cache)):
+            continue
+        target = dst / f.relative_to(src)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, target)
 
 
 # cache_v4 的身份证/非身份证文件名集合（types 交叉验证，懒加载）
@@ -96,20 +85,10 @@ def _load_type_name_sets():
 
 
 def _is_id_card_image(src):
-    """判断图片是否为身份证（明确关键词 → cache_v4 types → 中文名保守兜底）"""
-    name_lower = src.name.lower()
-    # 1) 明确关键词
-    if any(k in name_lower for k in ["身份证", "证件", "id_card", "id_"]):
-        return True
-    # 2) cache_v4 types 交叉验证
-    _load_type_name_sets()
-    bare = re.sub(r"^\d+_", "", src.name)  # 去 uploadId 前缀
-    if bare in _ID_CARD_NAMES:
-        return True
-    if bare in _NON_ID_CARD_NAMES:
-        return False  # cache_v4 明确分类为非身份证（营业执照等）
-    # 3) 中文名保守兜底（cache_v4 无分类时的回退）
-    return _looks_like_id_card_name(name_lower)
+    """类型按所属待办查询，避免同名文件跨供应商误判。"""
+    from material_policy import file_types, load_cache
+    types = file_types(src, load_cache(Path(__file__).parent))
+    return "legal_person_id" in types or any(k in src.name.lower() for k in ("身份证", "id_card"))
 
 
 # 常见材料关键词（用于排除——这些不是身份证）
@@ -156,11 +135,11 @@ _IDCARD_MASKER_SCRIPT = os.environ.get(
 )
 _PADDLE_PYTHON = os.environ.get(
     "PADDLE_PYTHON",
-    r"D:\WorkBuddy\idcard_env311\Scripts\python.exe",
+    str(_PROJECT_ROOT / ".paddle-venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
 )
 _PADDLE_MODEL_DIR = os.environ.get(
     "PADDLE_MODEL_DIR",
-    r"D:\WorkBuddy\paddleocr-models",
+    str(_PROJECT_ROOT / "models" / "paddleocr"),
 )
 
 
@@ -175,10 +154,9 @@ def desensitize_id_cards_with_paddle(src_dir, dst_dir):
     调用方（textin_pipeline.run_parse）据此区分成功/失败：成功用识别结果核验，
     失败则明确写失败原因并转人工审批。
     """
-    import subprocess
-    import shutil
-    import tempfile
     import os
+    import shutil
+    import subprocess
 
     script = Path(_IDCARD_MASKER_SCRIPT) if _IDCARD_MASKER_SCRIPT else None
     paddle_python = Path(_PADDLE_PYTHON)
@@ -275,8 +253,13 @@ def desensitize_id_cards_with_paddle(src_dir, dst_dir):
             # 收集 PaddleOCR 识别结果（cards：side/name/valid_until）
             if fields_json.exists():
                 try:
-                    info = json.loads(fields_json.read_text(encoding="utf-8"))
-                    result[rel.as_posix()] = {"cards": info.get("cards", [])}
+                    json.loads(fields_json.read_text(encoding="utf-8"))
+                    cards = []
+                    pattern = f"{stem.stem}__page-*__fields.json"
+                    for page_fields in sorted(fields_json.parent.glob(pattern)):
+                        page_info = json.loads(page_fields.read_text(encoding="utf-8"))
+                        cards.extend(page_info.get("cards", []))
+                    result[rel.as_posix()] = {"cards": cards}
                 except Exception as e:
                     log.warning(f"[PaddleOCR] 读取 fields.json 失败 {rel}：{e}")
                     result[rel.as_posix()] = {"error": f"读取识别结果失败：{e}"}
