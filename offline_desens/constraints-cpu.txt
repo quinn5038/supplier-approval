@@ -1,0 +1,6 @@
+# Paddle 2.x / imgaug require NumPy 1.x; keep OpenCV compatible.
+paddlepaddle==2.6.2
+numpy==1.26.4
+opencv-python==4.11.0.86
+opencv-contrib-python==4.11.0.86
+opencv-python-headless==4.11.0.86

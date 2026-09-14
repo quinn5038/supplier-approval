@@ -26,13 +26,12 @@
 3. 配额预警：每日调用量 >80% 阈值时 log.warning
 4. 签名机制：MD5(AppId + Timespan + secretKey).upper()，与接口文档一致
 """
+import hashlib
+import json
+import logging
 import os
 import time
-import json
-import hashlib
-import logging
 from pathlib import Path
-from typing import Optional
 
 try:
     import requests
@@ -115,26 +114,19 @@ def _check_quota_warning():
 
 
 def _cache_get(supplier_name: str, key: str):
-    """从缓存读取（命中则不调 API，节省配额）"""
-    try:
-        if not _CACHE_FILE.exists():
-            return None
-        data = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
-        return data.get(supplier_name, {}).get(key)
-    except Exception:
+    """旧无时间戳缓存不再信任；SQLite 缓存默认一天过期。"""
+    from state_store import get_state
+    cache = get_state(_CACHE_FILE.with_suffix(".sqlite3"), "qcc")
+    entry = cache.get(supplier_name + "/" + key)
+    if not entry or time.time() - entry["at"] > int(os.getenv("QCC_CACHE_TTL", "86400")):
         return None
+    return entry["value"]
 
 
 def _cache_set(supplier_name: str, key: str, value):
-    """写入缓存"""
-    try:
-        data = json.loads(_CACHE_FILE.read_text(encoding="utf-8")) if _CACHE_FILE.exists() else {}
-        if supplier_name not in data:
-            data[supplier_name] = {}
-        data[supplier_name][key] = value
-        _CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        log.warning(f"[QCC] 缓存写入失败：{e}")
+    from state_store import put_state
+    put_state(_CACHE_FILE.with_suffix(".sqlite3"), "qcc", supplier_name + "/" + key,
+              {"at": time.time(), "value": value})
 
 
 def _post(path: str, body: dict, supplier_name: str = "", cache_key: str = "") -> dict:
@@ -286,6 +278,14 @@ def cash_flow(keyword: str) -> dict:
 # ============================================================
 # 批量入口（被 enhance_checklist_with_qcc 调用）
 # ============================================================
+def _payload(response):
+    """Unwrap the documented service envelope; unknown shapes stay unknown."""
+    if not isinstance(response, dict):
+        return {}
+    value = response.get("result", response.get("data", {}))
+    return value if isinstance(value, dict) else {}
+
+
 def fetch_first_tier(name: str) -> dict:
     """
     批量拉取第一档全部接口数据（单家供应商）
@@ -304,8 +304,8 @@ def fetch_first_tier(name: str) -> dict:
     }
     """
     return {
-        "reg_info": baseinfo(name),
-        "accuracy": verify_ic(name, "", ""),
+        "reg_info": _payload(baseinfo(name)),
+        "accuracy": _payload(verify_ic(name, "", "")),
         "shareholders": holders(name).get("result", []),
         "actual_controller": {},  # 围标串标接口，先不做
         "dishonest": dishonest_person(name).get("result", []),

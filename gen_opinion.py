@@ -10,12 +10,13 @@
     D:\\WorkBuddy\\最终审批意见_<todoId>_<公司名>.txt   (每家一个文件，方便复制)
     控制台同时打印
 """
-import json, sys, re
+import json
+import re
+import sys
 from pathlib import Path
-from datetime import date
 
 BASE = Path(__file__).parent
-OUT_DIR = Path(r"D:\WorkBuddy")
+OUT_DIR = BASE / "output"
 
 
 def _load(path):
@@ -78,7 +79,7 @@ def _is_hard_fail(issue_text: str) -> bool:
 
 def _supplier_brief(s2, cache_entry):
     """生成公司概况一句话"""
-    name = s2.get("name", "")
+    s2.get("name", "")
     type_desc = s2.get("type_desc", "")
     sup = cache_entry.get("supplier", {}) if cache_entry else {}
     # 兼容多种字段名（cache_v4 用 registered_capital）
@@ -179,7 +180,7 @@ def _build_pass_summary(c, textin_for_doc):
         if cid in ("C1_02", "C1_03", "C1_04"):
             return f"{cname}证书持有人与供应商一致，证书在有效期内。"
         if cid == "C1_05":
-            return f"生产许可证在有效期内。"
+            return "生产许可证在有效期内。"
     return detail or f"{cname}通过"
 
 
@@ -187,12 +188,12 @@ def build_opinion(tid, s2, textin, cache):
     """生成最终审批意见文本"""
     cache_entry = cache.get(tid, {})
     supplier = cache_entry.get("supplier", {}) if cache_entry else {}
-    textin_for_doc = textin.get(tid, {}) if textin else {}
-    name = s2.get("name", tid)
-    brief = _supplier_brief(s2, cache_entry)
+    textin.get(tid, {}) if textin else {}
+    s2.get("name", tid)
+    _supplier_brief(s2, cache_entry)
     checklist = s2.get("checklist", []) or []
-    t_issues = s2.get("textin_issues", []) or []
-    q_issues = s2.get("qcc_issues", []) or []
+    s2.get("textin_issues", []) or []
+    s2.get("qcc_issues", []) or []
     decision = s2.get("decision", "manual")
 
     # 9/6：疑似国内供应商提示（isOverseas=1 但国家为中国），追加到意见末尾
@@ -202,6 +203,11 @@ def build_opinion(tid, s2, textin, cache):
     if decision == "skip":
         base = s2.get("opinion") or s2.get("skip_reason") or "该供应商不适用标准审批流程"
         return base + ("\n\n" + suspect_tip if suspect_tip else "")
+
+    if not checklist:
+        if decision == "manual" and s2.get("opinion"):
+            return s2["opinion"]
+        return "转人工。缺少核验清单，无法确认审核完成。"
 
     # 分类：fail / pass / skip / 待人工（pending/partial/manual）
     fail_items = [c for c in checklist if c.get("status") == "fail"]
@@ -222,9 +228,9 @@ def build_opinion(tid, s2, textin, cache):
             other_fails.append((cid, cname, detail))
 
     # 整体建议：缺材料 fail ≥1 → 退回；其余 fail/待人工 → 转人工；全 pass → 同意
-    if supplement_fails:
+    if supplement_fails or decision == "reject":
         suggest_action = "退回"
-    elif fail_items or manual_items:
+    elif fail_items or manual_items or decision == "manual":
         suggest_action = "转人工"
     else:
         suggest_action = "同意"
@@ -327,6 +333,7 @@ def main():
     args = [a for a in sys.argv[1:] if a != "--all"]
     ids = args or list(stage2.keys())
 
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     for tid in ids:
         if tid not in stage2:
             print(f"[跳过] {tid} 不在 stage2_results")

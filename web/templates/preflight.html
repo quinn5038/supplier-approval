@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>启动检查 - 招采平台供应商智能辅助审批</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <h1>招采平台供应商智能辅助审批</h1>
+            <div class="meta">运行环境检查</div>
+        </div>
+        <div class="actions"><a href="/" class="btn btn-outline page-back">返回待办列表</a></div>
+    </header>
+    <main class="container preflight-page">
+        <section class="preflight-card" aria-labelledby="preflight-title">
+            <div class="preflight-header">
+                <div>
+                    <div class="section-eyebrow">启动检查</div>
+                    <h2 id="preflight-title">运行环境与服务配置</h2>
+                    <p>检查只核对本机配置，不会向平台或外部服务发送探测请求。</p>
+                </div>
+                <div class="preflight-count" aria-label="{{ total_count }} 项基础检查中 {{ ready_count }} 项就绪">
+                    <strong>{{ ready_count }} / {{ total_count }}</strong><span>基础项就绪</span>
+                </div>
+            </div>
+            <ul class="preflight-list">
+                {% for row in rows %}
+                <li class="preflight-item">
+                    <div class="preflight-item-main">
+                        <span class="preflight-item-name">{{ row.label }}</span>
+                        {% if row.kind == 'optional' %}
+                        <span class="status-pill {{ 'status-ready' if row.ready else 'status-optional' }}">{{ '已配置' if row.ready else '按需配置' }}</span>
+                        {% elif row.kind == 'capability' %}
+                        <span class="status-pill {{ 'status-ready' if row.ready else 'status-pending' }}">{{ '已配置' if row.ready else '未配置' }}</span>
+                        {% else %}
+                        <span class="status-pill {{ 'status-ready' if row.ready else 'status-pending' }}">{{ '就绪' if row.ready else '未就绪' }}</span>
+                        {% endif %}
+                    </div>
+                    <details class="preflight-help">
+                        <summary>如何配置</summary>
+                        <ol>{% for step in row.steps %}<li>{{ step }}</li>{% endfor %}</ol>
+                    </details>
+                </li>
+                {% endfor %}
+            </ul>
+            <div class="preflight-note">基础项计数不包含按需配置和识别服务。外部服务未配置时，对应的核验会交由人工处理；凭证状态不代表在线验证。CODE 当前未参与请求，无需填写。</div>
+        </section>
+    </main>
+</body>
+</html>

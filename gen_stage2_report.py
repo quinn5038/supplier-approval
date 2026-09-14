@@ -4,15 +4,18 @@ r"""从 stage2_results.json + textin_results.json 生成供应商材料审查对
 用法: python gen_stage2_report.py [todoId1] [todoId2] ...   (默认全部)
 输出: D:\WorkBuddy\供应商材料审查_YYYYMMDD.html
 """
-import json, sys, datetime, re
+import datetime
+import html
+import json
+import re
+import sys
 from datetime import date
 from pathlib import Path
 
 # 复用 gen_opinion 的意见生成逻辑（9/3：意见表与审查报告整合成一个 HTML）
-import gen_opinion
 
 BASE = Path(__file__).parent
-OUT_DIR = Path(r"D:\WorkBuddy")
+OUT_DIR = BASE / "output"
 
 STATUS_MARK = {
     "pass":   ("✓", "#e6f4ea", "#1e7e34"),   # 绿
@@ -63,7 +66,8 @@ DOC_TYPE_LABEL = {
 }
 
 def esc(s):
-    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    return html.escape(str(s or ""), quote=True)
+
 
 def render_supplier(tid, s2, textin, cache):
     name = s2.get("name") or tid
@@ -72,8 +76,8 @@ def render_supplier(tid, s2, textin, cache):
     decision = s2.get("decision") or "manual"
     opinion = s2.get("opinion") or ""
     checklist = s2.get("checklist") or []
-    t_issues = s2.get("textin_issues") or []
-    q_issues = s2.get("qcc_issues") or []
+    s2.get("textin_issues") or []
+    s2.get("qcc_issues") or []
     cache_entry = cache.get(tid, {})
     supplier = cache_entry.get("supplier", {})
 
@@ -98,7 +102,7 @@ def render_supplier(tid, s2, textin, cache):
         files_html = "<ul>" + "".join(
             f"<li>{esc(d.get('fileName',''))} "
             f"<span style='color:#5f6368;font-size:11px'>"
-            f"[{', '.join(d.get('types') or ['未分类'])}]</span></li>"
+            f"[{esc(', '.join(d.get('types') or ['未分类']))}]</span></li>"
             for d in mdetail
         ) + "</ul>"
     else:
@@ -138,8 +142,8 @@ def render_supplier(tid, s2, textin, cache):
                 "<th>缺失的材料</th></tr>"
                 + "".join(
                     f"<tr><td>{esc(c)}</td><td>{esc(n)}</td>"
-                    f"<td style='color:#a52834'>⚠ {esc(l)} 未上传</td></tr>"
-                for c, n, l in dedup
+                    f"<td style='color:#a52834'>⚠ {esc(label)} 未上传</td></tr>"
+                for c, n, label in dedup
                 ) + "</table>"
             )
         else:
@@ -222,7 +226,7 @@ def render_supplier(tid, s2, textin, cache):
                                     f"<span class='kv'>有效期至 {esc(exp)}</span>")
                         else:
                             check_detail_parts.append(
-                                f"<span class='issue'>未识别到有效期</span>")
+                                "<span class='issue'>未识别到有效期</span>")
                         for it in iss[:2]:
                             check_detail_parts.append(f"<span class='issue'>{esc(it)}</span>")
                     elif doc_type == "business_license":
@@ -248,26 +252,26 @@ def render_supplier(tid, s2, textin, cache):
                         # 正向「一致」结论（此前只在 False 时显示「不一致」，True 时不显示）
                         if checks.get("信用代码一致") is True:
                             check_detail_parts.append(
-                                f"<span class='ok-mini'>信用代码与系统一致</span>")
+                                "<span class='ok-mini'>信用代码与系统一致</span>")
                         if checks.get("名称一致") is True:
                             check_detail_parts.append(
-                                f"<span class='ok-mini'>名称与系统一致</span>")
+                                "<span class='ok-mini'>名称与系统一致</span>")
                         if checks.get("法人一致") is True:
                             check_detail_parts.append(
-                                f"<span class='ok-mini'>法定代表人与系统一致</span>")
+                                "<span class='ok-mini'>法定代表人与系统一致</span>")
                         if checks.get("注册资本一致") is True:
                             check_detail_parts.append(
-                                f"<span class='ok-mini'>注册资本与系统一致</span>")
+                                "<span class='ok-mini'>注册资本与系统一致</span>")
                         if checks.get("法人一致") is False:
                             sys_legal = supplier.get("legal_person", "")
                             check_detail_parts.append(
                                 f"<span class='ng-mini'>法定代表人：执照「{esc(f_legal)}」vs 系统「{esc(sys_legal)}」不一致</span>")
                         if checks.get("信用代码一致") is False:
                             check_detail_parts.append(
-                                f"<span class='ng-mini'>信用代码：执照与系统不一致</span>")
+                                "<span class='ng-mini'>信用代码：执照与系统不一致</span>")
                         if checks.get("经营范围一致") is False:
                             check_detail_parts.append(
-                                f"<span class='ng-mini'>经营范围与系统不一致</span>")
+                                "<span class='ng-mini'>经营范围与系统不一致</span>")
                         # 9/8 修复：展示 fail 原因（issues）。此前漏了，导致 A01 红叉时
                         # 核验结果列只显示正向「一致」结论，看不到「经营范围差异/字段缺失」等未通过原因
                         for it in iss[:3]:
@@ -365,6 +369,10 @@ def render_supplier(tid, s2, textin, cache):
                             if check_detail_parts
                             else "<span class='verify-empty'>无核验数据</span>")
 
+        if cid.startswith("DEMO_"):
+            mat_status = "合成样例，无真实材料"
+            check_detail = esc(detail)
+
         # 决策依据：9/5 改造为从 rules.yaml 读 requirement
         decision_basis = _load_decision_basis(cid, cname)
 
@@ -406,13 +414,12 @@ def render_supplier(tid, s2, textin, cache):
             + big_rows + "</table>"
         )
 
-    try:
-        plain_opinion = gen_opinion.build_opinion(tid, s2, textin, cache)
-    except Exception:
-        plain_opinion = opinion
-
     today = date.today().strftime("%Y年%m月%d日")
     auto_gen = f"（自动生成于 {today}，依据《中港采购发〔2025〕161号》准入审查规则）"
+    if tid.startswith("demo-"):
+        auto_gen = f"离线合成演示 · {today} · 仅演示两项规则，不代表完整资质审核"
+        files_html = "合成测试证据，无真实附件"
+        missing_rows = "材料缺失场景由演示规则模拟"
 
     # 9/10 新增：综合核验表标题右侧的状态图例（红=退回 / 黄=转人工 / 绿=通过），横向排列
     # skip（不适用）时没有表格，不显示图例
@@ -564,6 +571,7 @@ def _infer_supplier_type(supplier, tdesc):
     return ""
 
 def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     stage2 = json.loads((BASE/"stage2_results.json").read_text(encoding="utf-8"))
     textin = {}
     tp = BASE/"textin_results.json"

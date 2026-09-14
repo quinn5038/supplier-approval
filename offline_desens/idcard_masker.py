@@ -7,18 +7,20 @@ import argparse
 import csv
 import json
 import logging
+import os
 import platform
 import re
+import shutil
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 import cv2
-import fitz  # PyMuPDF
 import numpy as np
+import pymupdf as fitz
 from PIL import Image, ImageOps
-
 
 LOG = logging.getLogger("idcard_masker")
 CARD_WIDTH, CARD_HEIGHT = 1712, 1080
@@ -64,13 +66,28 @@ class CardOcr:
     """PaddleOCR adapter. Models load once per batch."""
 
     def __init__(self, model_dir: Path | None = None) -> None:
+        if not model_dir or any(not (model_dir / part / "inference.pdmodel").is_file()
+                                or not (model_dir / part / "inference.pdiparams").is_file()
+                                for part in ("det", "rec", "cls")):
+            raise RuntimeError("请预先安装本地 det/rec/cls 模型；处理身份证时禁止自动下载模型")
         try:
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise RuntimeError("缺少 PaddleOCR。请先按 README 安装 paddlepaddle 和 paddleocr。") from exc
-        options: dict[str, object] = {"lang": "ch", "use_angle_cls": True, "show_log": False}
+        # Paddle 2.x C++ file loading on Windows cannot open Unicode paths.
+        # Copy only public model weights, never source identity documents.
+        self._model_temp = None
+        if os.name == "nt" and not str(model_dir).isascii():
+            self._model_temp = tempfile.TemporaryDirectory(prefix="supplier-ocr-models-")
+            ascii_dir = Path(self._model_temp.name)
+            if not str(ascii_dir).isascii():
+                raise RuntimeError("Paddle 需要 ASCII 模型路径，请将 PADDLE_MODEL_DIR 配置到无中文目录")
+            for part in ("det", "rec", "cls"):
+                shutil.copytree(model_dir / part, ascii_dir / part)
+            model_dir = ascii_dir
+        options: dict[str, object] = {"lang": "ch", "use_angle_cls": True, "show_log": False,
+                                     "use_gpu": False, "enable_mkldnn": False}
         if model_dir:
-            model_dir.mkdir(parents=True, exist_ok=True)
             options.update(det_model_dir=str(model_dir / "det"), rec_model_dir=str(model_dir / "rec"), cls_model_dir=str(model_dir / "cls"))
         self.engine = PaddleOCR(**options)
 
@@ -243,7 +260,8 @@ def split_detected_long(source: np.ndarray, cards: list[np.ndarray]) -> list[np.
     # 覆盖 find_cards 把上下两张卡粘连成整图的情况（湛江安迪 1700x2338，h/w=1.37，
     # 此前面积占比 100% 被 total>=50% 拦截，导致背面漏识别）。
     q = cards[0]
-    xs = q[:, 0]; ys = q[:, 1]
+    xs = q[:, 0]
+    ys = q[:, 1]
     qw = xs.max() - xs.min()
     qh = ys.max() - ys.min()
     if qw <= 0 or qh <= 0:
@@ -339,7 +357,7 @@ def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str
     # 9/10 方案A：正反面拼图（左右/上下并排）检测不完整时，主动二分整图
     if layout != "single":
         cards = split_detected_long(source, cards)
-    output, results = source.copy(), []
+    output, results = np.zeros_like(source), []
     for index, quad in enumerate(cards, start=1):
         layer, mask, result = redact_card(source, quad, ocr, index)
         output[mask > 0] = layer[mask > 0]
@@ -419,7 +437,7 @@ def main() -> int:
     parser.add_argument("--output-mode", choices=("images", "fields", "both"), default="images", help="默认 images")
     parser.add_argument("--layout", choices=("auto", "stacked", "single"), default="auto", help="默认 auto；stacked 仅在无法检出卡片时上下二分")
     parser.add_argument("--dpi", type=int, default=300, help="PDF 渲染分辨率，默认 300")
-    parser.add_argument("--model-dir", type=Path, help="可选：PaddleOCR 模型缓存目录")
+    parser.add_argument("--model-dir", type=Path, required=True, help="预先准备的本地 PaddleOCR 模型目录")
     args = parser.parse_args()
     validate_runtime(parser)
     if not args.input_dir.is_dir():
@@ -435,7 +453,7 @@ def main() -> int:
         ocr = CardOcr(args.model_dir)
     except Exception as exc:
         LOG.error("无法初始化 OCR：%s", exc)
-        LOG.error("请确认已安装 paddlepaddle/paddleocr，且首次模型下载网络可用。")
+        LOG.error("请确认已安装 paddlepaddle/paddleocr，并已提前准备本地 det/rec/cls 模型。")
         return 2
     all_rows: list[dict[str, str]] = []
     failures = 0

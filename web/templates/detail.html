@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>审批详情 - {{ supplier_name or todo_id }}</title>
     <link rel="stylesheet" href="/static/style.css">
+<script>
+const originalFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => {
+  const headers = new Headers(options.headers || {});
+  if (new URL(url, location.href).origin === location.origin) {
+    const token = document.cookie.split('; ').find(v => v.startsWith('supplier_csrf='));
+    if (token) headers.set('X-CSRF-Token', token.split('=')[1]);
+  }
+  return originalFetch(url, {...options, headers});
+};
+</script>
 </head>
 <body>
     <div class="topbar">
@@ -18,7 +29,7 @@
     </div>
 
     <div class="container">
-        <div id="alert-area"></div>
+        <div id="alert-area" role="alert" aria-live="polite"></div>
 
         <!-- 进度区 -->
         <div id="progress-area" style="display:none;">
@@ -44,7 +55,7 @@
             <div class="report-section">
                 <h2>最终审批意见（可直接复制）</h2>
                 <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
-                    <button class="btn btn-outline" onclick="copyOpinion()">复制全文</button>
+                    <button class="btn btn-outline" onclick="copyOpinion(this)">复制全文</button>
                 </div>
                 <div class="opinion-box" id="opinion-content"></div>
             </div>
@@ -60,7 +71,7 @@
     </div>
 
     <script>
-        const TODO_ID = "{{ todo_id }}";
+        const TODO_ID = {{ todo_id | tojson }};
         let pollTimer = null;
         let opinionText = "";
 
@@ -78,6 +89,7 @@
                     alert('正在处理中，请勿重复点击');
                     return;
                 }
+                if (!r.ok) throw new Error("无法启动，请检查登录状态或权限");
                 // 重启轮询
                 if (pollTimer) clearInterval(pollTimer);
                 pollTimer = setInterval(pollStatus, 2000);
@@ -104,7 +116,7 @@
                     document.getElementById('error-msg').textContent = '⚠ ' + (data.error || '处理失败');
                     if (data.step === 'cookie_expired') {
                         document.getElementById('error-msg').innerHTML +=
-                            '<br><br>请<a href="/">返回列表</a>，点击右上角"更新 Cookie"后重试。';
+                            '<br><br>请<a href="/">返回列表</a>，在本机更新平台凭证并重启服务后重试。';
                     }
                 }
             } catch (e) {
@@ -133,10 +145,9 @@
         }
 
         // ===== 复制意见 =====
-        function copyOpinion() {
+        function copyOpinion(btn) {
             if (!opinionText) { alert('意见为空'); return; }
             navigator.clipboard.writeText(opinionText).then(() => {
-                const btn = event.target;
                 const old = btn.textContent;
                 btn.textContent = '已复制';
                 setTimeout(() => { btn.textContent = old; }, 1500);

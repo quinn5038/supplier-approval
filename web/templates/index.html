@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>招采平台供应商智能辅助审批</title>
     <link rel="stylesheet" href="/static/style.css">
+<script>
+const originalFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => {
+  const headers = new Headers(options.headers || {});
+  if (new URL(url, location.href).origin === location.origin) {
+    const token = document.cookie.split('; ').find(v => v.startsWith('supplier_csrf='));
+    if (token) headers.set('X-CSRF-Token', token.split('=')[1]);
+  }
+  return originalFetch(url, {...options, headers});
+};
+</script>
 </head>
 <body>
     <div class="topbar">
@@ -13,12 +24,38 @@
             <div class="meta" id="meta">加载中...</div>
         </div>
         <div class="actions">
-            <button class="btn btn-outline" onclick="openCookieModal()">更新 Cookie</button>
+            <a href="/preflight" class="btn btn-outline">启动检查</a>
+            <button class="btn btn-outline" onclick="openCookieModal()">更新平台凭证</button>
         </div>
     </div>
 
     <div class="container">
-        <div id="alert-area"></div>
+        <div id="alert-area" role="alert" aria-live="polite"></div>
+        <div class="guide-card search-panel">
+            <div class="search-panel-title">筛选待办</div>
+            <div class="search-fields">
+                <div class="form-field search-field-main">
+                    <label for="search">供应商搜索</label>
+                    <input id="search" type="search" placeholder="输入供应商名称或待办 ID" oninput="filterTodos()">
+                </div>
+                <div class="form-field">
+                    <label for="business-filter">业务类型</label>
+                    <select id="business-filter" onchange="filterTodos()">
+                        <option value="">全部</option>
+                        <option value="P0701">注册审批</option>
+                        <option value="P0702">信息变更审批</option>
+                        <option value="P0704">合作意向审批</option>
+                    </select>
+                </div>
+                <div class="form-field">
+                    <label for="decision-filter">决策状态</label>
+                    <select id="decision-filter" onchange="filterTodos()">
+                        <option value="">全部</option><option value="recommend">建议同意</option><option value="reject">需退回</option><option value="manual">需人工</option>
+                    </select>
+                </div>
+            </div>
+            <p id="summary" class="search-summary" aria-live="polite"></p>
+        </div>
 
         <!-- 操作说明卡（默认展开，点击标题收起） -->
         <div class="guide-card">
@@ -29,7 +66,7 @@
             <div class="guide-steps" id="guide-steps" style="display:grid;">
                 <div class="guide-step">
                     <span class="guide-num">1</span>
-                    <div><b>更新 Cookie</b><br><span class="guide-desc">浏览器登录 scpma.iccec.cn → F12 复制 Cookie → 点右上角按钮粘贴</span></div>
+                    <div><b>粘贴平台凭证</b><br><span class="guide-desc">粘贴 Authorization 和 Cookie 后开始使用，无需另设账号密码</span></div>
                 </div>
                 <div class="guide-step">
                     <span class="guide-num">2</span>
@@ -50,31 +87,43 @@
         </div>
     </div>
 
-    <!-- Cookie 更新弹窗 -->
-    <div class="modal-overlay" id="cookie-modal">
-        <div class="modal">
-            <h3>更新 Cookie</h3>
-            <div class="hint">
-                <b>操作步骤</b>（浏览器先登录 <code>scpma.iccec.cn</code>，看到任意待办列表即可）：<br>
-                ① F12 打开 DevTools → ② 切到 <b>Network</b> 选项卡 → ③ 点击页面上任意待办触发请求<br>
-                ④ 在左侧请求列表选一个 <code>scpma.iccec.cn/apis/...</code> 请求 → ⑤ 点 <b>Headers</b><br>
-                ⑥ 滚动找到 <b>Cookie</b> 和 <b>Authorization</b>，分别复制下面两个值<br>
-                <span style="color:var(--color-danger); font-size:12px;">
-                ⚠ Cookie 和 Authorization 两个都需要填，只填一个会导致 scpma 域接口返回 111
-                </span><br>
-                <span style="color:var(--color-text-muted); font-size:11px;">
-                提示：Cookie 整段很长（如 <code>DSESSIONID=...; access_token=...; _c_WBKFRo=...</code>），全部粘过来即可
-                </span>
+    <dialog id="credential-dialog" class="credential-dialog" aria-labelledby="credential-title" aria-describedby="credential-help">
+        <form id="credential-form" class="credential-form">
+            <div class="credential-header">
+                <div class="credential-icon" aria-hidden="true">钥</div>
+                <div>
+                    <h2 id="credential-title">连接招采平台</h2>
+                    <p id="credential-help">粘贴平台凭证以加载待办；关闭程序后需重新粘贴。</p>
+                </div>
             </div>
-            <textarea id="cookie-input" placeholder="粘贴 Cookie 整段（含 DSESSIONID/access_token/_c_WBKFRo 等所有字段）" style="min-height:80px;"></textarea>
-            <textarea id="auth-input" placeholder="粘贴 Authorization 头（如 Bearer xxx，scpma 域必须填）" style="margin-top:8px; min-height:60px;"></textarea>
-            <div class="actions">
-                <button class="btn btn-outline" onclick="closeCookieModal()">取消</button>
-                <button class="btn btn-primary" id="save-cookie-btn" onclick="saveCookie()">保存</button>
+            <div class="credential-body">
+                <div class="form-field">
+                    <label for="platform-auth">Authorization</label>
+                    <input id="platform-auth" type="password" autocomplete="off" required maxlength="32768" placeholder="粘贴 Authorization 值">
+                </div>
+                <div class="form-field">
+                    <label for="platform-cookie">Cookie</label>
+                    <input id="platform-cookie" type="password" autocomplete="off" required maxlength="32768" placeholder="粘贴 Cookie 值">
+                </div>
+                <details class="credential-advanced"><summary>高级配置<span>待办或详情无法读取时填写</span></summary>
+                    <p>APP_TOKEN 从 asca 请求头取得；AGENT_ID 从审批页面地址栏的 a= 参数取得。仅在有值时更新，不保存到文件。</p>
+                    <div class="form-field">
+                        <label for="platform-app-token">APP_TOKEN</label>
+                        <input id="platform-app-token" type="password" autocomplete="off" maxlength="8192">
+                    </div>
+                    <div class="form-field">
+                        <label for="platform-agent-id">AGENT_ID（地址栏 a=）</label>
+                        <input id="platform-agent-id" autocomplete="off" maxlength="8192">
+                    </div>
+                </details>
+                <p id="credential-message" class="credential-error" role="alert" aria-live="polite"></p>
             </div>
-        </div>
-    </div>
-
+            <div class="credential-actions">
+                <button type="button" class="btn btn-outline" onclick="document.getElementById('credential-dialog').close()">取消</button>
+                <button type="submit" class="btn btn-primary">连接平台</button>
+            </div>
+        </form>
+    </dialog>
     <script>
         // ===== 状态管理 =====
         let todoItems = [];          // 当前待办列表数据
@@ -104,7 +153,8 @@
                     const data = await r.json();
                     if (data.error === 'cookie_expired') {
                         showExpiredAlert();
-                        showEmpty('Cookie 已过期，请点击右上角更新');
+                        showEmpty('请更新平台凭证后重试');
+                        openCookieModal();
                         return;
                     }
                 }
@@ -115,6 +165,7 @@
                     return;
                 }
                 const data = await r.json();
+                document.getElementById('alert-area').innerHTML = '';
                 document.getElementById('meta').textContent = `待办共 ${data.total} 条`;
                 todoItems = data.items;
                 todoItems.forEach(it => { nameById[it.todoId] = it.name; });
@@ -127,7 +178,19 @@
             }
         }
 
+        function filterTodos() {
+            const query = document.getElementById('search').value.toLowerCase();
+            const business = document.getElementById('business-filter').value;
+            const decision = document.getElementById('decision-filter').value;
+            const items = todoItems.filter(it => (it.name || '').toLowerCase().includes(query)
+                && (!business || it.billType === business) && (!decision || it.decision === decision));
+            items.sort((a, b) => (b.applyTime || '').localeCompare(a.applyTime || ''));
+            renderTodos(items);
+        }
         function renderTodos(items) {
+            const counts = {recommend: 0, reject: 0, manual: 0};
+            todoItems.forEach(it => { if (it.decision in counts) counts[it.decision]++; });
+            document.getElementById('summary').textContent = `待办 ${todoItems.length} · 建议同意 ${counts.recommend} · 需退回 ${counts.reject} · 需人工 ${counts.manual}`;
             const list = document.getElementById('todo-list');
             if (!items || items.length === 0) {
                 list.innerHTML = '<div class="empty"><div class="icon">✓</div><div>暂无待办</div></div>';
@@ -309,44 +372,37 @@
             if (el) { el.style.display = 'none'; el.innerHTML = ''; }
         }
 
-        // ===== Cookie 更新 =====
         function openCookieModal() {
-            document.getElementById('cookie-modal').classList.add('show');
+            const dialog = document.getElementById('credential-dialog');
+            if (!dialog.open) dialog.showModal();
         }
-        function closeCookieModal() {
-            document.getElementById('cookie-modal').classList.remove('show');
-        }
-        async function saveCookie() {
-            const cookie = document.getElementById('cookie-input').value.trim();
-            const auth = document.getElementById('auth-input').value.trim();
-            if (!cookie) { alert('请粘贴 Cookie'); return; }
-            const btn = document.getElementById('save-cookie-btn');
-            btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>保存中...';
+        document.getElementById('credential-form').addEventListener('submit', async event => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const button = form.querySelector('[type="submit"]');
+            const message = document.getElementById('credential-message');
+            button.disabled = true;
             try {
-                const r = await fetch('/api/cookie', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'cookie=' + encodeURIComponent(cookie) + '&auth_token=' + encodeURIComponent(auth),
-                });
-                const data = await r.json();
-                if (r.ok) {
-                    closeCookieModal();
-                    alert(data.msg || '已保存');
-                    location.reload();
-                } else {
-                    alert('保存失败：' + (data.error || '未知错误'));
-                }
-            } catch (e) {
-                alert('网络错误：' + e.message);
-            } finally {
-                btn.disabled = false; btn.textContent = '保存';
-            }
-        }
+                const body = new FormData();
+                body.set('auth_token', document.getElementById('platform-auth').value);
+                body.set('cookie', document.getElementById('platform-cookie').value);
+                body.set('app_token', document.getElementById('platform-app-token').value);
+                body.set('agent_id', document.getElementById('platform-agent-id').value);
+                const response = await fetch('/api/cookie', {method:'POST', body});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '连接配置失败');
+                form.reset();
+                message.textContent = '';
+                document.getElementById('credential-dialog').close();
+                await loadTodos();
+            } catch (error) { message.textContent = error.message; }
+            finally { button.disabled = false; }
+        });
 
         // ===== 提示条 =====
         function showExpiredAlert() {
             document.getElementById('alert-area').innerHTML =
-                '<div class="alert alert-warning">⚠ Cookie 已过期，请点击右上角"更新 Cookie"按钮</div>';
+                '<div class="alert alert-warning">请点击“更新平台凭证”，粘贴最新 Authorization 和 Cookie。</div>';
         }
         function showErrorAlert(msg) {
             document.getElementById('alert-area').innerHTML =
@@ -357,7 +413,7 @@
                 '<div class="empty"><div class="icon">○</div><div>' + esc(msg) + '</div></div>';
         }
         function esc(s) {
-            return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         }
 
         // 启动

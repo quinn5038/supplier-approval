@@ -10,13 +10,15 @@
 
 ## 安装
 
+本项目 Windows CPU 环境使用 Python 3.12、PaddlePaddle 2.6.2、PaddleOCR 2.9.1，兼容约束见 `constraints-cpu.txt`。从仓库根目录运行 `powershell -ExecutionPolicy Bypass -File .\setup_paddle.ps1`，会创建独立 `.paddle-venv`、下载官方三组模型并运行阻断网络的真实 OCR 合成图片自检。日常 BAT 会自动使用这套目录，不用手填路径。以下手工安装说明仅用于自定义环境，不要在主 `.venv` 内混装 OCR 依赖。
+
 建议 Python 3.10–3.13。先按 PaddlePaddle 官方说明安装适合本机的 CPU 版 `paddlepaddle`，再执行：
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-首次运行会下载 PaddleOCR 中文模型。若默认模型目录不可写，使用下文的 `--model-dir` 指向可写位置。
+运行时禁止自动下载模型。请提前在受控环境准备与 PaddleOCR 2.x 兼容的模型，放入 `--model-dir` 指定目录的 `det`、`rec`、`cls` 子目录；每个子目录必须包含 `inference.pdmodel` 和 `inference.pdiparams`。缺少文件时直接停止，不处理证件。
 
 ### Windows 10/11 x64
 
@@ -39,7 +41,7 @@ python -c "import paddle; paddle.utils.run_check()"
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-首次执行可把模型缓存放在项目目录，避免公司设备限制用户目录写入：
+提前放好模型后，显式指定本地模型目录：
 
 ```powershell
 python .\idcard_masker.py .\input .\output --output-mode both --model-dir .\paddleocr-models
@@ -48,7 +50,7 @@ python .\idcard_masker.py .\input .\output --output-mode both --model-dir .\padd
 ## 运行
 
 ```bash
-python idcard_masker.py /path/to/input /path/to/output --output-mode both
+python idcard_masker.py /path/to/input /path/to/output --output-mode both --model-dir /path/to/models
 ```
 
 `--output-mode`：
@@ -91,4 +93,4 @@ python idcard_masker.py ./input ./output --dpi 400
 - 图片/PDF 支持 `jpg/jpeg/png/bmp/tif/tiff/webp/pdf`，PDF 页输出为 PNG。
 - 程序会尝试 0°、90°、180°、270° 四个方向，再根据“姓名”“有效期限”等字段判定正反面，因而不依赖上下顺序。
 - 请抽检输出，尤其是严重反光、遮挡、透视变形、分辨率极低、卡片间重叠或文字已经被部分遮盖的样本。
-- 本工具只在本地处理原始证件。首次下载 OCR 模型需要网络；模型下载完成后，证件图像不会上传。
+- 本工具只在本地处理原始证件。运行时只加载预先准备的本地模型；证件图像不会上传。

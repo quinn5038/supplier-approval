@@ -48,6 +48,19 @@ _probe_*.py
 _test_*.py
 debug_*.py
 test_*.py
+!tests/test_*.py
+.venv/
+.paddle-venv/
+models/
+.test-deps/
+.pytest_cache/
+.ruff_cache/
+*.sqlite3
+*.sqlite3-*
+output/
+dist/*
+!dist/SupplierApproval-Setup.exe
+.installer-cache/
 
 # 临时输出
 run_v4_*.txt

@@ -18,7 +18,7 @@
 | **OCR 证件识别** | 身份证用 PaddleOCR 本地离线识别，营业执照/ISO 证书/纳税信用证明用 TextIn 在线 OCR 抽取关键字段（注册资本、有效期、报告年度等）；财报按保密合规不 OCR，改走企查查/人工核验 |
 | **三段式决策** | 自动判定 → 通过 / 退回 / 转人工，硬伤自动退回补材料，模糊项转人工核验，依据明确可追溯 |
 | **审查报告自动生成** | 每家生成结构化 HTML 报告（含审批意见表格 + 可复制纯文本），直接粘贴进 ICCEC 审批框 |
-| **Web UI** | 提供 FastAPI Web 界面，同事浏览器打开即用，无需安装；Cookie 过期在线更新 |
+| **Web UI** | 提供 FastAPI Web 界面，本机启动后浏览器打开即可；待办支持搜索筛选，平台凭证可在网页更新 |
 | **可复用设计** | 不绑定个人账号，规则、缓存、日志分离，可整体移交其他同事；规则引擎可平移到其他类似审批场景 |
 
 ## 三、系统架构
@@ -26,7 +26,7 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Web UI (FastAPI + Jinja2)                  │
-│   待办列表页 ←→ 审批详情页 ←→ Cookie 更新弹窗                    │
+│   待办列表页 ←→ 审批详情页 ←→ 平台凭证弹窗                       │
 └──────────────────────────┬──────────────────────────────────┘
                            │ HTTP 调用
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -72,15 +72,15 @@ supplier_approval_starter/
 
 ### 5.1 环境准备
 
-- Python 3.10+
-- pip 依赖：`pip install -r requirements.txt`（最小化运行，仅 FastAPI/Jinja2/Uvicorn/PyYAML）
+- Windows 10/11 x64 首次使用可从仓库 `dist/SupplierApproval-Setup.exe` 下载并联网安装 Python、项目依赖及 PaddleOCR；安装后双击 `start_webui.bat`，无平台凭证时可用 `start_demo.bat` 查看合成演示。开发者也可通过 `python installer/build_installer.py` 重新构建 EXE
+- 手动安装需 Python 3.12；pip 依赖：`pip install -r requirements.txt`
 
 ### 5.2 配置凭证
 
-1. 复制 `.env.example` 为 `.env`
-2. 打开公司审批页 scpma.iccec.cn → F12 → Network → 手动审批一个供应商
-3. 把抓到的 Cookie、APP_TOKEN、AGENT_ID、CODE 填进 `.env` 对应字段
-4. 填入 TextIn OCR 的 APP_ID 和 SECRET_CODE（textin.com 工作台获取）
+1. 复制 `.env.example` 为 `.env`，按需填写 TextIn OCR 的 APP_ID 和 SECRET_CODE（textin.com 工作台获取）
+2. 浏览器登录公司审批页 scpma.iccec.cn → F12 → Network，从请求头复制 Authorization 和 Cookie
+3. 在 Web UI 右上角点击"更新平台凭证"并粘贴上述两项；仅在当前服务进程内有效，关闭服务后需重新粘贴
+4. 待办或详情无法读取时，可在弹窗的"高级配置"中按需填写 APP_TOKEN、AGENT_ID；已有 `.env` 配置仍兼容，CODE 当前未参与请求
 
 ### 5.3 命令行运行（批量处理）
 
@@ -91,16 +91,14 @@ python auto_approve.py
 
 ### 5.4 Web UI 运行（推荐，便于同事使用）
 
-```bash
-# 启动 Web 服务
-cd web
-uvicorn app:app --host 0.0.0.0 --port 8000
+```bat
+start_webui.bat
 ```
 
-浏览器打开 `http://<本机IP>:8000` 即可使用。同事无需安装任何软件，浏览器打开链接即可：
-- 首页展示当前待办列表，每家供应商一个"审批"按钮
-- 点击"审批"按钮，系统自动跑完整流水线并展示审查报告 + 审批意见
-- Cookie 过期时点击右上角"更新Cookie"按钮在线更新
+浏览器打开 `http://127.0.0.1:8000` 即可使用。默认便捷模式仅供本机访问：
+- 首页展示当前待办列表，可按供应商名称或待办 ID、业务类型和决策状态筛选
+- 点击"后台审批"后，系统生成审查报告 + 审批意见，供人工复核
+- 点击右上角"启动检查"查看本机配置；点击"更新平台凭证"粘贴 Authorization 和 Cookie
 
 ### 5.5 离线材料脱敏助手（合规保障）
 
@@ -189,8 +187,8 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
 
 ## 八、安全与合规
 
-- **DRY_RUN 安全开关**：默认 `true`，所有审批只模拟不真回写，确认无误后改 `false` 才真审批
-- **凭证隔离**：所有 Cookie/Token 存 `.env` 文件（已被 `.gitignore` 排除），不会进入代码仓库
+- **DRY_RUN 安全开关**：默认 `true`；Web 流水线始终关闭真实回写，命令行真实提交还需额外开关及人工确认
+- **凭证隔离**：Web UI 粘贴的凭证只保留在当前进程内存中，不写 `.env`；已有 `.env` 仍兼容读取，且已被 `.gitignore` 排除
 - **敏感数据保护**：供应商缓存、OCR 结果、企查查数据均被 `.gitignore` 排除，不提交到仓库
 - **操作日志**：所有审批动作写日志 `approval_YYYYMMDD.log`，可追溯谁批的、依据哪条、几点几分
 - **保守决策**：OCR 判定的 fail 归入"转人工"而非直接 reject，避免 OCR 误判导致错杀
