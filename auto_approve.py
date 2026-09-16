@@ -743,8 +743,11 @@ def classify_uploaded_materials(file_list):
         file_desc = str(f.get("fileDesc", ""))
         file_summ = str(f.get("fileSumm", ""))
         
-        # 合并所有文字用于关键词搜索
-        all_text = f"{type_name} {file_name} {file_desc} {file_summ}"
+        # 合并文件名/说明用于关键词搜索
+        # 2026-09-16 修复：排除 type_name——栏位名「生产许可证图片」含「生产许可」，
+        # 会让 KEYWORD_MAP 把错传到该栏位的营业执照/ISO 误判成 production_license，
+        # 导致 C1_05 误判「通过」。栏位名已由 FILEINFO_TYPE_MAP 精确匹配处理，无需再进关键词。
+        all_text = f"{file_name} {file_desc} {file_summ}"
         
         classified = set()
         
@@ -880,7 +883,8 @@ def _ensure_inspection_fields(supplier, entry=None):
         name = supplier.get("name", "")
         scope = supplier.get("busi_scope", "") or ""
         kw = ("检验检测", "检测服务", "检验服务", "检定", "校准",
-              "实验室", "测试中心", "检验机构", "检测机构")
+              "实验室认可", "检测实验室", "检验实验室", "实验室检测", "实验室检验",
+              "测试中心", "检验机构", "检测机构")
         supplier["is_inspection"] = (
             any(k in name for k in ("检验", "检测", "检定", "校准", "实验室"))
             or any(k in scope for k in kw))
@@ -2012,9 +2016,18 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
 
         original = dict(c)
         prior = previous.get(c.get("id"))
-        checks = r.get("checks") or {}
-        issues = r.get("issues") or []
+        checks = dict(r.get("checks") or {})
+        issues = list(r.get("issues") or [])
         fields = r.get("fields") or {}
+
+        # C1_05 防御性校验：旧版 OCR 缓存只有「在有效期内=True」，可能实际
+        # 来自同一 PDF 中的营业执照或 ISO 证书。没有明确确认材料类型时最多
+        # 转人工，绝不能仅凭任意证书日期判为生产许可证通过。
+        if doc_type == "production_license" and checks.get("材料类型正确") is not True:
+            if "材料类型正确" not in checks:
+                checks["材料类型正确"] = None
+            if checks.get("材料类型正确") is not False:
+                issues.append("未完成生产许可证/3C强制认证材料类型核验，需重新提取或人工核验")
 
         # 通用：有明确 false（不符/过期）→ fail；有 issues 但无 false（识别失败/需人工）→ manual；
         # 全 pass → pass；混合 → partial；无 checks → pending

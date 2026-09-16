@@ -81,6 +81,82 @@ def test_ocr_does_not_erase_public_conflict():
     assert "企查查法人冲突" in result[0]["detail"]
 
 
+def test_production_license_rejects_business_license_plus_iso_date():
+    detail = [
+        {"page_id": 1, "text": "营业执照 名称 合成铁路器材有限公司"},
+        {"page_id": 2, "text": "质量管理体系认证证书 ISO 9001 有效期至：2099年06月04日"},
+    ]
+    extracted = tp.extract(
+        "production_license", "营业执照\n质量管理体系认证证书\n有效期至：2099年06月04日",
+        {"full_name": "合成铁路器材有限公司"}, detail)
+    assert extracted["checks"]["材料类型正确"] is False
+    checklist, _ = aa.enhance_checklist_with_textin(
+        [{"id": "C1_05", "name": "生产许可证", "status": "pending", "detail": "待核验"}],
+        {}, {"production_license": extracted})
+    assert checklist[0]["status"] == "fail"
+    assert "ISO 9001" in checklist[0]["detail"]
+
+
+@pytest.mark.parametrize("certificate", [
+    "全国工业产品生产许可证 许可证编号：XK00-001-12345",
+    "中国国家强制性产品认证证书 CCC认证 证书编号：2026999999999999",
+])
+def test_real_production_or_ccc_certificate_can_pass(certificate):
+    text = f"{certificate} 持证单位 合成铁路器材有限公司 有效期至：2099年12月31日"
+    extracted = tp.extract(
+        "production_license", text, {"full_name": "合成铁路器材有限公司"},
+        [{"page_id": 1, "text": text}])
+    assert extracted["checks"] == {
+        "材料类型正确": True, "持证主体一致": True, "在有效期内": True}
+    checklist, _ = aa.enhance_checklist_with_textin(
+        [{"id": "C1_05", "name": "生产许可证", "status": "pending", "detail": "待核验"}],
+        {}, {"production_license": extracted})
+    assert checklist[0]["status"] == "pass"
+
+
+def test_expired_production_license_fails():
+    text = ("全国工业产品生产许可证 持证单位 合成铁路器材有限公司 "
+            "有效期至：2020年01月01日")
+    extracted = tp.extract(
+        "production_license", text, {"full_name": "合成铁路器材有限公司"},
+        [{"page_id": 1, "text": text}])
+    assert extracted["checks"]["材料类型正确"] is True
+    assert extracted["checks"]["在有效期内"] is False
+
+
+def test_legacy_production_license_cache_cannot_pass_on_date_alone():
+    legacy = {"fields": {"有效期至": "2099-12-31"},
+              "checks": {"在有效期内": True}, "issues": []}
+    checklist, _ = aa.enhance_checklist_with_textin(
+        [{"id": "C1_05", "name": "生产许可证", "status": "pending", "detail": "待核验"}],
+        {}, {"production_license": legacy})
+    assert checklist[0]["status"] == "manual"
+    assert checklist[0]["status"] != "pass"
+
+
+def test_after_sales_statement_uses_recent_signature_date():
+    from datetime import timedelta
+    recent = (date.today() - timedelta(days=20)).strftime("%Y年%m月%d日")
+    extracted = tp.extract(
+        "after_sales_cert",
+        f"售后服务证明函\n我公司提供售后服务保障。\n日期：{recent}")
+    assert extracted["checks"]["材料类型正确"] is True
+    assert extracted["checks"]["落款时间在3个月内"] is True
+
+
+def test_after_sales_certificate_uses_expiry_date():
+    extracted = tp.extract(
+        "after_sales_cert",
+        "商品售后服务评价体系认证 售后服务认证证书 五星级 有效期至：2099年12月31日")
+    assert extracted["checks"]["材料类型正确"] is True
+    assert extracted["checks"]["在有效期内"] is True
+
+
+def test_unrelated_file_cannot_pass_as_after_sales_material():
+    extracted = tp.extract("after_sales_cert", "营业执照 注册资本1000万元")
+    assert extracted["checks"]["材料类型正确"] is False
+
+
 def test_clean_delete_reports_size(tmp_path, monkeypatch):
     monkeypatch.setattr(tp, "FILES_DIR", tmp_path)
     folder = tmp_path / "1"
