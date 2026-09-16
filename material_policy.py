@@ -4,8 +4,11 @@ import json
 import re
 from pathlib import Path
 
+# 售后认证/证明函不含身份证、财报、银行账号等受限信息，按 A07 规则允许
+# TextIn 核验。文件名或元数据一旦命中 SENSITIVE_NAME，仍由下方否决。
 PUBLIC_TYPES = frozenset({"business_license", "iso9001", "iso14001", "iso45001",
-                          "tax_credit", "tax_cert", "production_license"})
+                          "tax_credit", "tax_cert", "production_license",
+                          "after_sales_cert", "after_sales_statement"})
 SENSITIVE_NAME = re.compile(r"身份证|证件|财务|财报|审[计记]|资产负债|利润表|现金流|银行|账号|保密|涉密|id.?card", re.I)
 
 

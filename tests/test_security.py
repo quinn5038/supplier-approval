@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import time
+from datetime import date, timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -26,6 +27,15 @@ from web.app import app
 ])
 def test_sensitive_policy(types, name):
     assert not is_public_material(name, types)
+
+
+@pytest.mark.parametrize("material_type,name", [
+    ("after_sales_cert", "售后服务证明函.pdf"),
+    ("after_sales_statement", "售后服务承诺书.pdf"),
+])
+def test_after_sales_material_is_public_unless_sensitive(material_type, name):
+    assert is_public_material(name, [material_type])
+    assert not is_public_material("含财务报表的售后服务证明.pdf", [material_type])
 
 
 @pytest.mark.parametrize("field", ["typeName", "desc"])
@@ -89,6 +99,18 @@ def test_desens_failure_stops_network(pipeline, monkeypatch):
     with pytest.raises(RuntimeError, match="脱敏失败"):
         tp.run_parse("1")
     send.assert_not_called()
+
+
+def test_after_sales_material_reaches_ocr_and_uses_statement_rule(pipeline, monkeypatch):
+    pipeline([("售后服务证明函.pdf", ["after_sales_cert"])])
+    recent = (date.today() - timedelta(days=20)).strftime("%Y年%m月%d日")
+    send = Mock(return_value=(f"售后服务证明函\n提供售后服务保障\n日期：{recent}", []))
+    monkeypatch.setattr(tp, "parse_file_textin", send)
+    tp.run_parse("1")
+    send.assert_called_once()
+    result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["after_sales_cert"]
+    assert result["checks"]["材料类型正确"] is True
+    assert result["checks"]["落款时间在3个月内"] is True
 
 
 def test_multiple_materials_and_hash_refresh(pipeline, monkeypatch):

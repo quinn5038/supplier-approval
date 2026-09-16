@@ -51,6 +51,18 @@ log = logging.getLogger("textin-pipeline")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 
+# 2026-09-15 降噪：ICCEC 下载接口返回的响应头 Content-Type 是 multipart 但缺 boundary，
+# urllib3 的 assert_header_parsing 会抛 HeaderParsingError，并以 exc_info=True 打印
+# 「WARNING + 完整堆栈」（很吵）。该异常被 urllib3 内部 catch 后继续正常下载，文件无损。
+# 这里过滤掉这条诊断性告警，真正的网络错误/超时仍正常显示。
+class _SuppressHeaderParse(logging.Filter):
+    def filter(self, record):
+        return "Failed to parse headers" not in record.getMessage()
+
+
+logging.getLogger("urllib3").addFilter(_SuppressHeaderParse())
+
+
 BASE = Path(__file__).parent
 FILES_DIR = BASE / "files_cache"
 FILES_DESENS_DIR = BASE / "files_cache_desens"  # 2026-09-04 保密合规：脱敏后给 OCR 用的中间目录
@@ -846,6 +858,99 @@ def extract_generic_cert(text):
     return {"fields": fields, "checks": checks, "issues": issues}
 
 
+_PRODUCTION_LICENSE_MARKERS = (
+    ("工业产品生产许可证", ("全国工业产品生产许可证", "工业产品生产许可证")),
+    ("安全生产许可证", ("安全生产许可证",)),
+    ("食品生产许可证", ("食品生产许可证",)),
+    ("危险化学品生产许可证", ("危险化学品生产许可证",)),
+    ("特种设备生产许可证", ("特种设备生产许可证",)),
+    ("3C强制认证证书", ("中国国家强制性产品认证证书", "强制性产品认证证书",
+                         "CCC认证", "3C认证")),
+)
+
+
+def _production_license_pages(text, detail):
+    """Return page-sized OCR text blocks so dates cannot leak across documents."""
+    pages = {}
+    if isinstance(detail, list):
+        for item in detail:
+            if not isinstance(item, dict) or not item.get("text"):
+                continue
+            page_id = item.get("page_id", 0)
+            pages.setdefault(page_id, []).append(str(item["text"]))
+    blocks = ["\n".join(parts) for _, parts in sorted(pages.items(), key=lambda x: str(x[0]))]
+    return blocks or [str(text or "")]
+
+
+def extract_production_license(text, supplier=None, detail=None):
+    """Validate production/CCC certificate identity before checking its expiry.
+
+    Upload position, filename and an unrelated certificate date are only routing
+    hints.  A pass requires positive certificate wording on the same OCR page as
+    the validity evidence; this prevents a business licence + ISO PDF from
+    borrowing the ISO expiry date and passing C1_05.
+    """
+    supplier = supplier or {}
+    matched = []
+    for block in _production_license_pages(text, detail):
+        normalised = _norm(_pre(block))
+        for label, markers in _PRODUCTION_LICENSE_MARKERS:
+            if any(marker.lower() in normalised.lower() for marker in markers):
+                matched.append((label, normalised))
+                break
+
+    if not matched:
+        normalised = _norm(_pre(text))
+        actual = []
+        if "营业执照" in normalised:
+            actual.append("营业执照")
+        if any(marker in normalised for marker in
+               ("质量管理体系认证证书", "ISO9001", "ISO9001:2015")):
+            actual.append("ISO 9001证书")
+        if any(marker in normalised for marker in
+               ("环境管理体系认证证书", "ISO14001")):
+            actual.append("ISO 14001证书")
+        if any(marker in normalised for marker in
+               ("职业健康安全管理体系认证证书", "ISO45001")):
+            actual.append("ISO 45001证书")
+        found = "、".join(dict.fromkeys(actual)) or "其他材料"
+        return {
+            "fields": {"证书类型": None, "有效期至": None},
+            "checks": {"材料类型正确": False, "在有效期内": None},
+            "issues": [f"上传材料实际为{found}，应为生产许可证或3C强制认证证明"],
+        }
+
+    certificate_type, certificate_text = matched[0]
+    fields = {"证书类型": certificate_type}
+    checks = {"材料类型正确": True}
+    issues = []
+
+    number = re.search(r"(?:许可证|证书)编号[:：]?([A-Z0-9\-（）()]{5,40})",
+                       certificate_text, re.I)
+    if number:
+        fields["证书编号"] = number.group(1)
+
+    supplier_name = _norm(supplier.get("full_name") or supplier.get("name"))
+    if supplier_name:
+        holder_matches = supplier_name in certificate_text
+        checks["持证主体一致"] = holder_matches if holder_matches else None
+        if not holder_matches:
+            issues.append("未能确认生产许可/强制认证证书持证主体与供应商一致，需人工核验")
+
+    exp, longterm = _valid_until(certificate_text)
+    fields["有效期至"] = str(exp) if exp else ("长期" if longterm else None)
+    if longterm:
+        checks["在有效期内"] = True
+    elif exp:
+        checks["在有效期内"] = exp >= date.today()
+        if exp < date.today():
+            issues.append(f"{certificate_type}已过期（{exp}）")
+    else:
+        checks["在有效期内"] = None
+        issues.append(f"{certificate_type}未识别到有效期，需人工核验")
+    return {"fields": fields, "checks": checks, "issues": issues}
+
+
 def extract_self_statement(text):
     """供应商自拟文件（售后服务承诺书等）→ 落款时间在3个月内即有效
     （9/2 确认：自拟文件不看过期概念，只看落款新鲜度）"""
@@ -882,6 +987,35 @@ def extract_self_statement(text):
     return {"fields": fields, "checks": checks, "issues": issues}
 
 
+def extract_after_sales(text):
+    """A07：机构五星认证看有效期；厂家证明函/承诺书看落款三个月。"""
+    normalised = _norm(_pre(text))
+    cert_markers = (
+        "售后服务认证证书", "商品售后服务评价体系认证", "五星级售后服务认证",
+        "五星售后服务认证", "售后服务五星认证",
+    )
+    statement_markers = ("售后服务", "售后保障", "售后承诺")
+
+    if any(marker in normalised for marker in cert_markers):
+        result = extract_generic_cert(text)
+        result["fields"] = {"材料类型": "售后服务认证证书", **result.get("fields", {})}
+        result["checks"] = {"材料类型正确": True, **result.get("checks", {})}
+        return result
+
+    if any(marker in normalised for marker in statement_markers):
+        result = extract_self_statement(text)
+        result["fields"] = {"材料类型": "厂家售后服务证明函/承诺书",
+                            **result.get("fields", {})}
+        result["checks"] = {"材料类型正确": True, **result.get("checks", {})}
+        return result
+
+    return {
+        "fields": {"材料类型": None},
+        "checks": {"材料类型正确": False},
+        "issues": ["上传材料未识别到售后服务认证、证明或承诺内容，应提交售后服务五星认证或厂家证明函"],
+    }
+
+
 # 材料类型 → 抽取器
 def extract(doc_type, text, supplier=None, detail=None):
     if doc_type == "business_license":
@@ -896,8 +1030,10 @@ def extract(doc_type, text, supplier=None, detail=None):
         return extract_iso_cert(text, supplier, doc_type[3:])
     if doc_type == "authorization":
         return extract_authorization(text, supplier)
-    if doc_type == "after_sales_statement":
-        return extract_self_statement(text)
+    if doc_type == "production_license":
+        return extract_production_license(text, supplier, detail)
+    if doc_type in ("after_sales_cert", "after_sales_statement"):
+        return extract_after_sales(text)
     return extract_generic_cert(text)
 
 
