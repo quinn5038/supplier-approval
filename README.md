@@ -154,8 +154,8 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
 | 环境变量 | 含义 | 默认值 |
 |---|---|---|
 | `IDCARD_MASKER_SCRIPT` | 离线脱敏脚本路径 | `offline_desens/idcard_masker.py`（项目内，随仓库分发） |
-| `PADDLE_PYTHON` | PaddleOCR 独立 venv 的 python | `D:\WorkBuddy\idcard_env311\Scripts\python.exe` |
-| `PADDLE_MODEL_DIR` | 模型缓存目录 | `D:\WorkBuddy\paddleocr-models` |
+| `PADDLE_PYTHON` | PaddleOCR 独立 venv 的 python | `.paddle-venv\Scripts\python.exe` |
+| `PADDLE_MODEL_DIR` | 模型缓存目录 | `models\paddleocr` |
 
 ## 六、工作流程
 
