@@ -190,6 +190,55 @@ def test_report_escapes_attributes():
     assert "<" not in text and '"' not in text and "'" not in text
 
 
+def test_report_lists_every_passed_check_in_green():
+    stage2 = {"name": "合成公司", "decision": "recommend", "checklist": [
+        {"id": "A03", "name": "纳税信用等级", "status": "pass", "detail": "通过"}]}
+    textin = {"1": {"tax_credit": {
+        "fields": {"纳税信用级别": "A", "评价年度": "2025"},
+        "checks": {"C级及以上": True, "评价年度=2025": True}, "issues": []}}}
+    cache = {"1": {"supplier": {}, "materials_detail": [
+        {"fileName": "纳税证明.pdf", "types": ["tax_credit"]}]}}
+    rendered = gen_stage2_report.render_supplier("1", stage2, textin, cache)
+    assert "核验通过：C级及以上、评价年度=2025" in rendered
+    assert "class='ok-mini'" in rendered
+
+
+def test_report_renders_aggregated_business_license_checks():
+    stage2 = {"name": "北京昌佳泵业有限公司", "decision": "recommend", "checklist": [
+        {"id": "A01", "name": "法律主体资格", "status": "pass", "detail": "OCR核验通过"}]}
+    textin = {"1": {"business_license": {
+        "fields": {"附件1(license-a.jpg) 名称": "北京昌佳泵业有限公司"},
+        "checks": {
+            "附件1(license-a.jpg) 信用代码一致": True,
+            "附件1(license-a.jpg) 名称一致": True,
+            "附件2(license-b.jpg) 信用代码一致": True,
+            "附件2(license-b.jpg) 名称一致": True,
+        }, "issues": []}}}
+    cache = {"1": {"supplier": {}, "materials_detail": [
+        {"fileName": "license-a.jpg", "types": ["business_license"]},
+        {"fileName": "license-b.jpg", "types": ["business_license"]}]}}
+    rendered = gen_stage2_report.render_supplier("1", stage2, textin, cache)
+    assert "无核验数据" not in rendered
+    assert "附件1 信用代码一致、名称一致；附件2 信用代码一致、名称一致" in rendered
+    assert rendered.count("附件1 ") == 1
+    assert rendered.count("附件2 ") == 1
+
+
+def test_final_opinion_contains_every_missing_material():
+    stage2 = {"name": "合成公司", "decision": "reject", "checklist": [
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明（须为国家税务总局网站或信用中国下载的正规文件，C级及以上）"},
+        {"id": "X99", "name": "新增资质", "status": "fail",
+         "detail": "缺少新增专项资质证明"},
+    ]}
+    opinion = gen_opinion.build_opinion("1", stage2, {}, {"1": {"supplier": {}}})
+    assert opinion.startswith("退回。1. ")
+    assert "请补充资质文件：" not in opinion
+    assert "缺少纳税信用等级证明" in opinion
+    assert "缺少新增专项资质证明" in opinion
+    assert opinion.index("缺少纳税信用等级证明") < opinion.index("缺少新增专项资质证明")
+
+
 def test_demo_three_decisions():
     from demo import cases
     results = cases()
