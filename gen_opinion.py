@@ -271,20 +271,25 @@ def build_opinion(tid, s2, textin, cache):
         for cid, cname, desc in supplement_fails:
             if cid in iso_fail_map:
                 continue
-            tmpl = SUPPLEMENT_TEMPLATES.get(cid)
-            if tmpl:
-                supplement_items.append(tmpl)
+            # 优先沿用 checklist 的完整缺失原因（含条件说明）；没有标准模板的
+            # 新审核项也必须进入最终意见，避免表格显示缺失而页尾漏列。
+            if str(desc).startswith("缺少"):
+                supplement_items.append(str(desc))
+            else:
+                tmpl = SUPPLEMENT_TEMPLATES.get(cid)
+                supplement_items.append(
+                    "缺少" + (tmpl or str(desc).strip() or f"{cname}相关材料"))
         # 9/11：A08 财报未传 + 企查查无数据 → 纳入补充清单，与其他项一起编号
         # （放在「补充后重新提交」前，不再单独成行）
         if a08_needs_financial:
-            supplement_items.append("上年度经审计的财报（2026年须提交2025年财报）")
+            supplement_items.append("缺少上年度经审计的财报（2026年须提交2025年财报）")
         # 去重保序
         seen = set()
         dedup = [x for x in supplement_items
                  if not (x in seen or seen.add(x))]
         if dedup:
             items_str = "；".join(f"{i+1}. {x}" for i, x in enumerate(dedup))
-            lines.append(f"退回。请补充资质文件：{items_str}。补充后重新提交。")
+            lines.append(f"退回。{items_str}。补充后重新提交。")
         else:
             lines.append("退回。具体见上方审查报告。")
         # 其他异常（非缺材料的 fail + 待人工项）→ 一并列出，让供应商知道所有问题

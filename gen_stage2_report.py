@@ -69,6 +69,30 @@ def esc(s):
     return html.escape(str(s or ""), quote=True)
 
 
+def _short_check_label(key):
+    """Drop long attachment filenames while retaining attachment identity."""
+    return re.sub(r"^附件(\d+)\([^)]*\)\s*", r"附件\1 ", str(key or ""))
+
+
+def _passed_checks_html(checks, described=None):
+    """Render every successful OCR check as concise green text."""
+    described = described or set()
+    groups = {}
+    for key, value in checks.items():
+        if value is not True or key in described:
+            continue
+        label = _short_check_label(key)
+        attachment = re.match(r"^(附件\d+)\s+(.+)$", label)
+        group, item = attachment.groups() if attachment else ("", label)
+        groups.setdefault(group, []).append(item)
+    if not groups:
+        return ""
+    labels = [(group + " " if group else "") + "、".join(items)
+              for group, items in groups.items()]
+    return ("<span class='ok-mini'>核验通过："
+            + esc("；".join(labels)) + "</span>")
+
+
 def render_supplier(tid, s2, textin, cache):
     name = s2.get("name") or tid
     bill = s2.get("billName") or ""
@@ -206,6 +230,7 @@ def render_supplier(tid, s2, textin, cache):
                     fields = td.get("fields") or {}
                     checks = td.get("checks") or {}
                     iss = td.get("issues") or []
+                    described_true_checks = set()
                     # 9/6：核验结果列——ISO 证书显示有效期，营业执照显示法人差异
                     if doc_type in ("iso9001", "iso14001", "iso45001"):
                         org = fields.get("获证组织")
@@ -218,6 +243,7 @@ def render_supplier(tid, s2, textin, cache):
                             if valid is True:
                                 check_detail_parts.append(
                                     f"<span class='ok-mini'>有效期至 {esc(exp)}，在有效期内</span>")
+                                described_true_checks.add("在有效期内")
                             elif valid is False:
                                 check_detail_parts.append(
                                     f"<span class='ng-mini'>有效期至 {esc(exp)}，已过期</span>")
@@ -249,19 +275,6 @@ def render_supplier(tid, s2, textin, cache):
                         if f_cap:
                             check_detail_parts.append(
                                 f"<span class='kv'><span class='k'>注册资本</span>=<span class='v'>{esc(str(f_cap))}万</span></span>")
-                        # 正向「一致」结论（此前只在 False 时显示「不一致」，True 时不显示）
-                        if checks.get("信用代码一致") is True:
-                            check_detail_parts.append(
-                                "<span class='ok-mini'>信用代码与系统一致</span>")
-                        if checks.get("名称一致") is True:
-                            check_detail_parts.append(
-                                "<span class='ok-mini'>名称与系统一致</span>")
-                        if checks.get("法人一致") is True:
-                            check_detail_parts.append(
-                                "<span class='ok-mini'>法定代表人与系统一致</span>")
-                        if checks.get("注册资本一致") is True:
-                            check_detail_parts.append(
-                                "<span class='ok-mini'>注册资本与系统一致</span>")
                         if checks.get("法人一致") is False:
                             sys_legal = supplier.get("legal_person", "")
                             check_detail_parts.append(
@@ -290,16 +303,16 @@ def render_supplier(tid, s2, textin, cache):
                                 f"<span class='issue'>{esc(iss[0])}</span>"
                             )
                         elif checks:
-                            ok = sum(1 for cv in checks.values() if cv is True)
                             ng = sum(1 for cv in checks.values() if cv is False)
-                            if ng == 0:
-                                check_detail_parts.append(
-                                    f"<span class='ok-mini'>核验 {ok} 项全通过</span>"
-                                )
-                            else:
+                            if ng:
                                 check_detail_parts.append(
                                     f"<span class='ng-mini'>{ng} 项不符</span>"
                                 )
+                    # 所有材料统一列出每个 True 核验项；多附件聚合键会压缩为
+                    # 「附件1 名称一致」，避免文件名过长，同时不遗漏任何通过项。
+                    passed_html = _passed_checks_html(checks, described_true_checks)
+                    if passed_html:
+                        check_detail_parts.append(passed_html)
                 elif td and td.get("_deprecated"):
                     # 财报 OCR 已禁用：note 已在 financial_report 分支写清，不再追加
                     check_detail_parts.append(
