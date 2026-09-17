@@ -85,16 +85,18 @@ window.fetch = (url, options = {}) => {
             document.getElementById('step-text').textContent = '正在重新拉取供应商数据...';
             try {
                 const r = await fetch('/api/approve/' + TODO_ID, { method: 'POST' });
-                if (r.status === 409) {
-                    alert('正在处理中，请勿重复点击');
-                    return;
+                if (!r.ok && r.status !== 409) {
+                    const data = await r.json();
+                    throw new Error(data.msg || data.error || '无法启动，请检查登录状态或权限');
                 }
-                if (!r.ok) throw new Error("无法启动，请检查登录状态或权限");
                 // 重启轮询
                 if (pollTimer) clearInterval(pollTimer);
                 pollTimer = setInterval(pollStatus, 2000);
+                await pollStatus();
             } catch (e) {
-                alert('网络错误：' + e.message);
+                document.getElementById('progress-area').style.display = 'none';
+                document.getElementById('error-area').style.display = 'block';
+                document.getElementById('error-msg').textContent = '⚠ ' + e.message;
             }
         }
 
@@ -116,8 +118,13 @@ window.fetch = (url, options = {}) => {
                     document.getElementById('error-msg').textContent = '⚠ ' + (data.error || '处理失败');
                     if (data.step === 'cookie_expired') {
                         document.getElementById('error-msg').innerHTML +=
-                            '<br><br>请<a href="/">返回列表</a>，在本机更新平台凭证并重启服务后重试。';
+                            '<br><br>请<a href="/">返回列表</a>，更新平台凭证后重试，无需重启服务。';
                     }
+                    const retry = document.createElement('button');
+                    retry.className = 'btn btn-outline';
+                    retry.textContent = '重新审批';
+                    retry.onclick = reRunApprove;
+                    document.getElementById('error-msg').appendChild(retry);
                 }
             } catch (e) {
                 console.error('状态查询失败:', e);
@@ -167,6 +174,15 @@ window.fetch = (url, options = {}) => {
         // 页面加载时：直接查是否已有报告
         (async function init() {
             try {
+                const statusResponse = await fetch('/api/status/' + TODO_ID);
+                if (!statusResponse.ok) throw new Error('无法查询任务状态，请检查 WebUI 登录状态');
+                const status = await statusResponse.json();
+                if (status.status === 'running' || status.status === 'error') {
+                    document.getElementById('progress-area').style.display = 'block';
+                    if (status.status === 'running') pollTimer = setInterval(pollStatus, 2000);
+                    await pollStatus();
+                    return;
+                }
                 const rr = await fetch('/api/report/' + TODO_ID);
                 if (rr.ok) {
                     // 已有结果，直接展示

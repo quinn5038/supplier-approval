@@ -130,6 +130,7 @@ window.fetch = (url, options = {}) => {
         let pollTimer = null;        // 批量轮询定时器
         const nameById = {};         // todoId → 供应商名称
         const errorById = {};        // todoId → 失败原因（点失败按钮时展示）
+        const taskById = {};         // 任务状态独立于搜索结果和 DOM 保存
 
         // ===== 使用说明卡折叠 =====
         function toggleGuide() {
@@ -186,6 +187,7 @@ window.fetch = (url, options = {}) => {
                 && (!business || it.billType === business) && (!decision || it.decision === decision));
             items.sort((a, b) => (b.applyTime || '').localeCompare(a.applyTime || ''));
             renderTodos(items);
+            refreshAllStatus();
         }
         function renderTodos(items) {
             const counts = {recommend: 0, reject: 0, manual: 0};
@@ -217,7 +219,7 @@ window.fetch = (url, options = {}) => {
                     <div class="col-time">${esc(it.applyTimeShort) || '-'}</div>
                     <div class="col-action">
                         <div class="action-stack">
-                            ${it.hasResult
+                            ${it.hasResult && !['running', 'error'].includes(taskById[it.todoId]?.status)
                                 ? `<a href="/approve/${esc(it.todoId)}${it.name ? '?name=' + encodeURIComponent(it.name) : ''}" class="btn btn-done" target="_blank" rel="noopener">查看结果</a>`
                                 : `<button class="btn btn-primary" id="btn-${esc(it.todoId)}"
                                     onclick="startApprove('${esc(it.todoId)}')">后台审批</button>`}
@@ -237,12 +239,26 @@ window.fetch = (url, options = {}) => {
                     </div>
                 </div>
             `).join('');
+            applyTaskStatuses();
+        }
+
+        function applyTaskStatuses() {
+            for (const [tid, st] of Object.entries(taskById)) {
+                if (st.status === 'running') showProgressWidget(tid, st.progress || 0, st.step || '处理中');
+                else if (st.status === 'done') setBtnDone(tid);
+                else if (st.status === 'error') {
+                    setBtnError(tid, '审批失败·点击重试');
+                    showFailReason(tid, st.error || st.step || '');
+                }
+            }
         }
 
         // ===== 后台审批：状态机 idle → running → done / error =====
         async function startApprove(todoId) {
             const btn = document.getElementById('btn-' + todoId);
             if (!btn || btn.disabled) return;
+            if (taskById[todoId]?.status === 'running') return;
+            taskById[todoId] = {status: 'running', progress: 0, step: '正在启动...'};
             clearFailReason(todoId);
             btn.disabled = true;
             btn.classList.remove('btn-error');
@@ -269,6 +285,7 @@ window.fetch = (url, options = {}) => {
                 }
                 ensurePolling();
             } catch (e) {
+                taskById[todoId] = {status: 'error', error: e.message};
                 setBtnError(todoId, '启动失败，点击重试');
             }
         }
@@ -285,20 +302,10 @@ window.fetch = (url, options = {}) => {
                 const r = await fetch('/api/status_all');
                 if (!r.ok) return;
                 const all = await r.json();
-                let hasRunning = false;
-                for (const [tid, st] of Object.entries(all)) {
-                    const btn = document.getElementById('btn-' + tid);
-                    if (!btn) continue;   // 该行不在当前列表（翻页/已处理）
-                    if (st.status === 'running') {
-                        hasRunning = true;
-                        updateProgressUI(tid, st.progress || 0, st.step || '处理中');
-                    } else if (st.status === 'done') {
-                        setBtnDone(tid);
-                    } else if (st.status === 'error') {
-                        setBtnError(tid, '审批失败');
-                        showFailReason(tid, st.error || st.step || '');
-                    }
-                }
+                Object.assign(taskById, all);
+                const hasRunning = Object.values(taskById).some(st => st.status === 'running');
+                applyTaskStatuses();
+                if (hasRunning && !pollTimer) pollTimer = setInterval(refreshAllStatus, 3000);
                 if (!hasRunning && pollTimer) {
                     clearInterval(pollTimer);
                     pollTimer = null;
@@ -322,6 +329,7 @@ window.fetch = (url, options = {}) => {
             const btn = document.getElementById('btn-' + todoId);
             if (!btn) return;
             btn.disabled = false;
+            btn.style.display = '';
             btn.classList.remove('btn-running');
             btn.classList.add('btn-error');
             btn.textContent = msg || '失败·点击重试';
@@ -334,6 +342,7 @@ window.fetch = (url, options = {}) => {
         function showProgressWidget(todoId, pct, stepText) {
             const btn = document.getElementById('btn-' + todoId);
             const w = document.getElementById('widget-' + todoId);
+            if (btn) btn.disabled = true;
             if (btn) btn.style.display = 'none';
             if (!w) return;
             w.style.display = 'flex';

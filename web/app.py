@@ -126,8 +126,16 @@ def _run_pipeline_for_one(todo_id: str):
             files_dir = BASE_DIR / "files_cache" / str(todo_id)
             files_dir.mkdir(parents=True, exist_ok=True)
             _tp.download_supplier_files(str(todo_id), delay=2.0)
-        except Exception:
-            raise RuntimeError("材料下载失败，停止处理并转人工核验") from None
+        except Exception as exc:
+            from auto_approve import SessionExpiredError
+            if isinstance(exc, SessionExpiredError):
+                _update("cookie_expired", status="error",
+                        error="招采平台登录凭证已过期，材料下载未完成。请返回首页更新平台凭证后重新审批。")
+                return
+            log.error("材料下载失败 todo=%s exception=%s", todo_id, type(exc).__name__)
+            _update("download_failed", status="error",
+                    error=f"材料下载失败（{type(exc).__name__}），请检查平台连接后重新审批；本次未生成新报告。")
+            return
 
         _update("正在 OCR 识别证件文件（TextIn）...", progress=70)
         # 9/6 修复：必须传 parse <todo_id> 单家过滤——不带参数会 OCR 全部
@@ -351,6 +359,7 @@ async def api_status_all():
     with _task_lock:
         return {tid: {"status": st.get("status"),
                       "step": st.get("step"),
+                      "error": st.get("error"),
                       "progress": st.get("progress", 0)}
                 for tid, st in _task_status.items()}
 

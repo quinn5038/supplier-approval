@@ -90,6 +90,7 @@ DOC_TYPES = [
     "financial_report", "iso9001", "iso14001", "iso45001",
     "production_license", "authorization", "after_sales_cert",
     "after_sales_statement",
+    "transport_license",
 ]
 
 # 文件名关键词 → 材料类型（files_cache 手动放置时分类用）
@@ -105,6 +106,7 @@ DOC_TYPES = [
 #     异常高，可能保留指纹/边角信息
 # - 因此 9/5 与保密专员共识：身份证 OCR 在脱敏前提下仍**不启用**，避免触线
 FILENAME_KEYWORDS = [
+    (("道路运输", "无船承运"), {"transport_license"}),
     (("营业执照", "执照"), {"business_license"}),
     (("身份证",), {"legal_person_id"}),                  # 保留分类，OCR 禁用
     # 审计/审记（错别字）优先于纳税：供应商常把审计报告和纳税申报混在一起命名
@@ -951,6 +953,33 @@ def extract_production_license(text, supplier=None, detail=None):
     return {"fields": fields, "checks": checks, "issues": issues}
 
 
+def extract_transport_license(text, detail=None):
+    """E1 only accepts certificate text; unrelated pages cannot supply expiry."""
+    for block in _production_license_pages(text, detail):
+        normalised = _norm(_pre(block))
+        markers = ("道路运输经营许可证", "道路运输许可证", "无船承运业务经营资格登记证",
+                   "无船承运业务经营资格登记证明", "无船承运业务经营资格证", "无船承运人备案证明")
+        if not any(m in normalised for m in markers):
+            continue
+        # E1 requires an explicit validity label, not a lone issuance date or an
+        # unrelated "长期" in business scope.
+        match = re.search(r"(?:有效期|有效日期|失效日期|到期日期)[^\n]{0,100}", _pre(block))
+        segment = _norm(match.group(0)) if match else ""
+        dates = _find_dates(segment)
+        longterm = bool(re.search(r"长期|永久|无固定期限", segment))
+        exp = dates[-1] if dates else None
+        current = (exp >= date.today()) if exp else (True if longterm else None)
+        if len(dates) >= 2 and dates[0] > date.today():
+            current = None
+        result = {"fields": {"有效期至": str(exp) if exp else ("长期" if longterm else None)},
+                  "checks": {"材料类型正确": True, "在有效期内": current},
+                  "issues": [] if current is True else
+                  ["证书已过期" if current is False else "未确认有效期或证书尚未生效，转人工核查"]}
+        return result
+    return {"fields": {}, "checks": {"材料类型正确": None, "在有效期内": None},
+            "issues": ["未识别到道路运输许可证或官方无船承运证书，转人工核查"]}
+
+
 def extract_self_statement(text):
     """供应商自拟文件（售后服务承诺书等）→ 落款时间在3个月内即有效
     （9/2 确认：自拟文件不看过期概念，只看落款新鲜度）"""
@@ -1032,6 +1061,8 @@ def extract(doc_type, text, supplier=None, detail=None):
         return extract_authorization(text, supplier)
     if doc_type == "production_license":
         return extract_production_license(text, supplier, detail)
+    if doc_type == "transport_license":
+        return extract_transport_license(text, detail)
     if doc_type in ("after_sales_cert", "after_sales_statement"):
         return extract_after_sales(text)
     return extract_generic_cert(text)
@@ -1062,7 +1093,11 @@ def download_supplier_files(todo_id=None, delay=25.0):
       → GET /apis/scpma/oss/downloadByUploadId?fileUrl=...&fileName=... （带 cookie）
     断点续下：已存在且大小一致的文件自动跳过，可直接重跑。
     """
-    from auto_approve import _scpma_headers, query_qualification_files
+    from auto_approve import (
+        SessionExpiredError,
+        _scpma_headers,
+        query_qualification_files,
+    )
 
     WAF_WAITS = [600, 900]          # 与主程序同款：被拦后等10/15分钟再试
 
@@ -1078,6 +1113,8 @@ def download_supplier_files(todo_id=None, delay=25.0):
             r = query_qualification_files(sup["supinfo_id"],
                                           sup.get("bill_type", "P0702"))
             fl = r.get("data", {}).get("supFilesBOList", []) or []
+        except SessionExpiredError:
+            raise
         except Exception as e:
             print(f"[中断] {tid} 拉文件列表失败: {e}（稍后重跑即可续传）")
             raise RuntimeError("材料列表下载失败") from e

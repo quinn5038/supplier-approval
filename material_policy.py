@@ -8,7 +8,7 @@ from pathlib import Path
 # TextIn 核验。文件名或元数据一旦命中 SENSITIVE_NAME，仍由下方否决。
 PUBLIC_TYPES = frozenset({"business_license", "iso9001", "iso14001", "iso45001",
                           "tax_credit", "tax_cert", "production_license",
-                          "after_sales_cert", "after_sales_statement"})
+                          "after_sales_cert", "after_sales_statement", "transport_license"})
 SENSITIVE_NAME = re.compile(r"身份证|证件|财务|财报|审[计记]|资产负债|利润表|现金流|银行|账号|保密|涉密|id.?card", re.I)
 
 
@@ -23,6 +23,10 @@ def file_types(path, cache):
             value = item.get("types") or []
             types.update([value] if isinstance(value, str) else value)
             description = " ".join(str(item.get(k) or "") for k in ("fileName", "typeName", "desc"))
+            # Existing caches predate E1; recognise certificate routing hints without
+            # dropping other types or the sensitive veto. OCR still validates content.
+            if re.search(r"道路运输|无船承运", description):
+                types.add("transport_license")
             if SENSITIVE_NAME.search(description):
                 types.add("sensitive")
     return types

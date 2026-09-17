@@ -665,6 +665,8 @@ KEYWORD_MAP = [
     ("销售授权", {"authorization"}),
     # 生产许可
     ("生产许可", {"production_license"}),
+    ("道路运输", {"transport_license"}),
+    ("无船承运", {"transport_license"}),
     ("强制认证", {"production_license"}),
     ("3C认证", {"production_license"}),
     ("3c认证", {"production_license"}),
@@ -924,6 +926,13 @@ def build_checklist(supplier, rules_list):
             continue
 
         entry = {"id": rid, "name": name, "status": "pass", "detail": ""}
+
+        if rid == "E1":
+            entry["status"] = "manual"
+            entry["detail"] = "道路运输许可证或无船承运证明需OCR核验证书类型和有效期；未提交或无法识别时转人工核查"
+            checklist.append(entry)
+            verify_items.append(entry["detail"])
+            continue
 
         if ct == "auto":
             ok, _ = evaluate_rule(rule, supplier)
@@ -1208,8 +1217,6 @@ def is_special_category(supplier):
         # 不再算集团独有类别（业务确认）
         "云服务": "云服务商",
         "软件服务": "软件服务商",
-        "运输": "运输服务商",
-        "承运": "运输服务商",
         "差旅": "差旅服务商",
         "审计": "审计/评估机构",
         "评估": "审计/评估机构",
@@ -1223,6 +1230,15 @@ def is_special_category(supplier):
             return True, category
     
     return False, None
+
+
+def _supplier_type(supplier):
+    return str(supplier.get("sup_type_name") or supplier.get("sup_type") or supplier.get("supTypeName") or "")
+
+
+def _pure_carrier(supplier):
+    labels = [s.strip() for s in re.split(r"[/／、,，;；|\s]+", _supplier_type(supplier)) if s.strip()]
+    return bool(labels) and all(s in {"运输商", "承运商", "运输服务商", "道路运输商", "物流运输商"} for s in labels)
 
 
 def determine_supplier_rules(supplier, cfg):
@@ -1246,13 +1262,16 @@ def determine_supplier_rules(supplier, cfg):
         region_label = "境内" if not supplier.get("is_overseas") else "港澳台"
 
     # 第二部分：按类型选查
-    sup_type_name = supplier.get("sup_type_name", "")
+    sup_type_name = _supplier_type(supplier)
 
     type_rules = []
     type_label = ""
 
     # 9/5 改造：先用 ICCEC 系统 sup_type_name 匹配，匹配不上时按经营范围交叉验证
-    if "厂家" in sup_type_name or "生产商" in sup_type_name or "制造商" in sup_type_name:
+    if _pure_carrier(supplier):
+        type_rules = part2.get("domestic_carrier", []) if not is_foreign else []
+        type_label = "运输/承运商"
+    elif "厂家" in sup_type_name or "生产商" in sup_type_name or "制造商" in sup_type_name:
         if is_foreign:
             type_rules = part2.get("overseas_manufacturer", [])
             type_label = "境外厂家"
@@ -1267,7 +1286,7 @@ def determine_supplier_rules(supplier, cfg):
             type_rules = part2.get("domestic_trader", [])
             type_label = "境内贸易商"
     elif "服务" in sup_type_name and not any(
-            k in sup_type_name for k in ("租赁", "生产", "制造", "贸易", "经销", "代理", "承运", "厂家")):
+            k in sup_type_name for k in ("租赁", "生产", "制造", "贸易", "经销", "代理", "厂家")):
         # 9/11：纯服务商（如「服务商」）不属于生产/贸易/经销/代理任一类，
         # 只需核实 A 类基本材料，无需 D1 贸易商/厂家专属核验。
         # 排除「租赁商/服务商」（租赁本质物资贸易，仍走贸易商）等混合类型。
@@ -1979,6 +1998,7 @@ _TEXTIN_DOC_TYPE_KEYWORDS = {
     "legal_person_id":       ["法人身份"],
     "tax_credit":            ["纳税信用"],
     "production_license":    ["生产许可", "强制认证"],
+    "transport_license":     ["运输承运资质"],
     "after_sales_cert":      ["售后服务"],
     "after_sales_statement": ["售后服务"],
     "financial_report":      ["审计财报", "资金财务"],
@@ -2019,6 +2039,21 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
         checks = dict(r.get("checks") or {})
         issues = list(r.get("issues") or [])
         fields = r.get("fields") or {}
+
+        if doc_type == "transport_license":
+            documents = r.get("documents") or [r]
+            required = ("材料类型正确", "在有效期内")
+            valid = all(all(d.get("checks", {}).get(k) is True for k in required)
+                        and not d.get("issues") and not d.get("error") for d in documents)
+            expired = any(d.get("checks", {}).get("材料类型正确") is True
+                          and d.get("checks", {}).get("在有效期内") is False for d in documents)
+            c["status"] = "pass" if valid else ("fail" if expired else "manual")
+            c["detail"] = ("OCR核验通过：证书类型正确、在有效期内" if valid else
+                           "OCR核验发现问题：运输承运证书已过期" if expired else
+                           "运输承运资质未完成证书类型及有效期核验，转人工核查")
+            if not valid:
+                textin_issues.append(c["detail"])
+            continue
 
         # C1_05 防御性校验：旧版 OCR 缓存只有「在有效期内=True」，可能实际
         # 来自同一 PDF 中的营业执照或 ISO 证书。没有明确确认材料类型时最多
