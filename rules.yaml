@@ -145,6 +145,13 @@ part_1_basic:
 # ---- 第二部分：按供应商类型选查 ----
 
 part_2_by_type:
+  domestic_carrier:
+    - id: E1
+      name: 运输承运资质
+      check_type: verify
+      requirement: 道路运输许可证或无船承运证明
+      verify: 官方证书类型及有效期；未提交或无法识别时转人工核查
+      fail_action: manual
   # === C-1 境内厂家（5项） ===
   domestic_manufacturer:
     - id: C1_01
@@ -271,8 +278,6 @@ part_3_special_categories:
     requirements: ISO 9001+22301；增值电信业务许可证；CSA STAR；等保四级；云安全一级；ITSS一级；可信云
   - name: 软件服务商
     requirements: 三体系认证；软件著作权；近三年业绩清单+用户评价；售后运维体系
-  - name: 运输服务商
-    requirements: 道路运输经营许可证；快递需快递经营许可证+全国直营网络
   - name: 差旅服务商
     requirements: 国际航协一类客运代理资格（证书号08-3开头）
   - name: 审计/评估机构

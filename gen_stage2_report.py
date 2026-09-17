@@ -43,6 +43,7 @@ CL_ID_TO_DOC_TYPE = {
     "C1_03": [("iso14001",           "ISO14001 环境管理体系证书")],
     "C1_04": [("iso45001",           "ISO45001 职业健康安全证书")],
     "C1_05": [("production_license", "生产许可证/强制认证")],
+    "E1": [("transport_license", "道路运输许可证/无船承运证明")],
     "A13":  [("inspection_cert",     "检验检测机构资质认定证书（CMA/CNAS）")],
     # 9/8 补：境内贸易商 ISO 三认证 + 授权资质（此前缺失，导致 D1 行"材料未上传/无核验数据"误报）
     "D1_03": [("iso9001",            "ISO9001 质量管理体系认证证书")],
@@ -62,6 +63,7 @@ DOC_TYPE_LABEL = {
     "iso14001": "ISO14001",
     "iso45001": "ISO45001",
     "production_license": "生产许可证",
+    "transport_license": "运输承运资质",
     "tax_cert": "税务登记",
 }
 

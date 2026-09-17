@@ -15,6 +15,58 @@ from eval import safe_eval_rule
 from financial_data import assess_financial
 
 
+@pytest.mark.parametrize("labels,expected", [
+    ("经销商/承运商", "D1_03"),
+    ("服务商/代理商/承运商", "D1_03"),
+    ("服务商/承运商", "A01"),
+    ("承运商", "E1"), ("运输商/承运商", "E1"),
+])
+def test_carrier_routing(labels, expected):
+    supplier = {"sup_type": labels, "busi_scope": "销售生产"}
+    assert aa.is_special_category(supplier)[0] is False
+    rules, _ = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {r["id"] for r in rules}
+    assert expected in ids
+    assert "A01" in ids
+    if "服务商" in labels and "代理商" not in labels:
+        assert "D1_03" not in ids
+    assert ("E1" in ids) is aa._pure_carrier(supplier)
+
+
+@pytest.mark.parametrize("text,status", [
+    ("道路运输经营许可证\n有效期至：2099年06月04日", "pass"),
+    ("无船承运业务经营资格登记证\n有效期至：2099年06月04日", "pass"),
+    ("道路运输经营许可证\n有效期至：2020年06月04日", "fail"),
+    ("道路运输经营许可证", "manual"),
+    ("道路运输经营许可证\n发证日期：2026年06月04日", "manual"),
+    ("道路运输经营许可证\n有效期：2098年06月04日至2099年06月04日", "manual"),
+    ("营业执照\n有效期至：2099年06月04日", "manual"),
+])
+def test_e1_ocr(text, status):
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist({}, [r for r in rules if r["id"] == "E1"])
+    assert not missing
+    assert checklist[0]["status"] == "manual"
+    result = tp.extract("transport_license", text)
+    checklist, _ = aa.enhance_checklist_with_textin(checklist, {}, {"transport_license": result})
+    assert checklist[0]["status"] == status
+
+
+def test_e1_does_not_borrow_iso_expiry():
+    result = tp.extract("transport_license", "", detail=[
+        {"page_id": 1, "text": "道路运输经营许可证"},
+        {"page_id": 2, "text": "ISO9001 有效期至：2099年06月04日"},
+    ])
+    assert result["checks"]["在有效期内"] is None
+
+
+def test_e1_legacy_date_only_cannot_pass():
+    checklist = [{"id": "E1", "name": "运输承运资质", "status": "manual"}]
+    checklist, _ = aa.enhance_checklist_with_textin(checklist, {}, {
+        "transport_license": {"checks": {"在有效期内": True}}})
+    assert checklist[0]["status"] == "manual"
+
+
 @pytest.mark.parametrize("capital,expected", [(499.99, False), (500, True), (500.01, True)])
 def test_capital_boundary(capital, expected):
     assert safe_eval_rule("supplier.get('registered_capital', 0) >= 500", {"registered_capital": capital}) is expected
