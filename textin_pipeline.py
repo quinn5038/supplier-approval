@@ -381,6 +381,50 @@ def _valid_until(text):
     return (max(dates), False) if dates else (None, False)
 
 
+def _extract_business_scope(text):
+    """Read wrapped scope paragraphs, not the first nonempty placeholder line."""
+    match = re.search(r"经\s*营\s*范\s*围\s*[:：]?", text)
+    if not match:
+        return None
+    tail = text[match.end():]
+    boundary = re.search(
+        r"(?:\n\s*(?:注册资本|成立日期|营业期限|住所|登记机关|核准日期|统一社会信用代码))"
+        r"|(?:(?:注册资本|成立日期|营业期限|住所|登记机关|核准日期)\s*[:：])"
+        r"|(?:\n\s*\d+[、.．]\s*本营业执照)|<!--|数字签名", tail)
+    if boundary:
+        tail = tail[:boundary.start()]
+    tail = re.sub(r"(?m)^\s*(?:说明|经营范围说明)\s*[:：]?\s*$", "", tail).strip()
+    return tail or None
+
+
+def _scope_items(text):
+    """Ignore presentation/standard legal footers, retaining business qualifiers."""
+    import unicodedata
+    text = unicodedata.normalize("NFKC", text or "")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"\((?:除依法须经批准的项目外|依法须经批准的项目)[^()]*\)", "", text)
+    text = re.sub(r"(?:一般项目|许可项目)[:：]", ";", text)
+    # Split only at top-level separators: punctuation inside qualifiers such as
+    # (不含危险、货物) must not create new business items.
+    items, part, depth = [], [], 0
+    for char in text:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        if not depth and char in ";；:：。":
+            value = re.sub(r"[^\w]", "", "".join(part)).lower()
+            if value:
+                items.append(value)
+            part = []
+        else:
+            part.append(char)
+    value = re.sub(r"[^\w]", "", "".join(part)).lower()
+    if value:
+        items.append(value)
+    return list(dict.fromkeys(items))
+
+
 def extract_business_license(text, supplier):
     """营业执照 → 字段+与系统信息比对（按行结构抽取，兼容md表格/加粗排版）"""
     t = _pre(text)
@@ -442,11 +486,15 @@ def extract_business_license(text, supplier):
                 if not checks["营业期限长期或有效"]:
                     issues.append(f"营业执照营业期限已到期（{exp}）")
     # 经营范围：执照 ↔ 系统基本信息栏比对（9/2 新增审核要点）
-    m = re.search(r"经营范围\s*[:：]?\s*([^\n]{2,500})", t)
-    fields["经营范围"] = m.group(1).strip() if m else None
+    fields["经营范围"] = _extract_business_scope(t)
     f_scope = _norm(fields["经营范围"] or "")
     sys_scope = _norm(supplier.get("busi_scope") or "")
-    if f_scope and sys_scope:
+    checks["经营范围一致"] = None
+    if not f_scope or len(f_scope) < 4 or f_scope in ("说明", "说明：", "说明:"):
+        issues.append("经营范围提取不完整，需人工核验；不据此判定与系统不一致")
+    elif not sys_scope:
+        issues.append("系统基本信息栏经营范围缺失，需人工核验")
+    else:
         if "具体经营项目" in f_scope and ("公示系统" in f_scope or "gsxt" in f_scope.lower()):
             # 新版执照只印概括式范围+提示查公示系统，无法逐项机器比对
             checks["经营范围一致"] = None
@@ -454,16 +502,29 @@ def extract_business_license(text, supplier):
                           "无法与系统填写逐项比对，需人工核验")
         else:
             from difflib import SequenceMatcher
-            ratio = SequenceMatcher(None, f_scope, sys_scope).ratio()
-            if ratio >= 0.9:
+            license_items, system_items = _scope_items(f_scope), _scope_items(sys_scope)
+            license_norm, system_norm = "".join(license_items), "".join(system_items)
+            ratio = SequenceMatcher(None, license_norm, system_norm, autojunk=False).ratio()
+            fields["经营范围相似度"] = f"{ratio:.2%}"
+            license_only = [v for v in license_items if v not in system_items]
+            system_only = [v for v in system_items if v not in license_items]
+            if license_items and system_items and not license_only and not system_only:
                 checks["经营范围一致"] = True
+            elif min(len(license_norm), len(system_norm)) < max(len(license_norm), len(system_norm)) * 0.65:
+                issues.append(f"经营范围文本长度差异较大，可能提取不完整（相似度{ratio:.0%}），需人工核验")
             elif ratio >= 0.7:
                 # 9/8 降级：高度相似但有差异（0.7~0.9，常见是系统多/少了
                 # 「依法须经批准的项目…」这类标准结尾提示语）不再判 fail（退回），
                 # 改为 checks=None → enhance_checklist_with_textin 走 manual（转人工复核）。
                 checks["经营范围一致"] = None
+                differences = []
+                if system_only:
+                    differences.append("仅系统含：" + "、".join(system_only))
+                if license_only:
+                    differences.append("仅执照OCR含：" + "、".join(license_only))
+                fields["经营范围差异"] = "；".join(differences)
                 issues.append(f"执照经营范围与系统填写高度相似但有差异"
-                              f"（相似度{ratio:.0%}），需人工确认")
+                              f"（相似度{ratio:.0%}），需人工确认：{fields['经营范围差异']}")
             else:
                 checks["经营范围一致"] = False
                 issues.append(f"执照经营范围与系统基本信息栏填写不一致"
