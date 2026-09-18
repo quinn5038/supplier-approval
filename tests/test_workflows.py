@@ -72,6 +72,46 @@ def test_capital_boundary(capital, expected):
     assert safe_eval_rule("supplier.get('registered_capital', 0) >= 500", {"registered_capital": capital}) is expected
 
 
+@pytest.mark.parametrize("scope,system", [
+    ("**经营范围**\n\n说明：\n\n一般项目：国际货物运输代理；\n国内集装箱货物运输代理。\n注册资本：500万元",
+     "一般项目：国际货物运输代理；国内集装箱货物运输代理。"),
+    ("经营范围：技术服务；软件开发\n登记机关：市场监督管理局", "软件开发；技术服务"),
+    ("经营范围：一般项目：软件开发；道路货物运输（不含危险、货物）\n成立日期：2020年01月01日",
+     "一般项目:软件 开发;道路货物运输(不含危险货物)"),
+    ("经营范围：软件开发（除依法须经批准的项目外，凭营业执照依法自主开展经营活动）", "软件开发"),
+])
+def test_scope_multiline_and_presentation(scope, system):
+    result = tp.extract("business_license", scope, {"busi_scope": system})
+    assert result["checks"]["经营范围一致"] is True
+    assert "说明：" not in (result["fields"]["经营范围"] or "")
+    assert "登记机关" not in (result["fields"]["经营范围"] or "")
+
+
+def test_scope_no_500_character_truncation():
+    scope = "；".join(f"业务编号{i}的技术服务" for i in range(100))
+    result = tp.extract("business_license", "经营范围：" + scope + "\n注册资本：500万元", {"busi_scope": scope})
+    assert result["fields"]["经营范围"] == scope
+    assert result["checks"]["经营范围一致"] is True
+
+
+@pytest.mark.parametrize("ocr,system", [
+    ("经营范围\n说明：\n注册资本：500万元", "软件开发；技术服务"),
+    ("经营范围：软件开发", ""),
+    ("经营范围：软件开发", "软件开发；技术服务；道路货物运输；建筑工程施工"),
+    ("经营范围：软件开发；技术服务；信息咨询；货物运输", "软件开发；技术服务；信息咨询；货物运输；货物进出口"),
+    ("经营范围：道路货物运输（不含危险货物）", "道路货物运输（含危险货物）"),
+])
+def test_scope_unknown_and_substantive_differences_are_manual(ocr, system):
+    result = tp.extract("business_license", ocr, {"busi_scope": system})
+    assert result["checks"]["经营范围一致"] is None
+    assert any("经营范围" in issue for issue in result["issues"])
+
+
+def test_scope_clearly_different_is_false():
+    result = tp.extract("business_license", "经营范围：软件开发；技术服务", {"busi_scope": "道路运输；建筑施工"})
+    assert result["checks"]["经营范围一致"] is False
+
+
 @pytest.mark.parametrize("expr", ["__import__('os').system('bad')", "().__class__.__bases__", "supplier.clear()", "open('x')", "supplier['missing']", "1/0"])
 def test_rule_escape_rejected(expr):
     assert safe_eval_rule(expr, {}) is False
