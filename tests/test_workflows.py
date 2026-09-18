@@ -13,6 +13,89 @@ import gen_stage2_report
 import textin_pipeline as tp
 from eval import safe_eval_rule
 from financial_data import assess_financial
+from material_policy import file_types, hydrate_iso_cache, is_public_material
+
+
+@pytest.mark.parametrize("labels,carrier", [("承运商", True), ("运输商/承运商", True),
+    ("经销商/承运商", False), ("服务商/代理商/承运商", False), ("服务商", False)])
+def test_carrier_e2_replaces_a07_only_for_pure_carriers(labels, carrier):
+    rules, _ = aa.determine_supplier_rules({"sup_type": labels}, aa.load_rules())
+    ids = {r["id"] for r in rules}
+    assert ("E2" in ids) is carrier
+    assert ("A07" in ids) is not carrier
+
+
+@pytest.mark.parametrize("filename", ["过往业绩证明.pdf", "运输合同.jpg", "物流服务合同.pdf", "履约证明.docx", "2025年业绩清单.pdf"])
+def test_e2_filename_presence_always_manual(filename):
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist({}, [r for r in rules if r["id"] == "E2"],
+        [{"fileName": filename, "types": []}])
+    assert not missing
+    assert checklist[0]["status"] == "manual"
+    assert filename in checklist[0]["detail"]
+    html = gen_stage2_report.render_supplier("1", {"decision": "manual", "checklist": checklist}, {}, {})
+    assert "已提交（仅文件名核查）" in html
+    assert "转人工核查" in html
+
+
+@pytest.mark.parametrize("materials", [[], [{"fileName": "材料.pdf", "typeName": "过往业绩证明", "desc": "运输合同"}],
+    [{"fileName": "无需业绩证明声明.pdf"}], [{"fileName": "运输合同模板.pdf"}]])
+def test_e2_missing_is_numbered_in_return_opinion(materials):
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist({}, [r for r in rules if r["id"] == "E2"], materials)
+    assert missing and checklist[0]["status"] == "fail"
+    opinion = gen_opinion.build_opinion("1", {"decision": "reject", "checklist": checklist}, {}, {})
+    assert "退回。1. 缺少过往业绩证明" in opinion
+    html = gen_stage2_report.render_supplier("1", {"decision": "reject", "checklist": checklist}, {}, {})
+    assert "过往业绩证明 未上传" in html
+
+
+@pytest.mark.parametrize("name,position", [
+    ("环境管理.png", "环境管理体系认证证书图片"),
+    ("环境管理.png", " 环境管理体系认证证书 图片 "),
+    ("环境管理.png", "其他文件"),
+    ("certificate.png", "环境管理体系认证证书扫描件"),
+])
+def test_iso14001_alias_classification(name, position):
+    result = aa.classify_uploaded_materials([{"fileName": name, "fileinfoTypeName": position}])
+    assert "ISO14001" in result["certifications"]
+
+
+def test_iso_legacy_cache_and_sensitive_veto():
+    cache = {"1": {"supplier": {"certifications": []}, "materials_detail": [
+        {"fileName": "环境管理.png", "typeName": "环境管理体系认证证书图片", "types": []}]}}
+    hydrate_iso_cache(cache)
+    assert cache["1"]["supplier"]["certifications"] == ["ISO14001"]
+    assert file_types("1/10_环境管理.png", cache) == {"iso14001"}
+    cache["1"]["materials_detail"][0]["desc"] = "含身份证"
+    types = file_types("1/10_环境管理.png", cache)
+    assert not is_public_material("1/10_环境管理.png", types)
+
+
+def test_wrong_iso_candidate_is_not_approved():
+    result = tp.extract("iso14001", "营业执照\n有效期至：2099年06月04日")
+    assert result["checks"]["材料类型正确"] is None
+    assert result["issues"]
+
+
+def test_production_expiry_is_visible_after_holder_issue_and_in_return_list():
+    certificate = tp.extract("production_license",
+        "特种设备生产许可证\n单位名称：另一家有限公司\n有效期至：2026年05月16日",
+        {"full_name": "合成科技有限公司"})
+    assert certificate["checks"]["在有效期内"] is False
+    checklist, _ = aa.enhance_checklist_with_textin(
+        [{"id": "C1_05", "name": "生产许可证", "status": "pending"}], {},
+        {"production_license": certificate})
+    assert checklist[0]["status"] == "fail"
+    s2 = {"decision": "reject", "name": "合成科技有限公司", "checklist": checklist}
+    textin = {"1": {"production_license": certificate}}
+    html = gen_stage2_report.render_supplier("1", s2, textin, {})
+    assert "已过期" in html
+    assert "2026-05-16" in html
+    opinion = gen_opinion.build_opinion("1", s2, textin, {})
+    first_line = opinion.splitlines()[0]
+    assert first_line.startswith("退回。1.")
+    assert "C1_05" in first_line and "已过期（2026-05-16）" in first_line
 
 
 @pytest.mark.parametrize("labels,expected", [

@@ -143,6 +143,10 @@ def render_supplier(tid, s2, textin, cache):
             # 9/5：A13 skip 项不报缺失（is_inspection=False 的供应商不需要）
             if c.get("status") == "skip":
                 continue
+            if cid == "E2":
+                if not c.get("files"):
+                    miss_items.append((cid, cname, "过往业绩证明"))
+                continue
             # 9/5：决策依据从 rules.yaml 读 requirement（避免与 cache 内置字段脱节）
             decision_basis = _load_decision_basis(cid, cname)
             if cid.startswith("D2_"):
@@ -301,9 +305,8 @@ def render_supplier(tid, s2, textin, cache):
                                 f"<span class='kv'><span class='k'>{esc(k)}</span>=<span class='v'>{esc(s)}</span></span>"
                             )
                         if iss:
-                            check_detail_parts.append(
-                                f"<span class='issue'>{esc(iss[0])}</span>"
-                            )
+                            for issue in iss:
+                                check_detail_parts.append(f"<span class='issue'>{esc(issue)}</span>")
                         elif checks:
                             ng = sum(1 for cv in checks.values() if cv is False)
                             if ng:
@@ -326,7 +329,10 @@ def render_supplier(tid, s2, textin, cache):
         # ---- 9/9 修复：材料状态列按「是否需要提交材料」区分（而非 check_type）----
         # 凡 CL_ID_TO_DOC_TYPE 有映射（需要提交材料）的项都检查材料提交情况，
         # 包括 A08 财报这类「企查查核验 + 需上传材料」的混合项——已上传则显示「✓已提交」。
-        if not need:
+        if cid == "E2":
+            mat_status = ("<span class='mat-ok'>已提交（仅文件名核查）</span>" if c.get("files") else
+                          "<span class='mat-miss'>材料未上传</span>")
+        elif not need:
             mat_status = "<span class='mat-muted'>无需提交材料</span>"
         elif mat_status_parts:
             mat_status = "<br>".join(mat_status_parts)

@@ -796,6 +796,7 @@ def extract_financial_report(text):
 
 def extract_iso_cert(text, supplier, iso_code):
     """ISO证书 → 持有人比对+效期（按行结构抽取，兼容md表格/加粗排版）"""
+    supplier = supplier or {}
     t = _pre(text)
     fields = {}
     fields["获证组织"] = _grab(t, ["获证组织", "认证委托人", "受审核方", "组织名称",
@@ -827,6 +828,14 @@ def extract_iso_cert(text, supplier, iso_code):
     fields["证书状态"] = m.group(1) if m else None
 
     checks, issues = {}, []
+    marker = {"9001": "质量管理体系认证证书", "14001": "环境管理体系认证证书",
+              "45001": "职业健康安全管理体系认证证书"}.get(iso_code)
+    normalised = _norm(t)
+    if re.search(r"ISO" + re.escape(iso_code) + r"(?!\d)", normalised, re.I) or (marker and marker in normalised):
+        checks["材料类型正确"] = True
+    else:
+        checks["材料类型正确"] = None
+        issues.append(f"未确认ISO{iso_code}证书类型，需人工核验；文件名及上传位置不能作为通过依据")
     org = _norm(fields["获证组织"] or "")
     sys_name = _norm(supplier.get("full_name") or supplier.get("name", ""))
     if org and sys_name and len(sys_name) > 4:

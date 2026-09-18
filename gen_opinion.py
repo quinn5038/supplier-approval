@@ -283,6 +283,10 @@ def build_opinion(tid, s2, textin, cache):
         # （放在「补充后重新提交」前，不再单独成行）
         if a08_needs_financial:
             supplement_items.append("缺少上年度经审计的财报（2026年须提交2025年财报）")
+        # Explicit failed qualifications belong to the return checklist, not a
+        # clipped secondary note where expiry can disappear behind holder issues.
+        for cid, cname, desc in other_fails:
+            supplement_items.append(f"[{cid}]{cname}：{desc}；请整改并提交符合要求的材料")
         # 去重保序
         seen = set()
         dedup = [x for x in supplement_items
@@ -294,8 +298,6 @@ def build_opinion(tid, s2, textin, cache):
             lines.append("退回。具体见上方审查报告。")
         # 其他异常（非缺材料的 fail + 待人工项）→ 一并列出，让供应商知道所有问题
         other_issues = []
-        for cid, cname, desc in other_fails:
-            other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")
         for c in manual_items:
             cid = c.get("id", "")
             cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
