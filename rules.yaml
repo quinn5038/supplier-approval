@@ -152,6 +152,12 @@ part_2_by_type:
       requirement: 道路运输许可证或无船承运证明
       verify: 官方证书类型及有效期；未提交或无法识别时转人工核查
       fail_action: manual
+    - id: E2
+      name: 过往业绩证明
+      check_type: material
+      requirement: 过往业绩证明（如运输/承运合同、业绩清单或履约证明）
+      verify: 仅按文件名判断是否提交；已提交转人工核查，不调用外部OCR
+      fail_action: reject
   # === C-1 境内厂家（5项） ===
   domestic_manufacturer:
     - id: C1_01

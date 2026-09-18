@@ -752,6 +752,8 @@ def classify_uploaded_materials(file_list):
         all_text = f"{file_name} {file_desc} {file_summ}"
         
         classified = set()
+        from material_policy import iso_candidate_types
+        classified.update(iso_candidate_types(file_name, type_name))
         
         # 1. 先用 fileinfoTypeName 精确匹配
         if type_name in FILEINFO_TYPE_MAP:
@@ -901,7 +903,22 @@ def _ensure_inspection_fields(supplier, entry=None):
         supplier["has_inspection_cert"] = "inspection_cert" in cm
 
 
-def build_checklist(supplier, rules_list):
+def _performance_files(materials_detail):
+    """E2 uses filenames only, never upload position, description or OCR."""
+    import unicodedata
+    found = []
+    for item in materials_detail or []:
+        name = item.get("fileName", "") if isinstance(item, dict) else item[0]
+        normalised = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(name)))
+        if re.search(r"无需|未提交|未提供|空白|模板|样本", normalised):
+            continue
+        if re.search(r"业绩|履约证明|运输(?:服务)?合同|承运合同|物流(?:服务)?合同|中标通知书|客户评价", normalised):
+            if name not in found:
+                found.append(name)
+    return found
+
+
+def build_checklist(supplier, rules_list, materials_detail=None):
     """
     业务 8/31确认的统一检查流程：
     全部检查项跑完（齐全性+准确性），统一收集问题，最后一次性生成意见。
@@ -926,6 +943,20 @@ def build_checklist(supplier, rules_list):
             continue
 
         entry = {"id": rid, "name": name, "status": "pass", "detail": ""}
+
+        if rid == "E2":
+            files = _performance_files(materials_detail)
+            entry["files"] = files
+            entry["status"] = "manual" if files else "fail"
+            entry["detail"] = ("已提交疑似过往业绩证明：" + "、".join(files) +
+                               "；仅按文件名确认提交，材料真实性及业绩内容转人工核查" if files else
+                               "缺少过往业绩证明（如运输/承运合同、业绩清单或履约证明）")
+            checklist.append(entry)
+            if files:
+                verify_items.append(entry["detail"])
+            else:
+                missing_rules.append(rule)
+            continue
 
         if rid == "E1":
             entry["status"] = "manual"
@@ -1269,6 +1300,7 @@ def determine_supplier_rules(supplier, cfg):
 
     # 9/5 改造：先用 ICCEC 系统 sup_type_name 匹配，匹配不上时按经营范围交叉验证
     if _pure_carrier(supplier):
+        basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", []) if not is_foreign else []
         type_label = "运输/承运商"
     elif "厂家" in sup_type_name or "生产商" in sup_type_name or "制造商" in sup_type_name:
@@ -1385,7 +1417,8 @@ def _record_progress(todo_id, name, decision):
 def _load_cache():
     if CACHE_FILE.exists():
         try:
-            return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            from material_policy import hydrate_iso_cache
+            return hydrate_iso_cache(json.loads(CACHE_FILE.read_text(encoding="utf-8")))
         except Exception as e:
             log.warning(f"缓存文件损坏，忽略: {e}")
     return {}
@@ -1728,7 +1761,7 @@ def run():
 
             # ---- 全部检查统一跑完（齐全性+准确性），收集所有问题 ----
             checklist, auto_failed_rules, missing_rules, verify_items = build_checklist(
-                supplier, applicable_rules)
+                supplier, applicable_rules, mat_cls.get("details", []))
 
             # ---- 统一生成审批意见（v4：不缺一项就退，全部查完再出意见）----
             opinion, decision = generate_opinion_v4(
@@ -2191,7 +2224,7 @@ def run_stage2():
 
         applicable_rules, type_desc = determine_supplier_rules(supplier, cfg)
         checklist, auto_failed, missing, verify_items = build_checklist(
-            supplier, applicable_rules)
+            supplier, applicable_rules, entry.get("materials_detail", []))
 
         # 企查查增强（材料缺失规则不受影响，只增强核验项）
         checklist, qcc_issues = enhance_checklist_with_qcc(checklist, supplier, q)

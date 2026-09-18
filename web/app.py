@@ -227,7 +227,8 @@ def _load_stage2_for_todo(todo_id: str):
         textin = json.loads(textin_path.read_text(encoding="utf-8"))
     cache = {}
     if cache_path.exists():
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        from material_policy import hydrate_iso_cache
+        cache = hydrate_iso_cache(json.loads(cache_path.read_text(encoding="utf-8")))
 
     return stage2.get(str(todo_id), {}), textin, cache
 

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 # 售后认证/证明函不含身份证、财报、银行账号等受限信息，按 A07 规则允许
@@ -10,6 +11,40 @@ PUBLIC_TYPES = frozenset({"business_license", "iso9001", "iso14001", "iso45001",
                           "tax_credit", "tax_cert", "production_license",
                           "after_sales_cert", "after_sales_statement", "transport_license"})
 SENSITIVE_NAME = re.compile(r"身份证|证件|财务|财报|审[计记]|资产负债|利润表|现金流|银行|账号|保密|涉密|id.?card", re.I)
+
+
+def iso_candidate_types(filename, type_name=""):
+    name = unicodedata.normalize("NFKC", str(filename or ""))
+    position = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(type_name or "")))
+    position = re.sub(r"(?:图片|扫描件|复印件)$", "", position)
+    positions = {"质量管理体系认证证书": "iso9001", "环境管理体系认证证书": "iso14001",
+                 "职业健康安全管理体系认证证书": "iso45001", "健康安全管理体系认证证书": "iso45001"}
+    codes = {"iso" + code for code in ("9001", "14001", "45001") if code in name}
+    if codes:
+        return codes
+    result = {positions[position]} if position in positions else set()
+    stem = re.sub(r"^\d+_", "", Path(name).stem)
+    if stem in {"环境管理", "环境管理体系", "环境管理体系证书", "环境管理体系认证证书"}:
+        result.add("iso14001")
+    return result
+
+
+def hydrate_iso_cache(cache):
+    """Upgrade legacy ISO routing hints without declaring OCR verification passed."""
+    for entry in cache.values():
+        found = set()
+        for item in entry.get("materials_detail", []):
+            value = item.get("types") or []
+            types = set([value] if isinstance(value, str) else value)
+            types.update(iso_candidate_types(item.get("fileName"), item.get("typeName")))
+            item["types"] = sorted(types)
+            found.update(types & {"iso9001", "iso14001", "iso45001"})
+        supplier = entry.get("supplier", {})
+        supplier["classified_materials"] = sorted(set(supplier.get("classified_materials") or []) | found)
+        certs = set(supplier.get("certifications") or []) | {v.upper() for v in found}
+        supplier["certifications"] = sorted(certs)
+        entry["certifications"] = sorted(set(entry.get("certifications") or []) | certs)
+    return cache
 
 
 def file_types(path, cache):
@@ -22,6 +57,7 @@ def file_types(path, cache):
         if item.get("fileName") in (path.name, bare):
             value = item.get("types") or []
             types.update([value] if isinstance(value, str) else value)
+            types.update(iso_candidate_types(item.get("fileName"), item.get("typeName")))
             description = " ".join(str(item.get(k) or "") for k in ("fileName", "typeName", "desc"))
             # Existing caches predate E1; recognise certificate routing hints without
             # dropping other types or the sensitive veto. OCR still validates content.
@@ -38,7 +74,7 @@ def is_public_material(path, types):
 
 def load_cache(base):
     path = Path(base) / "cache_v4.json"
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return hydrate_iso_cache(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else {}
 
 
 def digest(path):
