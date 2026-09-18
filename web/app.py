@@ -137,7 +137,7 @@ def _run_pipeline_for_one(todo_id: str):
                     error=f"材料下载失败（{type(exc).__name__}），请检查平台连接后重新审批；本次未生成新报告。")
             return
 
-        _update("正在 OCR 识别证件文件（TextIn）...", progress=70)
+        _update("正在本地离线 OCR 识别证明材料（PaddleOCR）...", progress=70)
         # 9/6 修复：必须传 parse <todo_id> 单家过滤——不带参数会 OCR 全部
         # files_cache_desens/ 下 33 家文件，跑 10+ 分钟，子进程超时报错，
         # 前端永久卡在处理中（"进度条不动"根因）

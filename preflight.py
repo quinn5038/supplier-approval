@@ -11,7 +11,6 @@ OPTIONAL_CHECKS = {
 CAPABILITY_CHECKS = {
     "Paddle 本地解释器",
     "Paddle 三组模型文件",
-    "TextIn 凭证配置（非在线有效性验证）",
 }
 
 CHECK_GUIDES = {
@@ -48,17 +47,12 @@ CHECK_GUIDES = {
     "Paddle 本地解释器": (
         "首次安装可运行 SupplierApproval-Setup.exe；手动安装可在项目根目录运行 powershell -ExecutionPolicy Bypass -File .\\setup_paddle.ps1。",
         "默认路径为 .paddle-venv/Scripts/python.exe；若放在别处，在 .env 中填写 PADDLE_PYTHON=<python.exe 的绝对路径> 并重启。",
-        "这里只核对文件是否存在；识别能力请以安装脚本的本地自检为准。缺失时身份证核验转人工。",
+        "这里只核对文件是否存在；识别能力请以安装脚本的本地自检为准。缺失时材料 OCR 核验转人工。",
     ),
     "Paddle 三组模型文件": (
         "运行安装器或 setup_paddle.ps1 下载官方 det、rec、cls 三组模型。",
         "默认目录为 models/paddleocr；自定义时在 .env 中填写 PADDLE_MODEL_DIR=<模型目录绝对路径> 并重启。",
         "目录下各 det/rec/cls 子目录均需有 inference.pdmodel 与 inference.pdiparams；这里只核对文件存在。",
-    ),
-    "TextIn 凭证配置（非在线有效性验证）": (
-        "登录 TextIn 开发者工作台，在账号设置的开发者信息中获取 APP ID 和 SECRET CODE。",
-        "在项目根目录 .env 中分别填写 TEXTIN_APP_ID=<值>、TEXTIN_SECRET_CODE=<值>，保存并重启服务；等号后不加引号。",
-        "检查只判断非空，不验证账号权限；仅允许范围内的非敏感材料可发送该服务。",
     ),
     "企业信息凭证（可选；缺少时相关项转人工）": (
         "向公司 IT 或获授权的企查查 API 服务渠道申请 AppKey、SecretKey 与接口访问权限。",
@@ -102,7 +96,6 @@ def checks(base):
         "Paddle 三组模型文件": all((Path(desensitize._PADDLE_MODEL_DIR) / part / name).is_file()
                                    for part in ("det", "rec", "cls")
                                    for name in ("inference.pdmodel", "inference.pdiparams")),
-        "TextIn 凭证配置（非在线有效性验证）": all(os.getenv(k) for k in ("TEXTIN_APP_ID", "TEXTIN_SECRET_CODE")),
         "企业信息凭证（可选；缺少时相关项转人工）": all(os.getenv(k) for k in ("QCC_APP_KEY", "QCC_SECRET_KEY")),
         "真实回写关闭": os.getenv("ENABLE_LIVE_APPROVAL", "false").lower() != "true",
     }

@@ -69,7 +69,8 @@ def test_pipeline_never_sends_sensitive(pipeline, monkeypatch):
     pipeline([("财报.pdf", ["financial_report"]), ("id.pdf", ["legal_person_id"]),
               ("财务与纳税.pdf", ["tax_credit"]), ("unknown.pdf", ["unknown"])])
     send = Mock(side_effect=AssertionError("must not send"))
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     tp.run_parse("1")
     send.assert_not_called()
     result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]
@@ -95,7 +96,8 @@ def test_desens_failure_stops_network(pipeline, monkeypatch):
     pipeline([("license.pdf", ["business_license"])])
     monkeypatch.setattr(ds, "desensitize_dir", Mock(side_effect=OSError("failure")))
     send = Mock()
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     with pytest.raises(RuntimeError, match="脱敏失败"):
         tp.run_parse("1")
     send.assert_not_called()
@@ -105,7 +107,8 @@ def test_after_sales_material_reaches_ocr_and_uses_statement_rule(pipeline, monk
     pipeline([("售后服务证明函.pdf", ["after_sales_cert"])])
     recent = (date.today() - timedelta(days=20)).strftime("%Y年%m月%d日")
     send = Mock(return_value=(f"售后服务证明函\n提供售后服务保障\n日期：{recent}", []))
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     tp.run_parse("1")
     send.assert_called_once()
     result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["after_sales_cert"]
@@ -116,7 +119,8 @@ def test_after_sales_material_reaches_ocr_and_uses_statement_rule(pipeline, monk
 def test_multiple_materials_and_hash_refresh(pipeline, monkeypatch):
     pipeline([("one.pdf", ["iso9001"]), ("two.pdf", ["iso9001"])])
     send = Mock(side_effect=[("first", []), ("second", []), ("changed", [])])
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     monkeypatch.setattr(tp, "extract", lambda kind, text, *args: {"checks": {"valid": text != "first"}, "fields": {}, "issues": []})
     tp.run_parse("1")
     result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["iso9001"]
@@ -132,7 +136,8 @@ def test_multiple_materials_and_hash_refresh(pipeline, monkeypatch):
 def test_offline_extract_never_calls_api(pipeline, monkeypatch):
     pipeline([("one.pdf", ["iso9001"])])
     send = Mock()
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     tp.run_parse("1", offline=True)
     send.assert_not_called()
 
