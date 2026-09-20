@@ -332,6 +332,16 @@ def _grab(text, labels, pat):
     return None
 
 
+def _normalise_field_labels(text):
+    """Join whitespace inside known OCR labels while preserving value spacing."""
+    labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本",
+              "成立日期", "营业期限", "经营范围", "登记机关", "核准日期")
+    for label in labels:
+        spaced = r"\s*".join(map(re.escape, label))
+        text = re.sub(spaced, label, text)
+    return text
+
+
 def _to_date(m):
     y, mth, d = int(m[0]), int(m[1]), int(m[2])
     try:
@@ -427,7 +437,7 @@ def _scope_items(text):
 
 def extract_business_license(text, supplier):
     """营业执照 → 字段+与系统信息比对（按行结构抽取，兼容md表格/加粗排版）"""
-    t = _pre(text)
+    t = _normalise_field_labels(_pre(text))
     # 竖排标签被 OCR 拆散规整：TextIn 把「名称/类型」竖排标签拆成「名/类/称/型」
     # 乱序，_pre 断行合并后「名称」变「名类称」、「类型」的「型」字被单独留下
     t = t.replace("名类称", "名称")
@@ -442,6 +452,9 @@ def extract_business_license(text, supplier):
     fields["统一社会信用代码"] = code.upper() if code else None
     fields["名称"] = _grab(t, ["名称"], r"[^\n:：]{2,60}?")
     fields["法定代表人"] = _grab(t, ["法定代表人"], r"[^\n:：]{2,60}?")
+    # 单独保留住所，既便于报告核对，也确保同行排版
+    # 「法定代表人 XXX 住 所 XXX」中的住所不会并入法人姓名。
+    fields["住所"] = _grab(t, ["住所"], r"[^\n:：]{2,120}?")
     m = re.search(r"注册资本\s*[:：]?\s*([\d,.，]+)\s*万", t)
     fields["注册资本_万"] = _parse_capital(t)
 
@@ -794,32 +807,50 @@ def extract_financial_report(text):
     return {"fields": {}, "checks": {}, "issues": [], "_deprecated": True}
 
 
+def _extract_iso_holder(text):
+    """Extract the certified organisation without treating footer prose as a field.
+
+    ISO certificates commonly use ``兹证明`` followed by the holder name.  Footer
+    sentences such as ``获证组织须按规定接受年度监督`` contain the same label but
+    are obligations, not holder fields, so they must never outrank that section.
+    """
+    company = r"[^\n:：]{2,60}?(?:公司|集团|中心|厂)"
+
+    # The certificate declaration is the authoritative source and may put the
+    # holder on the same line or the next non-empty line.
+    match = re.search(rf"(?:^|\n)\s*兹证明\s*[:：]?\s*({company})\s*(?=\n|$)", text)
+    if match:
+        return match.group(1).strip(" 　。，,；;、"), "兹证明"
+
+    # Accept an explicit field only when it looks like a field (line start plus
+    # colon).  A bare occurrence inside explanatory prose is deliberately ignored.
+    labels = ("获证组织", "认证委托人", "受审核方", "组织名称", "证书持有者")
+    for label in labels:
+        match = re.search(rf"(?m)^\s*{re.escape(label)}\s*[:：]\s*({company})\s*$", text)
+        if match:
+            value = match.group(1).strip(" 　。，,；;、")
+            if not re.search(r"须按规定|必须|接受年度监督|定期接受监督|监督审核|"
+                             r"方可保持|有效性|经审核合格", value):
+                return value, label
+
+    # Last resort for certificates whose declaration label was missed by OCR:
+    # take the first standalone organisation line, while rejecting supervision text.
+    for match in re.finditer(rf"(?m)^\s*({company})\s*$", text):
+        value = match.group(1).strip(" 　。，,；;、")
+        if not re.search(r"须按规定|必须|接受年度监督|定期接受监督|监督审核|"
+                         r"方可保持|有效性|经审核合格", value):
+            return value, "证书版面推断（无标签）"
+    return None, None
+
+
 def extract_iso_cert(text, supplier, iso_code):
     """ISO证书 → 持有人比对+效期（按行结构抽取，兼容md表格/加粗排版）"""
     supplier = supplier or {}
     t = _pre(text)
     fields = {}
-    fields["获证组织"] = _grab(t, ["获证组织", "认证委托人", "受审核方", "组织名称",
-                                   "证书持有者"], r"[^\n:：]{2,60}?")
-    # 9/9 修复：ISO 证书底部常印「获证组织必须定期接受监督审核并经审核合格后，
-    # 方可保持证书有效性」这类固定提示语，_grab 会把句首的「获证组织」误当字段标签、
-    # 把整句提示语当值，导致持有人被错误显示成提示语。校验：值含提示语特征词则判无效。
-    if fields["获证组织"] and re.search(
-            r"必须|定期接受监督|监督审核|方可保持|有效性|经审核合格", fields["获证组织"]):
-        fields["获证组织"] = None
-    if not fields["获证组织"]:
-        # 优先：ISO 证书标准格式「兹证明：XXX公司」——获证组织的权威来源
-        m = re.search(r"兹证明\s*[:：]?\s*([^\n:：]{4,40}?(?:公司|集团|中心|厂))", t)
-        if m:
-            fields["获证组织"] = m.group(1).strip(" 　。，,；;、")
-            fields["获证组织_来源"] = "兹证明"
-        else:
-            # 兜底：取标题后第一行独立的公司名（认证机构名通常在证书底部，取首个可避开）
-            m = re.search(r"(?m)^([\u4e00-\u9fa5（）()A-Za-z0-9]{4,40}"
-                          r"(?:公司|集团|中心|厂))\s*$", t)
-            if m:
-                fields["获证组织"] = m.group(1)
-                fields["获证组织_来源"] = "证书版面推断（无标签）"
+    fields["获证组织"], holder_source = _extract_iso_holder(t)
+    if holder_source:
+        fields["获证组织_来源"] = holder_source
     m = re.search(r"证书编号\s*[:：]?\s*([A-Za-z0-9\-]{6,30})", t)
     fields["证书编号"] = m.group(1) if m else None
     exp, longterm = _valid_until(t)
