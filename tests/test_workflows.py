@@ -70,8 +70,50 @@ def test_business_license_inline_spaced_address_does_not_join_legal_person():
     result = tp.extract("business_license", text, supplier)
     assert result["fields"]["名称"] == "山东优派斯装配式建筑有限公司"
     assert result["fields"]["法定代表人"] == "徐沈腾"
+    assert result["fields"]["住所"] == "潍坊市滨海开发区央子街道珠江西一街00967号"
     assert result["checks"]["法人一致"] is True
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
+def test_business_license_lishang_spaced_address_boundary():
+    text = ("统一社会信用代码 91130408MA0GATNL3F\n"
+            "名 称 邯郸市利尚金属制品有限公司 注册资本 壹仟伍佰万元整\n"
+            "法定代表人 吴艺濮 住 所河北省邯郸市永年区临洺关镇东洺阳村南\n"
+            "经营范围 金属制品制造\n登记机关 邯郸市市场监督管理局")
+    supplier = {"social_credit_code": "91130408MA0GATNL3F",
+                "full_name": "邯郸市利尚金属制品有限公司", "legal_person": "吴艺濮",
+                "registered_capital": 1500, "busi_scope": "金属制品制造"}
+    result = tp.extract("business_license", text, supplier)
+    assert result["fields"]["法定代表人"] == "吴艺濮"
+    assert result["fields"]["住所"] == "河北省邯郸市永年区临洺关镇东洺阳村南"
+    assert result["checks"]["法人一致"] is True
+
+
+@pytest.mark.parametrize("doc_type,title,standard", [
+    ("iso9001", "质量管理体系认证证书", "ISO9001:2015"),
+    ("iso14001", "环境管理体系认证证书", "ISO14001:2015"),
+    ("iso45001", "职业健康安全管理体系认证证书", "ISO45001:2018"),
+])
+def test_iso_holder_prefers_company_after_declaration_over_supervision_footer(
+        doc_type, title, standard):
+    text = (f"{title}\n注册号：43125Q31487R0S\n兹证明\n"
+            "邯郸市利尚金属制品有限公司\n"
+            f"统一社会信用代码：91130408MA0GATNL3F\n{standard}\n"
+            "证书有效期：2025年01月17日至2028年01月16日\n"
+            "本证书在行政许可范围内有效，获证组织须按规定接受年度监督。")
+    result = tp.extract(doc_type, text, {"full_name": "邯郸市利尚金属制品有限公司"})
+    assert result["fields"]["获证组织"] == "邯郸市利尚金属制品有限公司"
+    assert result["fields"]["获证组织_来源"] == "兹证明"
+    assert result["checks"]["持有人一致"] is True
+
+
+def test_iso_supervision_footer_alone_is_not_holder():
+    result = tp.extract("iso9001",
+                        "质量管理体系认证证书\n获证组织须按规定接受年度监督。\n"
+                        "有效期至：2028年01月16日",
+                        {"full_name": "邯郸市利尚金属制品有限公司"})
+    assert result["fields"]["获证组织"] is None
+    assert "持有人一致" not in result["checks"]
 
 
 @pytest.mark.parametrize("labels,carrier", [("承运商", True), ("运输商/承运商", True),
