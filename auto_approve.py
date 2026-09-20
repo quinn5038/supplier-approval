@@ -944,6 +944,17 @@ def build_checklist(supplier, rules_list, materials_detail=None):
 
         entry = {"id": rid, "name": name, "status": "pass", "detail": ""}
 
+        if rid == "A08":
+            from financial_data import assess_financial, financial_report_presence
+            submitted = financial_report_presence(supplier, materials_detail)
+            if submitted is not None:
+                supplier["has_financial_report"] = submitted
+            assessment = assess_financial({}, submitted=submitted)
+            entry.update(status="manual", detail=assessment["detail"], evidence=assessment)
+            checklist.append(entry)
+            verify_items.append(entry["detail"])
+            continue
+
         if rid == "E2":
             files = _performance_files(materials_detail)
             entry["files"] = files
@@ -1101,7 +1112,7 @@ MATERIAL_REQUIREMENTS = {
     "A02 法人身份证明": "法人身份证正反面（或护照首页，须在有效期内）",
     "A03 纳税信用等级": "国家税务总局网站或信用中国下载的纳税信用等级证明（须为C级及以上）",
     "A07 售后服务": "正规机构出具的售后服务五星认证或厂家出具的售后服务证明函",
-    "A08 资金财务状况": "上年度经审计的财务报表（2026年须提交2025年财报）",
+    "A08 资金财务状况": "上年度经审计的财务报表（须含三表及审计意见）",
     "C1_02 ISO 9001": "ISO 9001质量管理体系认证证书（须为该公司认证且在有效期内）",
     "C1_03 ISO 14001": "ISO 14001环境管理体系认证证书（须为该公司认证且在有效期内）",
     "C1_04 ISO 45001": "ISO 45001职业健康安全管理体系认证证书（须为该公司认证且在有效期内）",
@@ -1205,7 +1216,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
             # 9/11：A08 财报未传 + 企查查无数据 → 独立列出"经审计的上年度财报"
             if a08_needs_financial:
                 opinion_parts.append(
-                    f"  {idx}. 上年度经审计的财报（2026年须提交2025年财报）")
+                    f"  {idx}. 上年度经审计的财报（须含三表及审计意见）")
                 idx += 1
 
         opinion = "\n".join(opinion_parts)
@@ -1222,7 +1233,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
         opinion_parts = ["转人工复核。材料齐全，以下核验点需人工/后续自动核验："]
         # 9/11：A08 财报未传 + 企查查无数据 → 在核验点前独立列出
         if a08_needs_financial:
-            opinion_parts.append("  0. 需补充：经审计的上年度财报（2026年须提交2025年财报）")
+            opinion_parts.append("  0. 需补充：上年度经审计的财报（须含三表及审计意见）")
         for i, v in enumerate(unique_verifies, 1):
             opinion_parts.append(f"  {i}. {v}")
         opinion = "\n".join(opinion_parts)
@@ -1990,8 +2001,9 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
         # ---- A08 资金财务状况（2026-09-04 保密合规改造）----
         # 改走企查查财务数据（公开披露），不再依赖 TextIn 解析供应商上传的财报（敏感数据）
         elif cid == "A08":
-            from financial_data import assess_financial
-            assessment = assess_financial(qcc.get("financial") or {})
+            from financial_data import assess_financial, financial_report_presence
+            assessment = assess_financial(qcc.get("financial") or {},
+                                          submitted=financial_report_presence(supplier))
             c["status"] = "manual"
             c["detail"] = assessment["detail"]
             c["evidence"] = assessment

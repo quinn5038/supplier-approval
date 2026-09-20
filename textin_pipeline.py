@@ -247,6 +247,16 @@ def _grab(text, labels, pat):
     return None
 
 
+def _normalise_field_labels(text):
+    """Join whitespace inside known OCR labels while preserving value spacing."""
+    labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本",
+              "成立日期", "营业期限", "经营范围", "登记机关", "核准日期")
+    for label in labels:
+        spaced = r"\s*".join(map(re.escape, label))
+        text = re.sub(spaced, label, text)
+    return text
+
+
 def _to_date(m):
     y, mth, d = int(m[0]), int(m[1]), int(m[2])
     try:
@@ -342,7 +352,7 @@ def _scope_items(text):
 
 def extract_business_license(text, supplier):
     """营业执照 → 字段+与系统信息比对（按行结构抽取，兼容md表格/加粗排版）"""
-    t = _pre(text)
+    t = _normalise_field_labels(_pre(text))
     # 竖排标签被 OCR 拆散规整：TextIn 把「名称/类型」竖排标签拆成「名/类/称/型」
     # 乱序，_pre 断行合并后「名称」变「名类称」、「类型」的「型」字被单独留下
     t = t.replace("名类称", "名称")

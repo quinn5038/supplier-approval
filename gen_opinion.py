@@ -62,7 +62,7 @@ SUPPLEMENT_TEMPLATES = {
     "A02":  "法人有效身份证正反面（须在有效期内）",
     "A03":  "国家税务总局网站下载的上年度纳税信用等级证明（需C级及以上）",
     "A07":  "售后服务证明（厂家出具的售后服务证明函，落款在3个月内；或售后服务五星认证证书）",
-    "A08":  "上年度经审计的财报（须含资产负债表/利润表/现金流量表）",
+    "A08":  "上年度经审计的财报（须含资产负债表/利润表/现金流量表及审计意见）",
     "A13":  "检验检测资质证明（CMA 资质认定证书 / CNAS 实验室认可证书等，须在有效期内）",
     "C1_02": "ISO 9001 认证证书（须为该公司认证且在有效期内）",
     "C1_03": "ISO 14001 认证证书（须为该公司认证且在有效期内）",
@@ -235,15 +235,13 @@ def build_opinion(tid, s2, textin, cache):
     else:
         suggest_action = "同意"
 
-    # 9/11：A08 财报未传 + 企查查无数据 → 意见中独立列出「经审计的上年度财报」
-    a08_needs_financial = False
-    for c in manual_items:
-        if c.get("id") == "A08":
-            a08_detail = c.get("detail") or ""
-            if not supplier.get("has_financial_report") and \
-                    ("未查到" in a08_detail or "无数据" in a08_detail or "数据为空" in a08_detail):
-                a08_needs_financial = True
-            break
+    # Material presence is independent of public evidence and wording changes.
+    from financial_data import financial_report_presence
+    submitted = financial_report_presence(supplier, cache_entry.get("materials_detail"))
+    a08_needs_financial = submitted is False and any(
+        c.get("id") == "A08" and c.get("status") != "skip" for c in checklist)
+    financial_missing = ("缺少经审计的上年度财报（须为上一年度，"
+                         "须含资产负债表、利润表、现金流量表及审计意见）")
 
     # ---- 9/7 改造：完整列出所有异常（与综合核验表联动），单行分号分隔 ----
     lines = []
@@ -271,6 +269,8 @@ def build_opinion(tid, s2, textin, cache):
         for cid, cname, desc in supplement_fails:
             if cid in iso_fail_map:
                 continue
+            if cid == "A08" and a08_needs_financial:
+                continue
             # 优先沿用 checklist 的完整缺失原因（含条件说明）；没有标准模板的
             # 新审核项也必须进入最终意见，避免表格显示缺失而页尾漏列。
             if str(desc).startswith("缺少"):
@@ -282,7 +282,7 @@ def build_opinion(tid, s2, textin, cache):
         # 9/11：A08 财报未传 + 企查查无数据 → 纳入补充清单，与其他项一起编号
         # （放在「补充后重新提交」前，不再单独成行）
         if a08_needs_financial:
-            supplement_items.append("缺少上年度经审计的财报（2026年须提交2025年财报）")
+            supplement_items.append(financial_missing)
         # Explicit failed qualifications belong to the return checklist, not a
         # clipped secondary note where expiry can disappear behind holder issues.
         for cid, cname, desc in other_fails:
@@ -316,10 +316,10 @@ def build_opinion(tid, s2, textin, cache):
             desc = c.get("detail") or c.get("message") or "需人工核验"
             reasons.append(f"[{cid}]{cname}：{_clip(desc)}")
         if a08_needs_financial:
-            lines.append("需补充：经审计的上年度财报。")
+            lines.append("转人工。1. " + financial_missing + "；请补交后人工核验。")
         if not reasons:
             reasons.append("部分审核项需人工核验")
-        lines.append("转人工。" + "；".join(reasons))
+        lines.append(("另需核实：" if a08_needs_financial else "转人工。") + "；".join(reasons))
     # 决策 3：同意
     else:
         lines.append("同意。各项审核均通过，建议后续常规管理。")

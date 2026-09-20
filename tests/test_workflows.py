@@ -12,8 +12,66 @@ import gen_opinion
 import gen_stage2_report
 import textin_pipeline as tp
 from eval import safe_eval_rule
-from financial_data import assess_financial
+from financial_data import assess_financial, financial_report_presence
 from material_policy import file_types, hydrate_iso_cache, is_public_material
+
+
+@pytest.mark.parametrize("public_detail", ["未取得带报告期的公开财务数据", "已取得上年度公开财务数据", "旧版任意描述"])
+def test_a08_missing_is_numbered_independent_of_public_wording(public_detail):
+    checklist = [{"id": "A03", "name": "纳税信用等级", "status": "fail", "detail": "缺少纳税信用等级证明"},
+        {"id": "A08", "name": "资金财务状况", "status": "manual", "detail": public_detail}]
+    cache = {"1": {"supplier": {"has_financial_report": False}, "materials_detail": [
+        {"fileName": "备案表.docx", "types": []}]}}
+    s2 = {"decision": "reject", "checklist": checklist}
+    opinion = gen_opinion.build_opinion("1", s2, {}, cache)
+    assert "缺少经审计的上年度财报" in opinion.splitlines()[0]
+    html = gen_stage2_report.render_supplier("1", s2, {}, cache)
+    assert "缺少经审计的上年度财报；请补交后转人工核查" in html
+
+
+def test_a08_public_data_cannot_hide_missing_upload():
+    supplier = {"has_financial_report": True}
+    rules = [r for r in aa.load_rules()["part_1_basic"]["domestic"] if r["id"] == "A08"]
+    checklist, _, missing, _ = aa.build_checklist(supplier, rules, [])
+    assert not missing  # A08 missing is manual, not automatic rejection
+    assert supplier["has_financial_report"] is False
+    checklist, _ = aa.enhance_checklist_with_qcc(checklist, supplier, {"financial": {
+        "报告期": str(date.today().year - 1)}})
+    assert checklist[0]["status"] == "manual"
+    assert "缺少经审计的上年度财报" in checklist[0]["detail"]
+
+
+def test_a08_uploaded_old_empty_types_not_reported_missing():
+    materials = [{"fileName": "2025年审记报告.pdf", "types": []}]
+    assert financial_report_presence({"has_financial_report": False}, materials) is True
+    cache = {"1": {"supplier": {"has_financial_report": False}, "materials_detail": materials}}
+    s2 = {"decision": "manual", "checklist": [{"id": "A08", "name": "资金财务状况", "status": "manual", "detail": "待人工核验审计情况"}]}
+    opinion = gen_opinion.build_opinion("1", s2, {}, cache)
+    assert "缺少经审计的上年度财报" not in opinion
+    assert "已提交（年度及审计情况待人工核查）" in gen_stage2_report.render_supplier("1", s2, {}, cache)
+
+
+def test_a08_unknown_presence_not_declared_missing():
+    assert financial_report_presence({}) is None
+    assert financial_report_presence({}, []) is False
+    s2 = {"decision": "manual", "checklist": [{"id": "A08", "status": "manual", "detail": "上传状态待确认"}]}
+    assert "缺少经审计的上年度财报" not in gen_opinion.build_opinion("1", s2, {}, {})
+
+
+def test_business_license_inline_spaced_address_does_not_join_legal_person():
+    text = ("统一社会信用代码 91370700MA3QM7Y36H\n"
+            "名 称 山东优派斯装配式建筑有限公司\n"
+            "注册资本 伍仟万元整\n"
+            "法定代表人 徐沈腾 住 所 潍坊市滨海开发区央子街道珠江西一街00967号\n"
+            "经营范围 建筑材料制造\n登记机关 潍坊市市场监督管理局")
+    supplier = {"social_credit_code": "91370700MA3QM7Y36H",
+                "full_name": "山东优派斯装配式建筑有限公司", "legal_person": "徐沈腾",
+                "registered_capital": 5000, "busi_scope": "建筑材料制造"}
+    result = tp.extract("business_license", text, supplier)
+    assert result["fields"]["名称"] == "山东优派斯装配式建筑有限公司"
+    assert result["fields"]["法定代表人"] == "徐沈腾"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
 @pytest.mark.parametrize("labels,carrier", [("承运商", True), ("运输商/承运商", True),

@@ -116,6 +116,8 @@ def render_supplier(tid, s2, textin, cache):
     # 9/5 改造：大表 5 列
     cache_entry = cache.get(tid, {})
     mdetail = cache_entry.get("materials_detail", [])
+    from financial_data import financial_report_presence
+    financial_submitted = financial_report_presence(supplier, cache_entry.get("materials_detail"))
     uploaded_types = set()
     file_names = {}
     for d in mdetail:
@@ -152,6 +154,10 @@ def render_supplier(tid, s2, textin, cache):
             if cid.startswith("D2_"):
                 continue  # D2 国外贸易商不适用
             need = CL_ID_TO_DOC_TYPE.get(cid)
+            if cid == "A08":
+                if financial_submitted is False:
+                    miss_items.append((cid, cname, "经审计的上年度财报"))
+                continue
             if not need:
                 continue
             for doc_type, label in need:
@@ -381,6 +387,7 @@ def render_supplier(tid, s2, textin, cache):
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
                             else "<span class='verify-empty'>无核验数据</span>")
+
         elif check_type in ("auto", "skip"):
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
@@ -389,6 +396,15 @@ def render_supplier(tid, s2, textin, cache):
             check_detail = ("<br>".join(check_detail_parts)
                             if check_detail_parts
                             else "<span class='verify-empty'>无核验数据</span>")
+
+        if cid == "A08":
+            if financial_submitted is False:
+                mat_status = "<span class='mat-miss'>材料未上传</span>"
+                check_detail = "<span class='issue'>缺少经审计的上年度财报；请补交后转人工核查，不以公开财务数据替代。</span>"
+            elif financial_submitted is True:
+                mat_status = "<span class='mat-ok'>已提交（年度及审计情况待人工核查）</span>"
+            else:
+                mat_status = "<span class='mat-warn'>上传状态未确认</span>"
 
         if cid.startswith("DEMO_"):
             mat_status = "合成样例，无真实材料"
