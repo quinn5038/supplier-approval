@@ -11,6 +11,32 @@ class EmptyOcr:
         return []
 
 
+def _item(text, bounds, confidence=0.99):
+    x1, y1, x2, y2 = bounds
+    return masker.OcrItem(np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+                                   dtype=np.float32), text, confidence)
+
+
+def test_name_label_confusion_uses_same_row_value_with_front_context():
+    items = [
+        # Real failure pattern: value is detected before the blue label, and
+        # ``姓名`` is recognised as ``城名5`` against the holographic background.
+        _item("张洪平", (337, 144, 571, 218)),
+        _item("城名5", (151, 156, 370, 224), 0.60),
+        _item("民族汉", (400, 284, 737, 365)),
+        _item("公民身份号码", (146, 897, 509, 965)),
+    ]
+    field = masker.find_name_field(items, 1712, 1080)
+    assert field is not None
+    assert field.value == "张洪平"
+
+
+def test_name_label_confusion_without_front_context_stays_fail_closed():
+    items = [_item("城名5", (100, 100, 250, 160), 0.60),
+             _item("敏感文字", (240, 100, 500, 160))]
+    assert masker.find_name_field(items, 1712, 1080) is None
+
+
 def test_unrecognised_image_is_black():
     original = np.full((108, 171, 3), 255, dtype=np.uint8)
     masked, result = masker.process_page(original, EmptyOcr(), "single", "synthetic", 1)

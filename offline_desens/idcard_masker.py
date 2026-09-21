@@ -178,6 +178,27 @@ def side_scores(items: Iterable[OcrItem]) -> tuple[int, int]:
     return front, back
 
 
+def find_name_field(items: Iterable[OcrItem], width: int, height: int) -> FieldMatch | None:
+    """Locate the name while tolerating label OCR errors on security-pattern backgrounds.
+
+    The blue ``姓名`` label is more easily distorted than the black name value.  A
+    fuzzy label is accepted only when at least two other front-side markers are
+    present, keeping the fail-closed redaction path from exposing arbitrary text.
+    """
+    records = list(items)
+    exact = find_field(records, "name", ("姓名",), is_name_value, width, height)
+    if exact:
+        return exact
+    front_score, _ = side_scores(records)
+    if front_score < 2:
+        return None
+    # Common PaddleOCR confusions observed on the blue label over holographic
+    # backgrounds: 姓→城/性 and 名→各/多.  Extra trailing noise is handled by
+    # find_field's same-row value association.
+    return find_field(records, "name", ("城名", "性名", "姓各", "姓多"),
+                      is_name_value, width, height)
+
+
 def order_quad(points: np.ndarray) -> np.ndarray:
     points = points.astype(np.float32)
     sums, diffs = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
@@ -305,7 +326,7 @@ def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None
         oriented = rotate(card, forward)
         items = ocr.read(oriented)
         height, width = oriented.shape[:2]
-        name = find_field(items, "name", ("姓名",), is_name_value, width, height)
+        name = find_name_field(items, width, height)
         validity = find_field(items, "valid_until", ("有效期限", "有效期"), is_validity_value, width, height)
         front_score, back_score = side_scores(items)
         if name:
