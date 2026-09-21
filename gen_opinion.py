@@ -227,23 +227,21 @@ def build_opinion(tid, s2, textin, cache):
         else:
             other_fails.append((cid, cname, detail))
 
-    # 整体建议：缺材料 fail ≥1 → 退回；其余 fail/待人工 → 转人工；全 pass → 同意
-    if supplement_fails or decision == "reject":
+    # 财报是否缺失只看上传材料，不依赖企查查文案；公开数据不能替代必交财报。
+    from financial_data import financial_report_presence
+    submitted = financial_report_presence(supplier, cache_entry.get("materials_detail"))
+    a08_needs_financial = submitted is False and any(
+        c.get("id") == "A08" and c.get("status") != "skip" for c in checklist)
+    financial_missing = ("缺少经审计的上年度财报（须为上一年度，"
+                         "须含资产负债表、利润表、现金流量表及审计意见）")
+
+    # 任一材料缺失（包括 A08）均退回；其余异常/待人工才转人工。
+    if supplement_fails or a08_needs_financial or decision == "reject":
         suggest_action = "退回"
     elif fail_items or manual_items or decision == "manual":
         suggest_action = "转人工"
     else:
         suggest_action = "同意"
-
-    # 9/11：A08 财报未传 + 企查查无数据 → 意见中独立列出「经审计的上年度财报」
-    a08_needs_financial = False
-    for c in manual_items:
-        if c.get("id") == "A08":
-            a08_detail = c.get("detail") or ""
-            if not supplier.get("has_financial_report") and \
-                    ("未查到" in a08_detail or "无数据" in a08_detail or "数据为空" in a08_detail):
-                a08_needs_financial = True
-            break
 
     # ---- 9/7 改造：完整列出所有异常（与综合核验表联动），单行分号分隔 ----
     lines = []
@@ -271,6 +269,8 @@ def build_opinion(tid, s2, textin, cache):
         for cid, cname, desc in supplement_fails:
             if cid in iso_fail_map:
                 continue
+            if cid == "A08" and a08_needs_financial:
+                continue
             # 优先沿用 checklist 的完整缺失原因（含条件说明）；没有标准模板的
             # 新审核项也必须进入最终意见，避免表格显示缺失而页尾漏列。
             if str(desc).startswith("缺少"):
@@ -282,7 +282,7 @@ def build_opinion(tid, s2, textin, cache):
         # 9/11：A08 财报未传 + 企查查无数据 → 纳入补充清单，与其他项一起编号
         # （放在「补充后重新提交」前，不再单独成行）
         if a08_needs_financial:
-            supplement_items.append("缺少上年度经审计的财报（2026年须提交2025年财报）")
+            supplement_items.append(financial_missing)
         # Explicit failed qualifications belong to the return checklist, not a
         # clipped secondary note where expiry can disappear behind holder issues.
         for cid, cname, desc in other_fails:
@@ -300,6 +300,8 @@ def build_opinion(tid, s2, textin, cache):
         other_issues = []
         for c in manual_items:
             cid = c.get("id", "")
+            if cid == "A08" and a08_needs_financial:
+                continue
             cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
             desc = c.get("detail") or c.get("message") or "需人工核验"
             other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")

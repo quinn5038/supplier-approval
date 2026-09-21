@@ -12,8 +12,78 @@ import gen_opinion
 import gen_stage2_report
 import textin_pipeline as tp
 from eval import safe_eval_rule
-from financial_data import assess_financial
+from financial_data import assess_financial, financial_report_presence
 from material_policy import file_types, hydrate_iso_cache, is_public_material
+
+
+@pytest.mark.parametrize("public_detail", [
+    "未取得带报告期的公开财务数据", "已取得上年度公开财务数据", "旧版任意描述"])
+def test_a08_missing_is_numbered_and_not_repeated_as_other_issue(public_detail):
+    checklist = [
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明"},
+        {"id": "A08", "name": "资金财务状况", "status": "manual",
+         "detail": public_detail},
+    ]
+    cache = {"1": {"supplier": {"has_financial_report": False},
+                     "materials_detail": [{"fileName": "备案表.docx", "types": []}]}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "reject", "checklist": checklist}, {}, cache)
+    first_line, *rest = opinion.splitlines()
+    assert "退回。" in first_line
+    assert "缺少经审计的上年度财报" in first_line
+    assert not any("[A08]" in line for line in rest)
+
+
+def test_a08_only_missing_still_returns_with_numbered_item():
+    checklist = [{"id": "A08", "name": "资金财务状况", "status": "manual",
+                  "detail": "未取得带报告期的公开财务数据"}]
+    cache = {"1": {"supplier": {"has_financial_report": False},
+                     "materials_detail": []}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "manual", "checklist": checklist}, {}, cache)
+    assert opinion.startswith("退回。1. 缺少经审计的上年度财报")
+    assert "另需整改/核实：[A08]" not in opinion
+
+
+def test_a08_uploaded_can_remain_in_other_review_section():
+    materials = [{"fileName": "2025年度审计报告.pdf", "types": ["financial_report"]}]
+    assert financial_report_presence({"has_financial_report": False}, materials) is True
+    checklist = [
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明"},
+        {"id": "A08", "name": "资金财务状况", "status": "manual",
+         "detail": "已取得上年度公开财务数据，仍需核对审计意见"},
+    ]
+    cache = {"1": {"supplier": {"has_financial_report": False},
+                     "materials_detail": materials}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "reject", "checklist": checklist}, {}, cache)
+    assert "缺少经审计的上年度财报" not in opinion.splitlines()[0]
+    assert "另需整改/核实：[A08]资金财务状况" in opinion
+
+
+def test_a08_unknown_upload_state_is_not_declared_missing():
+    assert financial_report_presence({}) is None
+    checklist = [{"id": "A08", "name": "资金财务状况", "status": "manual",
+                  "detail": "上传状态待确认"}]
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "manual", "checklist": checklist}, {}, {})
+    assert "缺少经审计的上年度财报" not in opinion
+
+
+def test_a08_missing_is_rule_failure_even_when_public_data_exists():
+    supplier = {"has_financial_report": True}
+    rule = next(r for r in aa.load_rules()["part_1_basic"]["domestic"]
+                if r["id"] == "A08")
+    checklist, _, missing, _ = aa.build_checklist(supplier, [rule], [])
+    assert checklist[0]["status"] == "fail"
+    assert missing == [rule]
+    assert supplier["has_financial_report"] is False
+    checklist, _ = aa.enhance_checklist_with_qcc(
+        checklist, supplier, {"financial": {"报告期": str(date.today().year - 1)}})
+    assert checklist[0]["status"] == "fail"
+    assert "缺少经审计的上年度财报" in checklist[0]["detail"]
 
 
 def test_business_license_inline_spaced_address_does_not_join_legal_person():

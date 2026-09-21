@@ -944,6 +944,21 @@ def build_checklist(supplier, rules_list, materials_detail=None):
 
         entry = {"id": rid, "name": name, "status": "pass", "detail": ""}
 
+        if rid == "A08":
+            from financial_data import assess_financial, financial_report_presence
+            submitted = financial_report_presence(supplier, materials_detail)
+            if submitted is not None:
+                supplier["has_financial_report"] = submitted
+            assessment = assess_financial({}, submitted=submitted)
+            entry.update(status="fail" if submitted is False else "manual",
+                         detail=assessment["detail"], evidence=assessment)
+            checklist.append(entry)
+            if submitted is False:
+                missing_rules.append(rule)
+            else:
+                verify_items.append(entry["detail"])
+            continue
+
         if rid == "E2":
             files = _performance_files(materials_detail)
             entry["files"] = files
@@ -1990,9 +2005,10 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
         # ---- A08 资金财务状况（2026-09-04 保密合规改造）----
         # 改走企查查财务数据（公开披露），不再依赖 TextIn 解析供应商上传的财报（敏感数据）
         elif cid == "A08":
-            from financial_data import assess_financial
-            assessment = assess_financial(qcc.get("financial") or {})
-            c["status"] = "manual"
+            from financial_data import assess_financial, financial_report_presence
+            submitted = financial_report_presence(supplier)
+            assessment = assess_financial(qcc.get("financial") or {}, submitted=submitted)
+            c["status"] = "fail" if submitted is False else "manual"
             c["detail"] = assessment["detail"]
             c["evidence"] = assessment
             qcc_issues.append("A08 财报：" + assessment["detail"])
