@@ -117,6 +117,52 @@ def test_business_license_lishang_spaced_address_boundary():
     assert result["checks"]["法人一致"] is True
 
 
+@pytest.mark.parametrize("placeholder", ["********", "＊＊＊＊＊＊＊＊"])
+def test_business_license_asterisk_term_is_unbounded(placeholder):
+    text = ("| 营业期限 | **2006-07-26 至 " + placeholder + "** |\n"
+            "| 名称 | 正信光电科技股份有限公司 |")
+    result = tp.extract("business_license", text, {})
+    assert result["checks"]["营业期限长期或有效"] is True
+    assert not any("营业期限已到期" in issue for issue in result["issues"])
+
+
+def test_business_license_incomplete_date_range_does_not_expire_on_start_date():
+    result = tp.extract("business_license", "营业期限：2006-07-26 至", {})
+    assert result["checks"].get("营业期限长期或有效") is not False
+    assert not any("营业期限已到期" in issue for issue in result["issues"])
+
+
+@pytest.mark.parametrize("term,expected,expiry", [
+    ("2015-01-01 至 2099-12-31", True, None),
+    ("2006-07-26 至 2020-07-25", False, "2020-07-25"),
+    ("2099-12-31", True, None),
+])
+def test_business_license_normal_terms_keep_existing_expiry_behavior(term, expected, expiry):
+    result = tp.extract("business_license", "营业期限：" + term, {})
+    assert result["checks"]["营业期限长期或有效"] is expected
+    if expiry:
+        assert any(expiry in issue for issue in result["issues"])
+    else:
+        assert not any("营业期限已到期" in issue for issue in result["issues"])
+
+
+def test_business_scope_removes_inline_address_and_trailing_registration_label():
+    ocr = ("经营范围 一般项目：白蚁防治、灭鼠及其它害虫防治的技术服务，"
+           "农作物病虫害防治服 住 所 重庆市渝中区嘉陵东村45号2-3 "
+           "务，林业有害生物防治服务，林业产品销售、机械零件、零部侏销售 "
+           "登记机关 -->")
+    system = ("白蚁防治、灭鼠及其它害虫防治的技术服务，"
+              "农作物病虫害防治服务，林业有害生物防治服务，林业产品销售、"
+              "机械零件、零部件销售")
+    result = tp.extract("business_license", ocr, {"busi_scope": system})
+    scope = result["fields"]["经营范围"]
+    assert "住所" not in scope
+    assert "重庆市渝中区嘉陵东村45号2-3" not in scope
+    assert "登记机关" not in scope
+    assert result["checks"]["经营范围一致"] is True
+    assert 98 <= float(result["fields"]["经营范围相似度"].rstrip("%")) < 100
+
+
 @pytest.mark.parametrize("doc_type,title,standard", [
     ("iso9001", "质量管理体系认证证书", "ISO9001:2015"),
     ("iso14001", "环境管理体系认证证书", "ISO14001:2015"),
@@ -142,6 +188,27 @@ def test_iso_supervision_footer_alone_is_not_holder():
                         {"full_name": "邯郸市利尚金属制品有限公司"})
     assert result["fields"]["获证组织"] is None
     assert "持有人一致" not in result["checks"]
+
+
+@pytest.mark.parametrize("doc_type,title,english_title,system_name", [
+    ("iso9001", "质量管理体系认证证书", "QMS CERTIFICATE OF REGISTRATION", "质量管理体系"),
+    ("iso14001", "环境管理体系认证证书", "EMS CERTIFICATE OF REGISTRATION", "环境管理体系"),
+    ("iso45001", "职业健康安全管理体系认证证书", "OHSMS CERTIFICATE OF REGISTRATION",
+     "职业健康安全管理体系"),
+])
+def test_iso_declaration_separates_certification_body_from_holder(
+        doc_type, title, english_title, system_name):
+    text = ("华信技术检验有限公司\nVOUCHING TECHNICAL INSPECTION LTD\n"
+            f"{title}\n{english_title}\n"
+            f"我公司认定下列组织的{system_name}\n"
+            "辽宁昊特电器有限公司\n统一社会信用代码91210804MA7HDNRN9N\n"
+            "生效日期：2026-01-11 终止日期：2029-01-10")
+    result = tp.extract(doc_type, text, {"full_name": "辽宁昊特电器有限公司"})
+    assert result["fields"]["获证组织"] == "辽宁昊特电器有限公司"
+    assert result["fields"]["获证组织_来源"] == "我公司认定下列组织"
+    assert result["fields"]["认证机构"] == "华信技术检验有限公司"
+    assert result["checks"]["持有人一致"] is True
+    assert not any("持有人" in issue and "不一致" in issue for issue in result["issues"])
 
 
 @pytest.mark.parametrize("labels,carrier", [("承运商", True), ("运输商/承运商", True),

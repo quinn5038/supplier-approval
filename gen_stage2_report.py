@@ -246,11 +246,15 @@ def render_supplier(tid, s2, textin, cache):
                     # 9/6：核验结果列——ISO 证书显示有效期，营业执照显示法人差异
                     if doc_type in ("iso9001", "iso14001", "iso45001"):
                         org = fields.get("获证组织")
+                        certification_body = fields.get("认证机构")
                         exp = fields.get("有效期至")
                         valid = checks.get("在有效期内")
                         if org:
                             check_detail_parts.append(
                                 f"<span class='kv'><span class='k'>获证组织</span>=<span class='v'>{esc(org)}</span></span>")
+                        if certification_body:
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>认证机构</span>=<span class='v'>{esc(certification_body)}</span></span>")
                         if exp:
                             if valid is True:
                                 check_detail_parts.append(

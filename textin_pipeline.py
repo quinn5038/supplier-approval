@@ -403,6 +403,17 @@ def _extract_business_scope(text):
         r"|(?:\n\s*\d+[、.．]\s*本营业执照)|<!--|数字签名", tail)
     if boundary:
         tail = tail[:boundary.start()]
+    # TextIn 对双栏营业执照有时按横向阅读顺序输出，会把右栏的住所插入
+    # 左栏经营范围的换行中，例如“病虫害防治服 住 所 重庆市...45号2-3 务”。
+    # 删除明确以“住所”标注且以门牌号结束的地址，同时保留地址前后的经营
+    # 范围文字，使“服”+“务”仍可在后续标准化时还原为“服务”。
+    tail = re.sub(
+        r"\s*住所\s*[\u4e00-\u9fa5\dA-Za-z\-—－号弄幢栋单元室座楼层]+?"
+        r"号[\dA-Za-z\-—－]*\s*",
+        " ", tail)
+    # 扫描件常只识别出右下角“登记机关”标签而没有机关名称。同行标签没有
+    # 冒号，旧边界规则不会截断，需在字段尾部清除，避免参与经营范围相似度。
+    tail = re.sub(r"\s*(?:登记机关|核准日期)\s*(?:-->)?\s*$", "", tail)
     tail = re.sub(r"(?m)^\s*(?:说明|经营范围说明)\s*[:：]?\s*$", "", tail).strip()
     return tail or None
 
@@ -437,6 +448,7 @@ def _scope_items(text):
 
 def extract_business_license(text, supplier):
     """营业执照 → 字段+与系统信息比对（按行结构抽取，兼容md表格/加粗排版）"""
+    raw_text = str(text or "")
     t = _normalise_field_labels(_pre(text))
     # 竖排标签被 OCR 拆散规整：TextIn 把「名称/类型」竖排标签拆成「名/类/称/型」
     # 乱序，_pre 断行合并后「名称」变「名类称」、「类型」的「型」字被单独留下
@@ -489,11 +501,22 @@ def extract_business_license(text, supplier):
     mm = re.search(r"营业期限\s*[:：]?\s*([^\n]{1,60})", t)
     if mm:
         seg = mm.group(1)
-        if re.search(r"长期|永久|无固定期限", seg):
+        # 部分长期营业执照把截止日印为“********”。TextIn 的 Markdown 还会
+        # 使用 ** 表示加粗，而 _pre 会删除这些星号，所以必须同时查看预处理前
+        # 的营业期限原文，避免只剩起始日后把它误当成截止日。
+        raw_term = re.search(r"营\s*业\s*期\s*限[^\r\n]{0,120}", raw_text)
+        star_unbounded = bool(
+            raw_term and re.search(r"(?:\*\s*){4,}|(?:＊\s*){4,}", raw_term.group(0))
+        )
+        if star_unbounded or re.search(r"长期|永久|无固定期限", seg):
             checks["营业期限长期或有效"] = True
         else:
             ds = _find_dates(seg)
-            if ds:
+            # “起始日 至 [截止日未识别]”只有一个日期时，该日期是起始日，
+            # 不能据此判定执照过期。没有范围连接词的单日期仍按截止日处理，
+            # 以兼容只印到期日的正常执照格式。
+            incomplete_range = len(ds) == 1 and re.search(r"至|到", seg)
+            if ds and not incomplete_range:
                 exp = max(ds)
                 checks["营业期限长期或有效"] = exp >= date.today()
                 if not checks["营业期限长期或有效"]:
@@ -522,6 +545,11 @@ def extract_business_license(text, supplier):
             license_only = [v for v in license_items if v not in system_items]
             system_only = [v for v in system_items if v not in license_items]
             if license_items and system_items and not license_only and not system_only:
+                checks["经营范围一致"] = True
+            elif ratio >= 0.98:
+                # 清除双栏错位字段后，少量 OCR 形近字（如“件”→“侏”）不应让
+                # 实质相同的长经营范围转人工。98% 阈值只容忍极少字符误差，
+                # 不改变存在项目增删或较大文本差异时的原有判定。
                 checks["经营范围一致"] = True
             elif min(len(license_norm), len(system_norm)) < max(len(license_norm), len(system_norm)) * 0.65:
                 issues.append(f"经营范围文本长度差异较大，可能提取不完整（相似度{ratio:.0%}），需人工核验")
@@ -822,6 +850,16 @@ def _extract_iso_holder(text):
     if match:
         return match.group(1).strip(" 　。，,；;、"), "兹证明"
 
+    # 部分认证机构使用“我公司认定下列组织的……管理体系”作为声明，真正的
+    # 获证组织位于其下一行。该声明的权威性等同“兹证明”，必须优先于页眉中的
+    # 认证机构名称，否则兜底的第一家公司会误抓发证机构。
+    declaration = re.search(
+        rf"(?:^|\n)\s*(?:我公司|本公司|本机构|本认证机构)?\s*"
+        rf"(?:认定|确认|证明)\s*(?:下列|以下)\s*组织[^\n]{{0,50}}"
+        rf"\n+\s*({company})\s*(?=\n|$)", text)
+    if declaration:
+        return declaration.group(1).strip(" 　。，,；;、"), "我公司认定下列组织"
+
     # Accept an explicit field only when it looks like a field (line start plus
     # colon).  A bare occurrence inside explanatory prose is deliberately ignored.
     labels = ("获证组织", "认证委托人", "受审核方", "组织名称", "证书持有者")
@@ -837,10 +875,44 @@ def _extract_iso_holder(text):
     # take the first standalone organisation line, while rejecting supervision text.
     for match in re.finditer(rf"(?m)^\s*({company})\s*$", text):
         value = match.group(1).strip(" 　。，,；;、")
+        # 页眉认证机构通常位于中英文证书标题之前。该位置的公司是发证方，
+        # 不是获证组织；即使声明句 OCR 失败也不能将其作为持有人兜底。
+        following = text[match.end():match.end() + 240]
+        next_company = re.search(rf"(?m)^\s*({company})\s*$", following)
+        cert_title = re.search(
+            r"(?:质量|环境|职业健康安全)管理体系认证证书|"
+            r"(?:QMS|EMS|OHSMS)\s+CERTIFICATE\s+OF\s+REGISTRATION",
+            following, re.I)
+        if cert_title and (not next_company or cert_title.start() < next_company.start()):
+            continue
         if not re.search(r"须按规定|必须|接受年度监督|定期接受监督|监督审核|"
                          r"方可保持|有效性|经审核合格", value):
             return value, "证书版面推断（无标签）"
     return None, None
+
+
+def _extract_iso_certification_body(text, holder=None):
+    """Extract the issuing/certification body separately from the holder."""
+    company = r"[^\n:：]{2,60}?(?:公司|集团|中心|厂)"
+    for label in ("认证机构", "发证机构", "检验机构", "认证方"):
+        match = re.search(rf"(?m)^\s*{label}\s*[:：]\s*({company})\s*$", text)
+        if match:
+            return match.group(1).strip(" 　。，,；;、")
+
+    # 无显式标签时，证书标题之前的独立公司名称通常是认证机构页眉。
+    for match in re.finditer(rf"(?m)^\s*({company})\s*$", text):
+        value = match.group(1).strip(" 　。，,；;、")
+        if holder and _norm(value) == _norm(holder):
+            continue
+        following = text[match.end():match.end() + 240]
+        next_company = re.search(rf"(?m)^\s*({company})\s*$", following)
+        cert_title = re.search(
+            r"(?:质量|环境|职业健康安全)管理体系认证证书|"
+            r"(?:QMS|EMS|OHSMS)\s+CERTIFICATE\s+OF\s+REGISTRATION",
+            following, re.I)
+        if cert_title and (not next_company or cert_title.start() < next_company.start()):
+            return value
+    return None
 
 
 def extract_iso_cert(text, supplier, iso_code):
@@ -851,6 +923,9 @@ def extract_iso_cert(text, supplier, iso_code):
     fields["获证组织"], holder_source = _extract_iso_holder(t)
     if holder_source:
         fields["获证组织_来源"] = holder_source
+    certification_body = _extract_iso_certification_body(t, fields["获证组织"])
+    if certification_body:
+        fields["认证机构"] = certification_body
     m = re.search(r"证书编号\s*[:：]?\s*([A-Za-z0-9\-]{6,30})", t)
     fields["证书编号"] = m.group(1) if m else None
     exp, longterm = _valid_until(t)
