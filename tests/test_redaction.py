@@ -37,6 +37,27 @@ def test_name_label_confusion_without_front_context_stays_fail_closed():
     assert masker.find_name_field(items, 1712, 1080) is None
 
 
+def test_low_contrast_front_recovers_name_when_label_becomes_hash():
+    items = [
+        _item("#测试姓名", (149, 151, 580, 237), 0.91),
+        _item("1990年1月1日", (346, 408, 885, 473)),
+        _item("示例省示例市测试区", (342, 547, 1024, 602)),
+        _item("公民身号110101199001011234", (155, 856, 1493, 922)),
+    ]
+    field = masker.find_name_field(items, 1712, 1080)
+    assert field is not None
+    assert field.value == "测试姓名"
+    assert masker.horizontal_field(field)
+
+
+def test_positional_name_recovery_requires_id_number_and_birth_date():
+    items = [
+        _item("#敏感姓名", (149, 151, 580, 237)),
+        _item("1990年1月1日", (346, 408, 885, 473)),
+    ]
+    assert masker.find_name_field(items, 1712, 1080) is None
+
+
 def test_unrecognised_image_is_black():
     original = np.full((108, 171, 3), 255, dtype=np.uint8)
     masked, result = masker.process_page(original, EmptyOcr(), "single", "synthetic", 1)
@@ -59,6 +80,66 @@ def test_background_outside_detected_card_is_black(monkeypatch):
     result, _ = masker.process_page(original, EmptyOcr(), "auto", "synthetic", 1)
     assert result[0:10].max() == 0
     assert result[30:35, 30:50].min() == 255
+
+
+def test_blue_card_fallback_ignores_large_red_stamp_and_finds_both_sides(monkeypatch):
+    image = np.full((780, 1000, 3), 255, dtype=np.uint8)
+    # Pale-blue security backgrounds of the back and front sides.
+    cv2 = __import__("cv2")
+    cv2.rectangle(image, (250, 80), (750, 395), (235, 215, 185), -1)
+    cv2.rectangle(image, (250, 440), (750, 755), (235, 215, 185), -1)
+    # A red seal crosses both cards and would otherwise dominate contour detection.
+    cv2.circle(image, (700, 415), 180, (40, 40, 210), 24)
+
+    cards = masker.find_blue_card_regions(image)
+    assert len(cards) == 2
+    assert all(1.3 <= (quad[:, 0].max() - quad[:, 0].min()) /
+               (quad[:, 1].max() - quad[:, 1].min()) <= 1.9 for quad in cards)
+
+    bad_stamp_quad = np.array([[650, 160], [870, 500], [650, 650], [430, 310]],
+                              dtype=np.float32)
+    monkeypatch.setattr(masker, "find_cards", lambda source: [bad_stamp_quad])
+    seen = []
+
+    def fake_redact(source, quad, ocr, card_index):
+        seen.append(quad)
+        return (np.zeros_like(source), np.zeros(source.shape[:2], dtype=np.uint8),
+                masker.CardResult(card_index, "front" if card_index == 2 else "back"))
+
+    monkeypatch.setattr(masker, "redact_card", fake_redact)
+    _, result = masker.process_page(image, EmptyOcr(), "auto", "stamped.pdf", 1)
+    assert len(seen) == 2
+    assert [card.side for card in result.cards] == ["back", "front"]
+
+
+def test_analyse_card_rejects_vertical_validity_box_from_wrong_rotation():
+    horizontal = [
+        _item("有效期限2025.07.01-长期", (400, 800, 1150, 880)),
+        _item("签发机关", (400, 700, 650, 770)),
+        _item("居民身份证", (500, 200, 1100, 330)),
+    ]
+    vertical_but_more_markers = [
+        _item("有效期限2025.07.01-长期", (100, 150, 180, 950)),
+        _item("签发机关", (220, 150, 300, 550)),
+        _item("居民身份证", (500, 150, 600, 800)),
+        _item("有效期", (700, 150, 780, 450)),
+    ]
+
+    class RotationOcr:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, image):
+            values = [horizontal, [], vertical_but_more_markers, []][self.calls]
+            self.calls += 1
+            return values
+
+    side, field, forward, _ = masker.analyse_card(
+        np.full((1080, 1712, 3), 255, dtype=np.uint8), RotationOcr())
+    assert side == "back"
+    assert field is not None and field.value == "2025.07.01-长期"
+    assert masker.horizontal_field(field)
+    assert forward is None
 
 
 def test_two_page_pdf_outputs_both_pages(tmp_path):

@@ -190,13 +190,33 @@ def find_name_field(items: Iterable[OcrItem], width: int, height: int) -> FieldM
     if exact:
         return exact
     front_score, _ = side_scores(records)
-    if front_score < 2:
+    if front_score >= 2:
+        # Common PaddleOCR confusions observed on the blue label over holographic
+        # backgrounds: 姓→城/性 and 名→各/多.  Extra trailing noise is handled by
+        # find_field's same-row value association.
+        fuzzy = find_field(records, "name", ("城名", "性名", "姓各", "姓多"),
+                           is_name_value, width, height)
+        if fuzzy:
+            return fuzzy
+
+    # Low-contrast photocopies can erase the blue “姓名” label completely while
+    # retaining a noisy name value, the birth date and the 18-digit identity number. Only
+    # enable positional name recovery with both strong front-side anchors, so an
+    # arbitrary Chinese phrase on a non-ID image is never exposed.
+    combined = "".join(normalise_text(item.text) for item in records)
+    has_identity_number = bool(re.search(r"(?<!\d)\d{17}[\dXx](?!\d)", combined))
+    has_birth_date = bool(re.search(
+        r"(?:19|20)\d{2}年\d{1,2}月\d{1,2}[日白]?", combined))
+    if not (has_identity_number and has_birth_date):
         return None
-    # Common PaddleOCR confusions observed on the blue label over holographic
-    # backgrounds: 姓→城/性 and 名→各/多.  Extra trailing noise is handled by
-    # find_field's same-row value association.
-    return find_field(records, "name", ("城名", "性名", "姓各", "姓多"),
-                      is_name_value, width, height)
+    for item in sorted(records, key=lambda value: (value.bounds[1], value.bounds[0])):
+        x1, y1, x2, y2 = item.bounds
+        if (x1 + x2) / 2 > width * 0.55 or (y1 + y2) / 2 > height * 0.45:
+            continue
+        value = re.sub(r"^[^\u3400-\u9fff·]+", "", normalise_text(item.text))
+        if 2 <= len(value) <= 6 and is_name_value(value):
+            return FieldMatch("name", value, padded_box(item.bounds, width, height))
+    return None
 
 
 def order_quad(points: np.ndarray) -> np.ndarray:
@@ -247,6 +267,58 @@ def find_cards(image: np.ndarray) -> list[np.ndarray]:
         if not any(cv2.pointPolygonTest(existing, centre, False) >= 0 for existing in selected):
             selected.append(candidate)
     return sorted(selected, key=lambda quad: (float(quad[:, 1].mean()), float(quad[:, 0].mean())))
+
+
+def find_blue_card_regions(image: np.ndarray) -> list[np.ndarray]:
+    """Locate pale-blue ID cards when red stamps corrupt contour detection.
+
+    A large seal can connect the two cards and create a convincing rotated
+    rectangle.  The ID-card security background remains blue while the seal is
+    red, so row/column projections of blue pixels recover the two real card
+    regions without treating the seal as a boundary.
+    """
+    height, width = image.shape[:2]
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    blue = ((hsv[:, :, 0] >= 75) & (hsv[:, :, 0] <= 135)
+            & (hsv[:, :, 1] >= 15) & (hsv[:, :, 2] >= 100))
+    row_counts = blue.sum(axis=1)
+    row_indexes = np.flatnonzero(row_counts >= max(24, int(width * 0.04)))
+    if not len(row_indexes):
+        return []
+
+    runs: list[tuple[int, int]] = []
+    start = previous = int(row_indexes[0])
+    for index in row_indexes[1:]:
+        index = int(index)
+        if index > previous + 1:
+            runs.append((start, previous))
+            start = index
+        previous = index
+    runs.append((start, previous))
+
+    cards: list[np.ndarray] = []
+    for y1, y2 in runs:
+        band_height = y2 - y1 + 1
+        if band_height < height * 0.08:
+            continue
+        column_counts = blue[y1:y2 + 1].sum(axis=0)
+        column_indexes = np.flatnonzero(
+            column_counts >= max(16, int(band_height * 0.08)))
+        if not len(column_indexes):
+            continue
+        x1, x2 = int(column_indexes[0]), int(column_indexes[-1])
+        card_width = x2 - x1 + 1
+        ratio = card_width / max(1, band_height)
+        if not 1.30 <= ratio <= 1.90:
+            continue
+        if card_width * band_height < width * height * 0.02:
+            continue
+        pad_x, pad_y = max(2, int(card_width * 0.008)), max(2, int(band_height * 0.008))
+        x1, x2 = max(0, x1 - pad_x), min(width - 1, x2 + pad_x)
+        y1, y2 = max(0, y1 - pad_y), min(height - 1, y2 + pad_y)
+        cards.append(order_quad(np.array(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)))
+    return sorted(cards, key=lambda quad: (float(quad[:, 1].mean()), float(quad[:, 0].mean())))
 
 
 def full_image_card(image: np.ndarray) -> np.ndarray:
@@ -320,6 +392,14 @@ def rotate(image: np.ndarray, code: int | None) -> np.ndarray:
     return image if code is None else cv2.rotate(image, code)
 
 
+def horizontal_field(field: FieldMatch | None) -> bool:
+    """Identity-card retained fields are horizontal after correct orientation."""
+    if not field:
+        return False
+    x1, y1, x2, y2 = field.box
+    return (x2 - x1) >= (y2 - y1) * 1.15
+
+
 def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None, int | None, int | None]:
     candidates = []
     for forward, backward in ROTATIONS:
@@ -329,9 +409,9 @@ def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None
         name = find_name_field(items, width, height)
         validity = find_field(items, "valid_until", ("有效期限", "有效期"), is_validity_value, width, height)
         front_score, back_score = side_scores(items)
-        if name:
+        if name and horizontal_field(name):
             candidates.append((100 + front_score, "front", name, forward, backward))
-        elif validity:
+        elif validity and horizontal_field(validity):
             candidates.append((100 + back_score, "back", validity, forward, backward))
         elif front_score > back_score:
             candidates.append((front_score, "front", None, forward, backward))
@@ -367,6 +447,12 @@ def redact_card(source: np.ndarray, quad: np.ndarray, ocr: CardOcr, card_index: 
 
 def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str, page: int) -> tuple[np.ndarray, PageResult]:
     cards = [full_image_card(source)] if layout == "single" else find_cards(source)
+    # 红章跨越正反面时，轮廓法可能把印章识别成唯一的斜四边形（打码结果呈
+    # 菱形且漏掉正面）。蓝色防伪底纹若能明确定位出两张卡，优先采用真实卡片区域。
+    if layout != "single" and len(cards) < 2:
+        blue_cards = find_blue_card_regions(source)
+        if len(blue_cards) >= 2:
+            cards = blue_cards
     # 9/11：无清晰矩形边框的上下排身份证，find_cards 可能返回 0；
     # auto 布局也应尝试上下二分兜底（此前仅 stacked 触发，导致「正反面均未识别」）
     if not cards and layout != "single":

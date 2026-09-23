@@ -1309,6 +1309,9 @@ def determine_supplier_rules(supplier, cfg):
 
     # 第二部分：按类型选查
     sup_type_name = _supplier_type(supplier)
+    business_scope = str(supplier.get("busi_scope") or "")
+    scope_has_trade = any(k in business_scope for k in
+                          ("销售", "批发", "零售", "贸易", "经销", "代理", "采购", "进出口"))
 
     type_rules = []
     type_label = ""
@@ -1334,16 +1337,20 @@ def determine_supplier_rules(supplier, cfg):
             type_label = "境内贸易商"
     elif "服务" in sup_type_name and not any(
             k in sup_type_name for k in ("租赁", "生产", "制造", "贸易", "经销", "代理", "厂家")):
-        # 9/11：纯服务商（如「服务商」）不属于生产/贸易/经销/代理任一类，
-        # 只需核实 A 类基本材料，无需 D1 贸易商/厂家专属核验。
-        # 排除「租赁商/服务商」（租赁本质物资贸易，仍走贸易商）等混合类型。
-        type_rules = []
-        type_label = "服务商"
+        # 系统标签只有“服务商”时仍需按经营范围补充识别。工程设计企业若同时
+        # 从事设备采购、销售或进出口，应按“宁多勿缺”同时覆盖经销商规则，
+        # 不能因系统单一标签漏掉 D 类资质核验。
+        if scope_has_trade:
+            type_rules = part2.get("overseas_trader" if is_foreign else "domestic_trader", [])
+            type_label = "经销商/服务商（经营范围补充识别）"
+        else:
+            type_rules = []
+            type_label = "服务商"
 
     all_rules = basic_rules
     # 9/5 改造：sup_type_name="其他"时按经营范围交叉验证推断类目
     if not type_label and not is_foreign:
-        busi = (supplier.get("busi_scope") or "") + " " + (supplier.get("supTypeName") or "")
+        busi = business_scope + " " + (supplier.get("supTypeName") or "")
         if any(k in busi for k in ("销售", "批发", "零售", "贸易", "经销", "代理")):
             type_rules = part2.get("domestic_trader", [])
             type_label = "境内贸易商（推断自经营范围）"

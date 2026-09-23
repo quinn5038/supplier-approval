@@ -603,13 +603,14 @@ def _infer_supplier_type(supplier, tdesc):
     busi = (supplier.get("busi_scope") or "") + " " + (tdesc or "")
     if not busi.strip():
         return ""
-    if any(k in busi for k in _TRADE_HINTS):
-        return "贸易商/经销商"
+    inferred = []
+    if any(k in busi for k in _TRADE_HINTS + ("采购", "进出口")):
+        inferred.append("贸易商/经销商")
     if any(k in busi for k in _MANUFACTURE_HINTS):
-        return "生产/制造商"
-    if any(k in busi for k in _SERVICE_HINTS):
-        return "服务商"
-    return ""
+        inferred.append("生产/制造商")
+    if any(k in busi for k in _SERVICE_HINTS + ("设计", "系统集成", "项目管理", "监理")):
+        inferred.append("服务商")
+    return "、".join(inferred)
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)

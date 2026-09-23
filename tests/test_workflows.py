@@ -300,7 +300,7 @@ def test_production_expiry_is_visible_after_holder_issue_and_in_return_list():
     ("承运商", "E1"), ("运输商/承运商", "E1"),
 ])
 def test_carrier_routing(labels, expected):
-    supplier = {"sup_type": labels, "busi_scope": "销售生产"}
+    supplier = {"sup_type": labels, "busi_scope": ""}
     assert aa.is_special_category(supplier)[0] is False
     rules, _ = aa.determine_supplier_rules(supplier, aa.load_rules())
     ids = {r["id"] for r in rules}
@@ -309,6 +309,23 @@ def test_carrier_routing(labels, expected):
     if "服务商" in labels and "代理商" not in labels:
         assert "D1_03" not in ids
     assert ("E1" in ids) is aa._pure_carrier(supplier)
+
+
+def test_service_supplier_scope_supplements_trader_rules_without_dropping_service():
+    supplier = {
+        "sup_type": "服务商",
+        "busi_scope": ("工程设计、工程咨询、项目管理；设备设计、设备采购、设备成套、"
+                       "系统集成服务；设备和材料进出口；销售机械电器设备"),
+    }
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "D1_03" in ids
+    assert "经销商" in type_desc
+    assert "服务商" in type_desc
+    assert "经营范围补充识别" in type_desc
+    inferred = gen_stage2_report._infer_supplier_type(supplier, type_desc)
+    assert "贸易商/经销商" in inferred
+    assert "服务商" in inferred
 
 
 @pytest.mark.parametrize("text,status", [
