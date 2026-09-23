@@ -77,6 +77,19 @@ def _is_hard_fail(issue_text: str) -> bool:
     return any(k in issue_text for k in HARD_FAIL_KEYWORDS)
 
 
+def _is_missing_material_issue(detail: str) -> bool:
+    """是否明确表示整份材料未提交，而不是材料内部字段识别不全。
+
+    OCR 问题可能写成“营业执照识别不完整，缺少字段：名称、法定代表人”。
+    这种情况说明文件已经提交，只是内容核验失败；若仅按“缺少”子串判断，
+    会错误套用“缺少营业执照副本”等补件模板。
+    """
+    text = re.sub(r"\s+", "", str(detail or ""))
+    if text.startswith(("缺少", "未上传", "未提交", "材料缺失", "需上传", "需补充")):
+        return True
+    return bool(re.search(r"(?:材料|附件|文件)(?:尚未|未)(?:上传|提交|提供)", text))
+
+
 def _supplier_brief(s2, cache_entry):
     """生成公司概况一句话"""
     s2.get("name", "")
@@ -214,15 +227,15 @@ def build_opinion(tid, s2, textin, cache):
     manual_items = [c for c in checklist
                     if c.get("status") in ("pending", "partial", "manual")]
 
-    # fail 细分：缺材料（detail 含"缺少/未上传/材料缺失"，可退回补办）vs 其他异常（不一致/已过期/核验问题，需整改）
+    # fail 细分：明确缺少整份材料（可退回补办）vs 其他异常
+    # （不一致/已过期/OCR 缺少字段等核验问题，需整改）。
     supplement_fails = []   # 缺材料，退回补办
     other_fails = []        # 其他 fail（整改）
     for c in fail_items:
         cid = c.get("id", "")
         cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
         detail = c.get("detail") or c.get("message") or ""
-        if ("缺少" in detail or "未上传" in detail or "材料缺失" in detail
-                or "需上传" in detail):
+        if _is_missing_material_issue(detail):
             supplement_fails.append((cid, cname, detail))
         else:
             other_fails.append((cid, cname, detail))

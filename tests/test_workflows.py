@@ -626,6 +626,27 @@ def test_final_opinion_contains_every_missing_material():
     assert opinion.index("缺少纳税信用等级证明") < opinion.index("缺少新增专项资质证明")
 
 
+def test_ocr_missing_fields_does_not_claim_submitted_business_license_is_missing():
+    stage2 = {"name": "合成钢铁供应链有限公司", "decision": "reject", "checklist": [
+        {"id": "A01", "name": "法律主体资格", "status": "fail",
+         "detail": "OCR核验发现问题：营业执照识别不完整，缺少字段：名称、法定代表人"},
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明（须为正规文件，C级及以上）"},
+    ]}
+    cache = {"1": {
+        "supplier": {"has_business_license": True},
+        "materials_detail": [
+            {"fileName": "合成营业执照.png", "types": ["business_license"]},
+        ],
+    }}
+
+    opinion = gen_opinion.build_opinion("1", stage2, {}, cache)
+
+    assert "缺少营业执照副本" not in opinion
+    assert "缺少纳税信用等级证明" in opinion
+    assert "[A01]法律主体资格：OCR核验发现问题" in opinion
+
+
 def test_demo_three_decisions():
     from demo import cases
     results = cases()

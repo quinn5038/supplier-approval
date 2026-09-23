@@ -112,6 +112,37 @@ def test_blue_card_fallback_ignores_large_red_stamp_and_finds_both_sides(monkeyp
     assert [card.side for card in result.cards] == ["back", "front"]
 
 
+def test_blue_card_fallback_splits_side_by_side_cards_crossed_by_stamp(monkeypatch):
+    image = np.full((600, 1300, 3), 255, dtype=np.uint8)
+    cv2 = __import__("cv2")
+    # Synthetic blue security backgrounds share one vertical band but have a
+    # narrow white gap. A seal below the gap makes contour detection return one
+    # combined region, matching the production failure without using real IDs.
+    cv2.rectangle(image, (80, 80), (630, 425), (235, 215, 185), -1)
+    cv2.rectangle(image, (650, 80), (1200, 425), (235, 215, 185), -1)
+    cv2.circle(image, (640, 440), 145, (40, 40, 210), 20)
+
+    cards = masker.find_blue_card_regions(image)
+    assert len(cards) == 2
+    assert cards[0][:, 0].max() < cards[1][:, 0].min()
+
+    combined = np.array([[80, 80], [1200, 80], [1050, 570], [230, 570]],
+                        dtype=np.float32)
+    monkeypatch.setattr(masker, "find_cards", lambda source: [combined])
+    seen = []
+
+    def fake_redact(source, quad, ocr, card_index):
+        seen.append(quad)
+        side = "front" if card_index == 1 else "back"
+        return (np.zeros_like(source), np.zeros(source.shape[:2], dtype=np.uint8),
+                masker.CardResult(card_index, side))
+
+    monkeypatch.setattr(masker, "redact_card", fake_redact)
+    _, result = masker.process_page(image, EmptyOcr(), "auto", "synthetic", 1)
+    assert len(seen) == 2
+    assert [card.side for card in result.cards] == ["front", "back"]
+
+
 def test_analyse_card_rejects_vertical_validity_box_from_wrong_rotation():
     horizontal = [
         _item("有效期限2025.07.01-长期", (400, 800, 1150, 880)),

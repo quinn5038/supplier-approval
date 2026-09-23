@@ -306,18 +306,32 @@ def find_blue_card_regions(image: np.ndarray) -> list[np.ndarray]:
             column_counts >= max(16, int(band_height * 0.08)))
         if not len(column_indexes):
             continue
-        x1, x2 = int(column_indexes[0]), int(column_indexes[-1])
-        card_width = x2 - x1 + 1
-        ratio = card_width / max(1, band_height)
-        if not 1.30 <= ratio <= 1.90:
-            continue
-        if card_width * band_height < width * height * 0.02:
-            continue
-        pad_x, pad_y = max(2, int(card_width * 0.008)), max(2, int(band_height * 0.008))
-        x1, x2 = max(0, x1 - pad_x), min(width - 1, x2 + pad_x)
-        y1, y2 = max(0, y1 - pad_y), min(height - 1, y2 + pad_y)
-        cards.append(order_quad(np.array(
-            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.float32)))
+        # 正反面左右并排时会落在同一个 row run 中。旧逻辑直接取首尾列，
+        # 得到一个约 3:1 的超宽区域并因比例不符而丢弃，最终只使用被公章
+        # 污染的轮廓区域。按连续列再次分组，才能分别恢复左右两张卡。
+        column_runs: list[tuple[int, int]] = []
+        x_start = x_previous = int(column_indexes[0])
+        for index in column_indexes[1:]:
+            index = int(index)
+            if index > x_previous + 1:
+                column_runs.append((x_start, x_previous))
+                x_start = index
+            x_previous = index
+        column_runs.append((x_start, x_previous))
+
+        for x1, x2 in column_runs:
+            card_width = x2 - x1 + 1
+            ratio = card_width / max(1, band_height)
+            if not 1.30 <= ratio <= 1.90:
+                continue
+            if card_width * band_height < width * height * 0.02:
+                continue
+            pad_x = max(2, int(card_width * 0.008))
+            pad_y = max(2, int(band_height * 0.008))
+            px1, px2 = max(0, x1 - pad_x), min(width - 1, x2 + pad_x)
+            py1, py2 = max(0, y1 - pad_y), min(height - 1, y2 + pad_y)
+            cards.append(order_quad(np.array(
+                [[px1, py1], [px2, py1], [px2, py2], [px1, py2]], np.float32)))
     return sorted(cards, key=lambda quad: (float(quad[:, 1].mean()), float(quad[:, 0].mean())))
 
 
