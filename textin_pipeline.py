@@ -1356,6 +1356,38 @@ def scan_files():
     return tasks
 
 
+_NON_SUPPLIER_APPLY_UNIT_MARKERS = (
+    "其他部门", "其他单位", "项目经理部", "项目部", "合同", "标段",
+)
+
+
+def _supplier_context_for_material_checks(supplier, todo, registered_name=None):
+    """Return supplier fields with the authoritative full name for OCR checks.
+
+    ``applyUnitName`` describes the applicant/project in some cooperation-intent
+    workflows, so it must never outrank the supplier name carried by ``title``.
+    """
+    resolved = dict(supplier or {})
+    if resolved.get("full_name"):
+        return resolved
+
+    full_name = str(registered_name or "").strip()
+    if not full_name:
+        title = str((todo or {}).get("title") or "").strip()
+        full_name = title.split("/", 1)[0].strip() if title else ""
+
+    if not full_name:
+        apply_unit = str((todo or {}).get("applyUnitName") or "").strip()
+        if (apply_unit
+                and not any(marker in apply_unit
+                            for marker in _NON_SUPPLIER_APPLY_UNIT_MARKERS)):
+            full_name = apply_unit
+
+    if full_name and len(full_name) > 4:
+        resolved["full_name"] = full_name
+    return resolved
+
+
 def run_parse(only_todo=None, *, offline=False):
     """解析 files_cache 下所有文件 → textin_results.json
 
@@ -1406,27 +1438,13 @@ def run_parse(only_todo=None, *, offline=False):
 
     n_ok = n_fail = 0
     for todo_id, fpath, doc_type in tasks:
-        supplier = cache.get(todo_id, {}).get("supplier", {})
-        if supplier and not supplier.get("full_name"):
-            code = supplier.get("social_credit_code") or supplier.get("credit_code")
-            reg = (qcc.get(code) or {}).get("reg_info") or {}
-            if reg.get("企业名称"):
-                supplier = dict(supplier)
-                supplier["full_name"] = reg["企业名称"]
-            else:
-                # 9/9 补：企查查无数据时，用待办申请单位全称/标题补 full_name，
-                # 避免 ISO「持有人一致」用简称（如 ZPMC沈阳伟宸）误判为不一致。
-                todo = cache.get(todo_id, {}).get("todo", {}) or {}
-                apply_unit = str(todo.get("applyUnitName") or "").strip()
-                title = str(todo.get("title") or "").strip()
-                full = None
-                if apply_unit and not re.search(r"其他|部门|项目经理部|项目部", apply_unit):
-                    full = apply_unit
-                elif title:
-                    full = title.split("/")[0].strip()
-                if full and len(full) > 4:
-                    supplier = dict(supplier)
-                    supplier["full_name"] = full
+        entry = cache.get(todo_id, {})
+        supplier = entry.get("supplier", {})
+        todo = entry.get("todo", {}) or {}
+        code = supplier.get("social_credit_code") or supplier.get("credit_code")
+        reg = (qcc.get(code) or {}).get("reg_info") or {}
+        supplier = _supplier_context_for_material_checks(
+            supplier, todo, reg.get("企业名称"))
         # 2026-09-09 方案B：身份证用 PaddleOCR 识别结果，跳过 TextIn 二次 OCR
         if doc_type == "legal_person_id":
             try:

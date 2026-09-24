@@ -103,6 +103,27 @@ def test_business_license_inline_spaced_address_does_not_join_legal_person():
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_material_name_check_uses_todo_title_not_apply_unit_contract():
+    supplier = {"name": "合成简称", "social_credit_code": "91110000123456789X"}
+    todo = {
+        "title": "合成自动化信息技术有限公司/2000200100000000000",
+        "applyUnitName": "海外港口工程EPC机电专业分包合同",
+    }
+    resolved = tp._supplier_context_for_material_checks(supplier, todo)
+
+    assert resolved["full_name"] == "合成自动化信息技术有限公司"
+    without_title = tp._supplier_context_for_material_checks(
+        supplier, {"applyUnitName": todo["applyUnitName"]})
+    assert "full_name" not in without_title
+    result = tp.extract(
+        "business_license",
+        "统一社会信用代码 91110000123456789X\n名称 合成自动化信息技术有限公司",
+        resolved,
+    )
+    assert result["checks"]["名称一致"] is True
+    assert not any("名称" in issue and "不一致" in issue for issue in result["issues"])
+
+
 def test_business_license_lishang_spaced_address_boundary():
     text = ("统一社会信用代码 91130408MA0GATNL3F\n"
             "名 称 邯郸市利尚金属制品有限公司 注册资本 壹仟伍佰万元整\n"

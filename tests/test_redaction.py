@@ -143,6 +143,29 @@ def test_blue_card_fallback_splits_side_by_side_cards_crossed_by_stamp(monkeypat
     assert [card.side for card in result.cards] == ["front", "back"]
 
 
+def test_wide_low_resolution_scan_falls_back_to_two_horizontal_cards(monkeypatch):
+    image = np.full((208, 662, 3), 255, dtype=np.uint8)
+    monkeypatch.setattr(masker, "find_cards", lambda source: [])
+    # Reproduce a partial colour-background detection: one side is found, but
+    # not enough to replace the empty contour result.
+    one_side = np.array([[0, 0], [320, 0], [320, 207], [0, 207]], dtype=np.float32)
+    monkeypatch.setattr(masker, "find_blue_card_regions", lambda source: [one_side])
+    seen = []
+
+    def fake_redact(source, quad, ocr, card_index):
+        seen.append(quad)
+        side = "back" if card_index == 1 else "front"
+        return (np.zeros_like(source), np.zeros(source.shape[:2], dtype=np.uint8),
+                masker.CardResult(card_index, side))
+
+    monkeypatch.setattr(masker, "redact_card", fake_redact)
+    _, result = masker.process_page(image, EmptyOcr(), "auto", "synthetic", 1)
+
+    assert len(seen) == 2
+    assert seen[0][:, 0].max() < seen[1][:, 0].min()
+    assert [card.side for card in result.cards] == ["back", "front"]
+
+
 def test_analyse_card_rejects_vertical_validity_box_from_wrong_rotation():
     horizontal = [
         _item("有效期限2025.07.01-长期", (400, 800, 1150, 880)),

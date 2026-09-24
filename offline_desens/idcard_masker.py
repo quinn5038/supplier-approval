@@ -351,6 +351,18 @@ def stacked_fallback(image: np.ndarray) -> list[np.ndarray]:
     ]
 
 
+def side_by_side_fallback(image: np.ndarray) -> list[np.ndarray]:
+    """Split a wide two-card scan when neither contour detector finds both sides."""
+    h, w = image.shape[:2]
+    if w / max(1, h) < 2.0:
+        return []
+    split = w // 2
+    return [
+        order_quad(np.array([[0, 0], [split - 1, 0], [split - 1, h - 1], [0, h - 1]], np.float32)),
+        order_quad(np.array([[split, 0], [w - 1, 0], [w - 1, h - 1], [split, h - 1]], np.float32)),
+    ]
+
+
 def split_detected_long(source: np.ndarray, cards: list[np.ndarray]) -> list[np.ndarray]:
     """9/10 方案A：正反面拼图（左右/上下并排）检测不完整时，主动二分整图。
 
@@ -467,10 +479,12 @@ def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str
         blue_cards = find_blue_card_regions(source)
         if len(blue_cards) >= 2:
             cards = blue_cards
-    # 9/11：无清晰矩形边框的上下排身份证，find_cards 可能返回 0；
-    # auto 布局也应尝试上下二分兜底（此前仅 stacked 触发，导致「正反面均未识别」）
+    # 无清晰矩形边框的拼图可能让 find_cards 返回 0。先尝试上下二分，
+    # 再处理左右二分；否则低分辨率的横向正反面拼图会在 OCR 前直接整页遮盖。
     if not cards and layout != "single":
         cards = stacked_fallback(source)
+    if not cards and layout != "single":
+        cards = side_by_side_fallback(source)
     if not cards and 1.30 <= source.shape[1] / source.shape[0] <= 1.90:
         cards = [full_image_card(source)]
     if not cards:
