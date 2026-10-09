@@ -16,46 +16,74 @@ from financial_data import assess_financial, financial_report_presence
 from material_policy import file_types, hydrate_iso_cache, is_public_material
 
 
-@pytest.mark.parametrize("public_detail", ["未取得带报告期的公开财务数据", "已取得上年度公开财务数据", "旧版任意描述"])
-def test_a08_missing_is_numbered_independent_of_public_wording(public_detail):
-    checklist = [{"id": "A03", "name": "纳税信用等级", "status": "fail", "detail": "缺少纳税信用等级证明"},
-        {"id": "A08", "name": "资金财务状况", "status": "manual", "detail": public_detail}]
-    cache = {"1": {"supplier": {"has_financial_report": False}, "materials_detail": [
-        {"fileName": "备案表.docx", "types": []}]}}
-    s2 = {"decision": "reject", "checklist": checklist}
-    opinion = gen_opinion.build_opinion("1", s2, {}, cache)
-    assert "缺少经审计的上年度财报" in opinion.splitlines()[0]
-    html = gen_stage2_report.render_supplier("1", s2, {}, cache)
-    assert "缺少经审计的上年度财报；请补交后转人工核查" in html
+@pytest.mark.parametrize("public_detail", [
+    "未取得带报告期的公开财务数据", "已取得上年度公开财务数据", "旧版任意描述"])
+def test_a08_missing_is_numbered_and_not_repeated_as_other_issue(public_detail):
+    checklist = [
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明"},
+        {"id": "A08", "name": "资金财务状况", "status": "manual",
+         "detail": public_detail},
+    ]
+    cache = {"1": {"supplier": {"has_financial_report": False},
+                     "materials_detail": [{"fileName": "备案表.docx", "types": []}]}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "reject", "checklist": checklist}, {}, cache)
+    first_line, *rest = opinion.splitlines()
+    assert "退回。" in first_line
+    assert "缺少经审计的上年度财报" in first_line
+    assert not any("[A08]" in line for line in rest)
 
 
-def test_a08_public_data_cannot_hide_missing_upload():
-    supplier = {"has_financial_report": True}
-    rules = [r for r in aa.load_rules()["part_1_basic"]["domestic"] if r["id"] == "A08"]
-    checklist, _, missing, _ = aa.build_checklist(supplier, rules, [])
-    assert not missing  # A08 missing is manual, not automatic rejection
-    assert supplier["has_financial_report"] is False
-    checklist, _ = aa.enhance_checklist_with_qcc(checklist, supplier, {"financial": {
-        "报告期": str(date.today().year - 1)}})
-    assert checklist[0]["status"] == "manual"
-    assert "缺少经审计的上年度财报" in checklist[0]["detail"]
+def test_a08_only_missing_still_returns_with_numbered_item():
+    checklist = [{"id": "A08", "name": "资金财务状况", "status": "manual",
+                  "detail": "未取得带报告期的公开财务数据"}]
+    cache = {"1": {"supplier": {"has_financial_report": False},
+                     "materials_detail": []}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "manual", "checklist": checklist}, {}, cache)
+    assert opinion.startswith("退回。1. 缺少经审计的上年度财报")
+    assert "另需整改/核实：[A08]" not in opinion
 
 
-def test_a08_uploaded_old_empty_types_not_reported_missing():
-    materials = [{"fileName": "2025年审记报告.pdf", "types": []}]
+def test_a08_uploaded_can_remain_in_other_review_section():
+    materials = [{"fileName": "2025年度审计报告.pdf", "types": ["financial_report"]}]
     assert financial_report_presence({"has_financial_report": False}, materials) is True
-    cache = {"1": {"supplier": {"has_financial_report": False}, "materials_detail": materials}}
-    s2 = {"decision": "manual", "checklist": [{"id": "A08", "name": "资金财务状况", "status": "manual", "detail": "待人工核验审计情况"}]}
-    opinion = gen_opinion.build_opinion("1", s2, {}, cache)
-    assert "缺少经审计的上年度财报" not in opinion
-    assert "已提交（年度及审计情况待人工核查）" in gen_stage2_report.render_supplier("1", s2, {}, cache)
+    checklist = [
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明"},
+        {"id": "A08", "name": "资金财务状况", "status": "manual",
+         "detail": "已取得上年度公开财务数据，仍需核对审计意见"},
+    ]
+    cache = {"1": {"supplier": {"has_financial_report": False},
+                     "materials_detail": materials}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "reject", "checklist": checklist}, {}, cache)
+    assert "缺少经审计的上年度财报" not in opinion.splitlines()[0]
+    assert "另需整改/核实：[A08]资金财务状况" in opinion
 
 
-def test_a08_unknown_presence_not_declared_missing():
+def test_a08_unknown_upload_state_is_not_declared_missing():
     assert financial_report_presence({}) is None
-    assert financial_report_presence({}, []) is False
-    s2 = {"decision": "manual", "checklist": [{"id": "A08", "status": "manual", "detail": "上传状态待确认"}]}
-    assert "缺少经审计的上年度财报" not in gen_opinion.build_opinion("1", s2, {}, {})
+    checklist = [{"id": "A08", "name": "资金财务状况", "status": "manual",
+                  "detail": "上传状态待确认"}]
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "manual", "checklist": checklist}, {}, {})
+    assert "缺少经审计的上年度财报" not in opinion
+
+
+def test_a08_missing_is_rule_failure_even_when_public_data_exists():
+    supplier = {"has_financial_report": True}
+    rule = next(r for r in aa.load_rules()["part_1_basic"]["domestic"]
+                if r["id"] == "A08")
+    checklist, _, missing, _ = aa.build_checklist(supplier, [rule], [])
+    assert checklist[0]["status"] == "fail"
+    assert missing == [rule]
+    assert supplier["has_financial_report"] is False
+    checklist, _ = aa.enhance_checklist_with_qcc(
+        checklist, supplier, {"financial": {"报告期": str(date.today().year - 1)}})
+    assert checklist[0]["status"] == "fail"
+    assert "缺少经审计的上年度财报" in checklist[0]["detail"]
 
 
 def test_business_license_inline_spaced_address_does_not_join_legal_person():
@@ -75,6 +103,27 @@ def test_business_license_inline_spaced_address_does_not_join_legal_person():
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_material_name_check_uses_todo_title_not_apply_unit_contract():
+    supplier = {"name": "合成简称", "social_credit_code": "91110000123456789X"}
+    todo = {
+        "title": "合成自动化信息技术有限公司/2000200100000000000",
+        "applyUnitName": "海外港口工程EPC机电专业分包合同",
+    }
+    resolved = tp._supplier_context_for_material_checks(supplier, todo)
+
+    assert resolved["full_name"] == "合成自动化信息技术有限公司"
+    without_title = tp._supplier_context_for_material_checks(
+        supplier, {"applyUnitName": todo["applyUnitName"]})
+    assert "full_name" not in without_title
+    result = tp.extract(
+        "business_license",
+        "统一社会信用代码 91110000123456789X\n名称 合成自动化信息技术有限公司",
+        resolved,
+    )
+    assert result["checks"]["名称一致"] is True
+    assert not any("名称" in issue and "不一致" in issue for issue in result["issues"])
+
+
 def test_business_license_lishang_spaced_address_boundary():
     text = ("统一社会信用代码 91130408MA0GATNL3F\n"
             "名 称 邯郸市利尚金属制品有限公司 注册资本 壹仟伍佰万元整\n"
@@ -87,6 +136,64 @@ def test_business_license_lishang_spaced_address_boundary():
     assert result["fields"]["法定代表人"] == "吴艺濮"
     assert result["fields"]["住所"] == "河北省邯郸市永年区临洺关镇东洺阳村南"
     assert result["checks"]["法人一致"] is True
+
+
+@pytest.mark.parametrize("placeholder", ["********", "＊＊＊＊＊＊＊＊"])
+def test_business_license_asterisk_term_is_unbounded(placeholder):
+    text = ("| 营业期限 | **2006-07-26 至 " + placeholder + "** |\n"
+            "| 名称 | 正信光电科技股份有限公司 |")
+    result = tp.extract("business_license", text, {})
+    assert result["checks"]["营业期限长期或有效"] is True
+    assert not any("营业期限已到期" in issue for issue in result["issues"])
+
+
+@pytest.mark.parametrize("doc_type", ["iso9001", "iso14001", "iso45001"])
+def test_iso_registration_valid_date_allows_ocr_spacing(doc_type):
+    result = tp.extract(
+        doc_type,
+        "管理体系认证证书\n注册有效日期：2028 年 01 月 07 日",
+        {},
+    )
+    assert result["fields"]["有效期至"] == "2028-01-07"
+    assert result["checks"]["在有效期内"] is True
+    assert not any("未识别到有效期" in issue for issue in result["issues"])
+
+
+def test_business_license_incomplete_date_range_does_not_expire_on_start_date():
+    result = tp.extract("business_license", "营业期限：2006-07-26 至", {})
+    assert result["checks"].get("营业期限长期或有效") is not False
+    assert not any("营业期限已到期" in issue for issue in result["issues"])
+
+
+@pytest.mark.parametrize("term,expected,expiry", [
+    ("2015-01-01 至 2099-12-31", True, None),
+    ("2006-07-26 至 2020-07-25", False, "2020-07-25"),
+    ("2099-12-31", True, None),
+])
+def test_business_license_normal_terms_keep_existing_expiry_behavior(term, expected, expiry):
+    result = tp.extract("business_license", "营业期限：" + term, {})
+    assert result["checks"]["营业期限长期或有效"] is expected
+    if expiry:
+        assert any(expiry in issue for issue in result["issues"])
+    else:
+        assert not any("营业期限已到期" in issue for issue in result["issues"])
+
+
+def test_business_scope_removes_inline_address_and_trailing_registration_label():
+    ocr = ("经营范围 一般项目：白蚁防治、灭鼠及其它害虫防治的技术服务，"
+           "农作物病虫害防治服 住 所 重庆市渝中区嘉陵东村45号2-3 "
+           "务，林业有害生物防治服务，林业产品销售、机械零件、零部侏销售 "
+           "登记机关 -->")
+    system = ("白蚁防治、灭鼠及其它害虫防治的技术服务，"
+              "农作物病虫害防治服务，林业有害生物防治服务，林业产品销售、"
+              "机械零件、零部件销售")
+    result = tp.extract("business_license", ocr, {"busi_scope": system})
+    scope = result["fields"]["经营范围"]
+    assert "住所" not in scope
+    assert "重庆市渝中区嘉陵东村45号2-3" not in scope
+    assert "登记机关" not in scope
+    assert result["checks"]["经营范围一致"] is True
+    assert 98 <= float(result["fields"]["经营范围相似度"].rstrip("%")) < 100
 
 
 @pytest.mark.parametrize("doc_type,title,standard", [
@@ -116,6 +223,27 @@ def test_iso_supervision_footer_alone_is_not_holder():
     assert "持有人一致" not in result["checks"]
 
 
+@pytest.mark.parametrize("doc_type,title,english_title,system_name", [
+    ("iso9001", "质量管理体系认证证书", "QMS CERTIFICATE OF REGISTRATION", "质量管理体系"),
+    ("iso14001", "环境管理体系认证证书", "EMS CERTIFICATE OF REGISTRATION", "环境管理体系"),
+    ("iso45001", "职业健康安全管理体系认证证书", "OHSMS CERTIFICATE OF REGISTRATION",
+     "职业健康安全管理体系"),
+])
+def test_iso_declaration_separates_certification_body_from_holder(
+        doc_type, title, english_title, system_name):
+    text = ("华信技术检验有限公司\nVOUCHING TECHNICAL INSPECTION LTD\n"
+            f"{title}\n{english_title}\n"
+            f"我公司认定下列组织的{system_name}\n"
+            "辽宁昊特电器有限公司\n统一社会信用代码91210804MA7HDNRN9N\n"
+            "生效日期：2026-01-11 终止日期：2029-01-10")
+    result = tp.extract(doc_type, text, {"full_name": "辽宁昊特电器有限公司"})
+    assert result["fields"]["获证组织"] == "辽宁昊特电器有限公司"
+    assert result["fields"]["获证组织_来源"] == "我公司认定下列组织"
+    assert result["fields"]["认证机构"] == "华信技术检验有限公司"
+    assert result["checks"]["持有人一致"] is True
+    assert not any("持有人" in issue and "不一致" in issue for issue in result["issues"])
+
+
 @pytest.mark.parametrize("labels,carrier", [("承运商", True), ("运输商/承运商", True),
     ("经销商/承运商", False), ("服务商/代理商/承运商", False), ("服务商", False)])
 def test_carrier_e2_replaces_a07_only_for_pure_carriers(labels, carrier):
@@ -136,6 +264,40 @@ def test_e2_filename_presence_always_manual(filename):
     html = gen_stage2_report.render_supplier("1", {"decision": "manual", "checklist": checklist}, {}, {})
     assert "已提交（仅文件名核查）" in html
     assert "转人工核查" in html
+
+
+def test_e2_recognises_freight_agency_contract_in_performance_upload_field():
+    material = {
+        "fileName": "委托代理合同-鲁商-华畅  双签.pdf",
+        "typeName": "合作业绩证明文件",
+        "desc": "",
+        "types": [],
+    }
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist(
+        {}, [r for r in rules if r["id"] == "E2"], [material])
+    assert not missing
+    assert checklist[0]["status"] == "manual"
+    assert checklist[0]["files"] == [material["fileName"]]
+    assert "已提交疑似过往业绩证明" in checklist[0]["detail"]
+    html = gen_stage2_report.render_supplier(
+        "1", {"decision": "manual", "checklist": checklist}, {}, {})
+    assert "已提交（仅文件名核查）" in html
+    assert "材料未上传" not in html
+
+
+def test_e2_performance_field_does_not_accept_unrelated_misplaced_file():
+    material = {
+        "fileName": "售后服务承诺书.pdf",
+        "typeName": "合作业绩证明文件",
+        "types": [],
+    }
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist(
+        {}, [r for r in rules if r["id"] == "E2"], [material])
+    assert missing
+    assert checklist[0]["status"] == "fail"
+    assert checklist[0]["files"] == []
 
 
 @pytest.mark.parametrize("materials", [[], [{"fileName": "材料.pdf", "typeName": "过往业绩证明", "desc": "运输合同"}],
@@ -205,7 +367,7 @@ def test_production_expiry_is_visible_after_holder_issue_and_in_return_list():
     ("承运商", "E1"), ("运输商/承运商", "E1"),
 ])
 def test_carrier_routing(labels, expected):
-    supplier = {"sup_type": labels, "busi_scope": "销售生产"}
+    supplier = {"sup_type": labels, "busi_scope": ""}
     assert aa.is_special_category(supplier)[0] is False
     rules, _ = aa.determine_supplier_rules(supplier, aa.load_rules())
     ids = {r["id"] for r in rules}
@@ -214,6 +376,74 @@ def test_carrier_routing(labels, expected):
     if "服务商" in labels and "代理商" not in labels:
         assert "D1_03" not in ids
     assert ("E1" in ids) is aa._pure_carrier(supplier)
+
+
+def test_service_supplier_scope_supplements_trader_rules_without_dropping_service():
+    supplier = {
+        "sup_type": "服务商",
+        "busi_scope": ("工程设计、工程咨询、项目管理；设备设计、设备采购、设备成套、"
+                       "系统集成服务；设备和材料进出口；销售机械电器设备"),
+    }
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "D1_03" in ids
+    assert "经销商" in type_desc
+    assert "服务商" in type_desc
+    assert "经营范围补充识别" in type_desc
+    inferred = gen_stage2_report._infer_supplier_type(supplier, type_desc)
+    assert "贸易商/经销商" in inferred
+    assert "服务商" in inferred
+
+
+@pytest.mark.parametrize("label", ["服务商", "代理商", "其他", ""])
+def test_freight_forwarder_scope_overrides_generic_label_to_carrier(label):
+    supplier = {
+        "sup_type": label,
+        "busi_scope": "国际货运代理，仓储服务；无船承运。",
+    }
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "运输/承运商（经营范围识别）" in type_desc
+    assert {"A01", "E1", "E2"}.issubset(ids)
+    assert "A07" not in ids
+    assert "D1_03" not in ids
+
+
+@pytest.mark.parametrize("scope", [
+    "国际货物运输代理；国内集装箱货物运输代理",
+    "道路货物运输；普通货运",
+    "网络货运；仓储服务",
+])
+def test_common_freight_scope_phrases_are_classified_as_carrier(scope):
+    rules, type_desc = aa.determine_supplier_rules(
+        {"sup_type": "服务商", "busi_scope": scope}, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "运输/承运商" in type_desc
+    assert {"E1", "E2"}.issubset(ids)
+
+
+@pytest.mark.parametrize("label,scope", [
+    ("服务商", "招标代理；软件开发；技术服务"),
+    ("代理商", "产品销售代理；货物进出口"),
+    ("服务商", "工程设计；设备采购；销售机械设备"),
+])
+def test_non_freight_agency_and_trade_are_not_classified_as_carrier(label, scope):
+    rules, type_desc = aa.determine_supplier_rules(
+        {"sup_type": label, "busi_scope": scope}, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "运输/承运商" not in type_desc
+    assert "E1" not in ids
+    assert "E2" not in ids
+
+
+def test_carrier_scope_does_not_override_explicit_non_carrier_or_combined_label():
+    for label in ("经销商", "经销商/承运商", "服务商/代理商/承运商"):
+        rules, type_desc = aa.determine_supplier_rules(
+            {"sup_type": label, "busi_scope": "国际货运代理；无船承运"}, aa.load_rules())
+        ids = {rule["id"] for rule in rules}
+        assert "运输/承运商" not in type_desc
+        assert "E1" not in ids
+        assert "D1_03" in ids
 
 
 @pytest.mark.parametrize("text,status", [
@@ -512,6 +742,27 @@ def test_final_opinion_contains_every_missing_material():
     assert "缺少纳税信用等级证明" in opinion
     assert "缺少新增专项资质证明" in opinion
     assert opinion.index("缺少纳税信用等级证明") < opinion.index("缺少新增专项资质证明")
+
+
+def test_ocr_missing_fields_does_not_claim_submitted_business_license_is_missing():
+    stage2 = {"name": "合成钢铁供应链有限公司", "decision": "reject", "checklist": [
+        {"id": "A01", "name": "法律主体资格", "status": "fail",
+         "detail": "OCR核验发现问题：营业执照识别不完整，缺少字段：名称、法定代表人"},
+        {"id": "A03", "name": "纳税信用等级", "status": "fail",
+         "detail": "缺少纳税信用等级证明（须为正规文件，C级及以上）"},
+    ]}
+    cache = {"1": {
+        "supplier": {"has_business_license": True},
+        "materials_detail": [
+            {"fileName": "合成营业执照.png", "types": ["business_license"]},
+        ],
+    }}
+
+    opinion = gen_opinion.build_opinion("1", stage2, {}, cache)
+
+    assert "缺少营业执照副本" not in opinion
+    assert "缺少纳税信用等级证明" in opinion
+    assert "[A01]法律主体资格：OCR核验发现问题" in opinion
 
 
 def test_demo_three_decisions():

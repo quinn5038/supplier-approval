@@ -904,15 +904,31 @@ def _ensure_inspection_fields(supplier, entry=None):
 
 
 def _performance_files(materials_detail):
-    """E2 uses filenames only, never upload position, description or OCR."""
+    """识别 E2 已上传材料；不读取文件内容，也不调用 OCR。
+
+    平台的「合作业绩证明文件」栏位是有效的上传类别，但历史数据中也存在把
+    售后承诺书误传到该栏位的情况。因此栏位只能作为辅助依据：文件名仍须呈现
+    合同/业绩/履约等证据特征。明确的运输、承运、货运代理合同可直接命中。
+    """
     import unicodedata
     found = []
     for item in materials_detail or []:
-        name = item.get("fileName", "") if isinstance(item, dict) else item[0]
+        if isinstance(item, dict):
+            name = item.get("fileName", "")
+            type_name = item.get("typeName") or item.get("fileinfoTypeName") or ""
+        else:
+            name = item[0]
+            type_name = item[1] if len(item) > 1 else ""
         normalised = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(name)))
+        normalised_type = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(type_name)))
         if re.search(r"无需|未提交|未提供|空白|模板|样本", normalised):
             continue
-        if re.search(r"业绩|履约证明|运输(?:服务)?合同|承运合同|物流(?:服务)?合同|中标通知书|客户评价", normalised):
+        direct_match = re.search(
+            r"业绩|履约证明|运输(?:服务)?合同|承运合同|物流(?:服务)?合同|"
+            r"(?:委托|货运|运输)代理合同|中标通知书|客户评价", normalised)
+        performance_field = "合作业绩证明" in normalised_type
+        plausible_evidence = re.search(r"合同|协议|业绩|履约|中标|订单|客户评价", normalised)
+        if direct_match or (performance_field and plausible_evidence):
             if name not in found:
                 found.append(name)
     return found
@@ -950,9 +966,13 @@ def build_checklist(supplier, rules_list, materials_detail=None):
             if submitted is not None:
                 supplier["has_financial_report"] = submitted
             assessment = assess_financial({}, submitted=submitted)
-            entry.update(status="manual", detail=assessment["detail"], evidence=assessment)
+            entry.update(status="fail" if submitted is False else "manual",
+                         detail=assessment["detail"], evidence=assessment)
             checklist.append(entry)
-            verify_items.append(entry["detail"])
+            if submitted is False:
+                missing_rules.append(rule)
+            else:
+                verify_items.append(entry["detail"])
             continue
 
         if rid == "E2":
@@ -1112,7 +1132,7 @@ MATERIAL_REQUIREMENTS = {
     "A02 法人身份证明": "法人身份证正反面（或护照首页，须在有效期内）",
     "A03 纳税信用等级": "国家税务总局网站或信用中国下载的纳税信用等级证明（须为C级及以上）",
     "A07 售后服务": "正规机构出具的售后服务五星认证或厂家出具的售后服务证明函",
-    "A08 资金财务状况": "上年度经审计的财务报表（须含三表及审计意见）",
+    "A08 资金财务状况": "上年度经审计的财务报表（2026年须提交2025年财报）",
     "C1_02 ISO 9001": "ISO 9001质量管理体系认证证书（须为该公司认证且在有效期内）",
     "C1_03 ISO 14001": "ISO 14001环境管理体系认证证书（须为该公司认证且在有效期内）",
     "C1_04 ISO 45001": "ISO 45001职业健康安全管理体系认证证书（须为该公司认证且在有效期内）",
@@ -1216,7 +1236,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
             # 9/11：A08 财报未传 + 企查查无数据 → 独立列出"经审计的上年度财报"
             if a08_needs_financial:
                 opinion_parts.append(
-                    f"  {idx}. 上年度经审计的财报（须含三表及审计意见）")
+                    f"  {idx}. 上年度经审计的财报（2026年须提交2025年财报）")
                 idx += 1
 
         opinion = "\n".join(opinion_parts)
@@ -1233,7 +1253,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
         opinion_parts = ["转人工复核。材料齐全，以下核验点需人工/后续自动核验："]
         # 9/11：A08 财报未传 + 企查查无数据 → 在核验点前独立列出
         if a08_needs_financial:
-            opinion_parts.append("  0. 需补充：上年度经审计的财报（须含三表及审计意见）")
+            opinion_parts.append("  0. 需补充：经审计的上年度财报（2026年须提交2025年财报）")
         for i, v in enumerate(unique_verifies, 1):
             opinion_parts.append(f"  {i}. {v}")
         opinion = "\n".join(opinion_parts)
@@ -1278,9 +1298,43 @@ def _supplier_type(supplier):
     return str(supplier.get("sup_type_name") or supplier.get("sup_type") or supplier.get("supTypeName") or "")
 
 
+def _supplier_type_labels(supplier):
+    """拆分系统供应商标签，避免把组合标签当成单一类别。"""
+    return [s.strip() for s in re.split(r"[/／、,，;；|\s]+", _supplier_type(supplier)) if s.strip()]
+
+
 def _pure_carrier(supplier):
-    labels = [s.strip() for s in re.split(r"[/／、,，;；|\s]+", _supplier_type(supplier)) if s.strip()]
+    labels = _supplier_type_labels(supplier)
     return bool(labels) and all(s in {"运输商", "承运商", "运输服务商", "道路运输商", "物流运输商"} for s in labels)
+
+
+# 货运代理是运输组织业务，不是产品销售代理。先识别并剔除这些专属短语，
+# 再检查剩余经营范围中是否确有销售/贸易业务，避免“代理”二字造成误分类。
+_CARRIER_SCOPE_PATTERN = re.compile(
+    r"(?:国际|国内|海上|航空|陆路|铁路|集装箱)?货(?:物)?运输代理(?:服务)?"
+    r"|(?:国际|国内)?货运代理(?:服务)?"
+    r"|无船承运(?:业务)?"
+    r"|道路货物运输(?:服务)?"
+    r"|普通货运|网络货运"
+)
+
+
+def _scope_roles(business_scope):
+    scope = str(business_scope or "")
+    has_carrier = bool(_CARRIER_SCOPE_PATTERN.search(scope))
+    non_carrier_scope = _CARRIER_SCOPE_PATTERN.sub("", scope)
+    has_trade = any(k in non_carrier_scope for k in
+                    ("销售", "批发", "零售", "贸易", "经销", "代理", "采购", "进出口"))
+    return has_carrier, has_trade
+
+
+def _scope_should_override_to_carrier(supplier, has_carrier, has_trade):
+    """仅覆盖泛化标签；明确的非承运商标签及组合标签仍沿用原审批优先级。"""
+    if not has_carrier or has_trade:
+        return False
+    labels = _supplier_type_labels(supplier)
+    generic_labels = {"服务商", "代理商", "其他", "一般供应商"}
+    return not labels or all(label in generic_labels for label in labels)
 
 
 def determine_supplier_rules(supplier, cfg):
@@ -1305,6 +1359,10 @@ def determine_supplier_rules(supplier, cfg):
 
     # 第二部分：按类型选查
     sup_type_name = _supplier_type(supplier)
+    business_scope = str(supplier.get("busi_scope") or "")
+    scope_has_carrier, scope_has_trade = _scope_roles(business_scope)
+    scope_is_carrier = _scope_should_override_to_carrier(
+        supplier, scope_has_carrier, scope_has_trade)
 
     type_rules = []
     type_label = ""
@@ -1314,6 +1372,10 @@ def determine_supplier_rules(supplier, cfg):
         basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", []) if not is_foreign else []
         type_label = "运输/承运商"
+    elif scope_is_carrier and not is_foreign:
+        basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
+        type_rules = part2.get("domestic_carrier", [])
+        type_label = "运输/承运商（经营范围识别）"
     elif "厂家" in sup_type_name or "生产商" in sup_type_name or "制造商" in sup_type_name:
         if is_foreign:
             type_rules = part2.get("overseas_manufacturer", [])
@@ -1330,16 +1392,20 @@ def determine_supplier_rules(supplier, cfg):
             type_label = "境内贸易商"
     elif "服务" in sup_type_name and not any(
             k in sup_type_name for k in ("租赁", "生产", "制造", "贸易", "经销", "代理", "厂家")):
-        # 9/11：纯服务商（如「服务商」）不属于生产/贸易/经销/代理任一类，
-        # 只需核实 A 类基本材料，无需 D1 贸易商/厂家专属核验。
-        # 排除「租赁商/服务商」（租赁本质物资贸易，仍走贸易商）等混合类型。
-        type_rules = []
-        type_label = "服务商"
+        # 系统标签只有“服务商”时仍需按经营范围补充识别。工程设计企业若同时
+        # 从事设备采购、销售或进出口，应按“宁多勿缺”同时覆盖经销商规则，
+        # 不能因系统单一标签漏掉 D 类资质核验。
+        if scope_has_trade:
+            type_rules = part2.get("overseas_trader" if is_foreign else "domestic_trader", [])
+            type_label = "经销商/服务商（经营范围补充识别）"
+        else:
+            type_rules = []
+            type_label = "服务商"
 
     all_rules = basic_rules
     # 9/5 改造：sup_type_name="其他"时按经营范围交叉验证推断类目
     if not type_label and not is_foreign:
-        busi = (supplier.get("busi_scope") or "") + " " + (supplier.get("supTypeName") or "")
+        busi = business_scope + " " + (supplier.get("supTypeName") or "")
         if any(k in busi for k in ("销售", "批发", "零售", "贸易", "经销", "代理")):
             type_rules = part2.get("domestic_trader", [])
             type_label = "境内贸易商（推断自经营范围）"
@@ -2002,9 +2068,9 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
         # 改走企查查财务数据（公开披露），不再依赖 TextIn 解析供应商上传的财报（敏感数据）
         elif cid == "A08":
             from financial_data import assess_financial, financial_report_presence
-            assessment = assess_financial(qcc.get("financial") or {},
-                                          submitted=financial_report_presence(supplier))
-            c["status"] = "manual"
+            submitted = financial_report_presence(supplier)
+            assessment = assess_financial(qcc.get("financial") or {}, submitted=submitted)
+            c["status"] = "fail" if submitted is False else "manual"
             c["detail"] = assessment["detail"]
             c["evidence"] = assessment
             qcc_issues.append("A08 财报：" + assessment["detail"])

@@ -153,11 +153,11 @@ def render_supplier(tid, s2, textin, cache):
             decision_basis = _load_decision_basis(cid, cname)
             if cid.startswith("D2_"):
                 continue  # D2 国外贸易商不适用
-            need = CL_ID_TO_DOC_TYPE.get(cid)
             if cid == "A08":
                 if financial_submitted is False:
                     miss_items.append((cid, cname, "经审计的上年度财报"))
                 continue
+            need = CL_ID_TO_DOC_TYPE.get(cid)
             if not need:
                 continue
             for doc_type, label in need:
@@ -246,11 +246,15 @@ def render_supplier(tid, s2, textin, cache):
                     # 9/6：核验结果列——ISO 证书显示有效期，营业执照显示法人差异
                     if doc_type in ("iso9001", "iso14001", "iso45001"):
                         org = fields.get("获证组织")
+                        certification_body = fields.get("认证机构")
                         exp = fields.get("有效期至")
                         valid = checks.get("在有效期内")
                         if org:
                             check_detail_parts.append(
                                 f"<span class='kv'><span class='k'>获证组织</span>=<span class='v'>{esc(org)}</span></span>")
+                        if certification_body:
+                            check_detail_parts.append(
+                                f"<span class='kv'><span class='k'>认证机构</span>=<span class='v'>{esc(certification_body)}</span></span>")
                         if exp:
                             if valid is True:
                                 check_detail_parts.append(
@@ -387,7 +391,6 @@ def render_supplier(tid, s2, textin, cache):
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
                             else "<span class='verify-empty'>无核验数据</span>")
-
         elif check_type in ("auto", "skip"):
             check_detail = (esc(detail).replace("\n", "<br>")
                             if detail
@@ -400,7 +403,8 @@ def render_supplier(tid, s2, textin, cache):
         if cid == "A08":
             if financial_submitted is False:
                 mat_status = "<span class='mat-miss'>材料未上传</span>"
-                check_detail = "<span class='issue'>缺少经审计的上年度财报；请补交后转人工核查，不以公开财务数据替代。</span>"
+                check_detail = ("<span class='issue'>缺少经审计的上年度财报；"
+                                "请补交后转人工核查，不以公开财务数据替代。</span>")
             elif financial_submitted is True:
                 mat_status = "<span class='mat-ok'>已提交（年度及审计情况待人工核查）</span>"
             else:
@@ -599,13 +603,14 @@ def _infer_supplier_type(supplier, tdesc):
     busi = (supplier.get("busi_scope") or "") + " " + (tdesc or "")
     if not busi.strip():
         return ""
-    if any(k in busi for k in _TRADE_HINTS):
-        return "贸易商/经销商"
+    inferred = []
+    if any(k in busi for k in _TRADE_HINTS + ("采购", "进出口")):
+        inferred.append("贸易商/经销商")
     if any(k in busi for k in _MANUFACTURE_HINTS):
-        return "生产/制造商"
-    if any(k in busi for k in _SERVICE_HINTS):
-        return "服务商"
-    return ""
+        inferred.append("生产/制造商")
+    if any(k in busi for k in _SERVICE_HINTS + ("设计", "系统集成", "项目管理", "监理")):
+        inferred.append("服务商")
+    return "、".join(inferred)
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)

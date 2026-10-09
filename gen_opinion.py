@@ -62,7 +62,7 @@ SUPPLEMENT_TEMPLATES = {
     "A02":  "法人有效身份证正反面（须在有效期内）",
     "A03":  "国家税务总局网站下载的上年度纳税信用等级证明（需C级及以上）",
     "A07":  "售后服务证明（厂家出具的售后服务证明函，落款在3个月内；或售后服务五星认证证书）",
-    "A08":  "上年度经审计的财报（须含资产负债表/利润表/现金流量表及审计意见）",
+    "A08":  "上年度经审计的财报（须含资产负债表/利润表/现金流量表）",
     "A13":  "检验检测资质证明（CMA 资质认定证书 / CNAS 实验室认可证书等，须在有效期内）",
     "C1_02": "ISO 9001 认证证书（须为该公司认证且在有效期内）",
     "C1_03": "ISO 14001 认证证书（须为该公司认证且在有效期内）",
@@ -75,6 +75,19 @@ SUPPLEMENT_TEMPLATES = {
 def _is_hard_fail(issue_text: str) -> bool:
     """OCR issue 内容是否构成客观硬伤（应退回）"""
     return any(k in issue_text for k in HARD_FAIL_KEYWORDS)
+
+
+def _is_missing_material_issue(detail: str) -> bool:
+    """是否明确表示整份材料未提交，而不是材料内部字段识别不全。
+
+    OCR 问题可能写成“营业执照识别不完整，缺少字段：名称、法定代表人”。
+    这种情况说明文件已经提交，只是内容核验失败；若仅按“缺少”子串判断，
+    会错误套用“缺少营业执照副本”等补件模板。
+    """
+    text = re.sub(r"\s+", "", str(detail or ""))
+    if text.startswith(("缺少", "未上传", "未提交", "材料缺失", "需上传", "需补充")):
+        return True
+    return bool(re.search(r"(?:材料|附件|文件)(?:尚未|未)(?:上传|提交|提供)", text))
 
 
 def _supplier_brief(s2, cache_entry):
@@ -214,34 +227,34 @@ def build_opinion(tid, s2, textin, cache):
     manual_items = [c for c in checklist
                     if c.get("status") in ("pending", "partial", "manual")]
 
-    # fail 细分：缺材料（detail 含"缺少/未上传/材料缺失"，可退回补办）vs 其他异常（不一致/已过期/核验问题，需整改）
+    # fail 细分：明确缺少整份材料（可退回补办）vs 其他异常
+    # （不一致/已过期/OCR 缺少字段等核验问题，需整改）。
     supplement_fails = []   # 缺材料，退回补办
     other_fails = []        # 其他 fail（整改）
     for c in fail_items:
         cid = c.get("id", "")
         cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
         detail = c.get("detail") or c.get("message") or ""
-        if ("缺少" in detail or "未上传" in detail or "材料缺失" in detail
-                or "需上传" in detail):
+        if _is_missing_material_issue(detail):
             supplement_fails.append((cid, cname, detail))
         else:
             other_fails.append((cid, cname, detail))
 
-    # 整体建议：缺材料 fail ≥1 → 退回；其余 fail/待人工 → 转人工；全 pass → 同意
-    if supplement_fails or decision == "reject":
-        suggest_action = "退回"
-    elif fail_items or manual_items or decision == "manual":
-        suggest_action = "转人工"
-    else:
-        suggest_action = "同意"
-
-    # Material presence is independent of public evidence and wording changes.
+    # 财报是否缺失只看上传材料，不依赖企查查文案；公开数据不能替代必交财报。
     from financial_data import financial_report_presence
     submitted = financial_report_presence(supplier, cache_entry.get("materials_detail"))
     a08_needs_financial = submitted is False and any(
         c.get("id") == "A08" and c.get("status") != "skip" for c in checklist)
     financial_missing = ("缺少经审计的上年度财报（须为上一年度，"
                          "须含资产负债表、利润表、现金流量表及审计意见）")
+
+    # 任一材料缺失（包括 A08）均退回；其余异常/待人工才转人工。
+    if supplement_fails or a08_needs_financial or decision == "reject":
+        suggest_action = "退回"
+    elif fail_items or manual_items or decision == "manual":
+        suggest_action = "转人工"
+    else:
+        suggest_action = "同意"
 
     # ---- 9/7 改造：完整列出所有异常（与综合核验表联动），单行分号分隔 ----
     lines = []
@@ -300,6 +313,8 @@ def build_opinion(tid, s2, textin, cache):
         other_issues = []
         for c in manual_items:
             cid = c.get("id", "")
+            if cid == "A08" and a08_needs_financial:
+                continue
             cname = c.get("name", CL_NAME_FALLBACK.get(cid, cid))
             desc = c.get("detail") or c.get("message") or "需人工核验"
             other_issues.append(f"[{cid}]{cname}：{_clip(desc)}")
@@ -316,10 +331,10 @@ def build_opinion(tid, s2, textin, cache):
             desc = c.get("detail") or c.get("message") or "需人工核验"
             reasons.append(f"[{cid}]{cname}：{_clip(desc)}")
         if a08_needs_financial:
-            lines.append("转人工。1. " + financial_missing + "；请补交后人工核验。")
+            lines.append("需补充：经审计的上年度财报。")
         if not reasons:
             reasons.append("部分审核项需人工核验")
-        lines.append(("另需核实：" if a08_needs_financial else "转人工。") + "；".join(reasons))
+        lines.append("转人工。" + "；".join(reasons))
     # 决策 3：同意
     else:
         lines.append("同意。各项审核均通过，建议后续常规管理。")

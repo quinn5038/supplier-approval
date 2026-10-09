@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -108,6 +109,30 @@ def normalise_validity(value: str) -> str:
     return normalise_text(value).replace("—", "-").replace("–", "-").replace("~", "-")
 
 
+def _format_date8(value: str) -> str | None:
+    if len(value) != 8:
+        return None
+    try:
+        parsed = date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+    except ValueError:
+        return None
+    return parsed.strftime("%Y.%m.%d")
+
+
+def canonicalise_validity(value: str) -> str:
+    """Return a stable date/range even when OCR loses separators or the start date."""
+    normalised = normalise_validity(value)
+    digits = "".join(char for char in normalised if char.isdigit())
+    if "长期" in normalised and len(digits) == 8:
+        start = _format_date8(digits)
+        return f"{start}-长期" if start else normalised
+    if len(digits) == 16:
+        start, end = _format_date8(digits[:8]), _format_date8(digits[8:])
+        if end:
+            return f"{start}-{end}" if start else end
+    return normalised
+
+
 def is_name_value(value: str) -> bool:
     value = normalise_text(value)
     return 1 < len(value) <= 12 and all("\u3400" <= char <= "\u9fff" or char == "·" for char in value)
@@ -149,7 +174,7 @@ def find_field(
         if validator(suffix):
             char_width = (lx2 - lx1) / max(1, len(raw_label))
             box = (int(lx1 + char_width * start), ly1, lx2, ly2)
-            value = normalise_validity(suffix) if key == "valid_until" else suffix
+            value = canonicalise_validity(suffix) if key == "valid_until" else suffix
             return FieldMatch(key, value, padded_box(box, width, height, min_x=box[0]))
 
         mid_y = (ly1 + ly2) / 2
@@ -166,8 +191,33 @@ def find_field(
             if validator(value):
                 boxes = [candidate.bounds for candidate in same_row[:end]]
                 box = min(box[0] for box in boxes), min(box[1] for box in boxes), max(box[2] for box in boxes), max(box[3] for box in boxes)
-                value = normalise_validity(value) if key == "valid_until" else value
+                value = canonicalise_validity(value) if key == "valid_until" else value
                 return FieldMatch(key, value, padded_box(box, width, height, min_x=box[0]))
+    return None
+
+
+def find_fuzzy_validity_field(items: Iterable[OcrItem], width: int, height: int) -> FieldMatch | None:
+    """Recover an ID validity line whose blue label was damaged by a red seal."""
+    for item in items:
+        raw = normalise_validity(item.text)
+        first_digit = next((index for index, char in enumerate(raw) if char.isdigit()), -1)
+        if first_digit < 2:
+            continue
+        label, value = raw[:first_digit], raw[first_digit:]
+        # The label may be badly recognised, but an ID validity label still ends
+        # in “期/限”. Requiring a valid final YYYYMMDD prevents an ID number or
+        # birth date elsewhere on the page from being exposed.
+        if len(label) > 8 or not label.endswith(("期", "限")):
+            continue
+        digits = "".join(char for char in value if char.isdigit())
+        if len(digits) != 16 or not _format_date8(digits[-8:]):
+            continue
+        x1, y1, x2, y2 = item.bounds
+        char_width = (x2 - x1) / max(1, len(raw))
+        value_box = (int(x1 + char_width * first_digit), y1, x2, y2)
+        return FieldMatch(
+            "valid_until", canonicalise_validity(value),
+            padded_box(value_box, width, height, min_x=value_box[0]))
     return None
 
 
@@ -176,6 +226,47 @@ def side_scores(items: Iterable[OcrItem]) -> tuple[int, int]:
     front = sum(word in text for word in ("姓名", "性别", "民族", "出生", "住址", "公民身份号码"))
     back = sum(word in text for word in ("签发机关", "有效期限", "有效期", "居民身份证"))
     return front, back
+
+
+def find_name_field(items: Iterable[OcrItem], width: int, height: int) -> FieldMatch | None:
+    """Locate the name while tolerating label OCR errors on security-pattern backgrounds.
+
+    The blue ``姓名`` label is more easily distorted than the black name value.  A
+    fuzzy label is accepted only when at least two other front-side markers are
+    present, keeping the fail-closed redaction path from exposing arbitrary text.
+    """
+    records = list(items)
+    exact = find_field(records, "name", ("姓名",), is_name_value, width, height)
+    if exact:
+        return exact
+    front_score, _ = side_scores(records)
+    if front_score >= 2:
+        # Common PaddleOCR confusions observed on the blue label over holographic
+        # backgrounds: 姓→城/性 and 名→各/多.  Extra trailing noise is handled by
+        # find_field's same-row value association.
+        fuzzy = find_field(records, "name", ("城名", "性名", "姓各", "姓多"),
+                           is_name_value, width, height)
+        if fuzzy:
+            return fuzzy
+
+    # Low-contrast photocopies can erase the blue “姓名” label completely while
+    # retaining a noisy name value, the birth date and the 18-digit identity number. Only
+    # enable positional name recovery with both strong front-side anchors, so an
+    # arbitrary Chinese phrase on a non-ID image is never exposed.
+    combined = "".join(normalise_text(item.text) for item in records)
+    has_identity_number = bool(re.search(r"(?<!\d)\d{17}[\dXx](?!\d)", combined))
+    has_birth_date = bool(re.search(
+        r"(?:19|20)\d{2}年\d{1,2}月\d{1,2}[日白]?", combined))
+    if not (has_identity_number and has_birth_date):
+        return None
+    for item in sorted(records, key=lambda value: (value.bounds[1], value.bounds[0])):
+        x1, y1, x2, y2 = item.bounds
+        if (x1 + x2) / 2 > width * 0.55 or (y1 + y2) / 2 > height * 0.45:
+            continue
+        value = re.sub(r"^[^\u3400-\u9fff·]+", "", normalise_text(item.text))
+        if 2 <= len(value) <= 6 and is_name_value(value):
+            return FieldMatch("name", value, padded_box(item.bounds, width, height))
+    return None
 
 
 def order_quad(points: np.ndarray) -> np.ndarray:
@@ -228,6 +319,72 @@ def find_cards(image: np.ndarray) -> list[np.ndarray]:
     return sorted(selected, key=lambda quad: (float(quad[:, 1].mean()), float(quad[:, 0].mean())))
 
 
+def find_blue_card_regions(image: np.ndarray) -> list[np.ndarray]:
+    """Locate pale-blue ID cards when red stamps corrupt contour detection.
+
+    A large seal can connect the two cards and create a convincing rotated
+    rectangle.  The ID-card security background remains blue while the seal is
+    red, so row/column projections of blue pixels recover the two real card
+    regions without treating the seal as a boundary.
+    """
+    height, width = image.shape[:2]
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    blue = ((hsv[:, :, 0] >= 75) & (hsv[:, :, 0] <= 135)
+            & (hsv[:, :, 1] >= 15) & (hsv[:, :, 2] >= 100))
+    row_counts = blue.sum(axis=1)
+    row_indexes = np.flatnonzero(row_counts >= max(24, int(width * 0.04)))
+    if not len(row_indexes):
+        return []
+
+    runs: list[tuple[int, int]] = []
+    start = previous = int(row_indexes[0])
+    for index in row_indexes[1:]:
+        index = int(index)
+        if index > previous + 1:
+            runs.append((start, previous))
+            start = index
+        previous = index
+    runs.append((start, previous))
+
+    cards: list[np.ndarray] = []
+    for y1, y2 in runs:
+        band_height = y2 - y1 + 1
+        if band_height < height * 0.08:
+            continue
+        column_counts = blue[y1:y2 + 1].sum(axis=0)
+        column_indexes = np.flatnonzero(
+            column_counts >= max(16, int(band_height * 0.08)))
+        if not len(column_indexes):
+            continue
+        # 正反面左右并排时会落在同一个 row run 中。旧逻辑直接取首尾列，
+        # 得到一个约 3:1 的超宽区域并因比例不符而丢弃，最终只使用被公章
+        # 污染的轮廓区域。按连续列再次分组，才能分别恢复左右两张卡。
+        column_runs: list[tuple[int, int]] = []
+        x_start = x_previous = int(column_indexes[0])
+        for index in column_indexes[1:]:
+            index = int(index)
+            if index > x_previous + 1:
+                column_runs.append((x_start, x_previous))
+                x_start = index
+            x_previous = index
+        column_runs.append((x_start, x_previous))
+
+        for x1, x2 in column_runs:
+            card_width = x2 - x1 + 1
+            ratio = card_width / max(1, band_height)
+            if not 1.30 <= ratio <= 1.90:
+                continue
+            if card_width * band_height < width * height * 0.02:
+                continue
+            pad_x = max(2, int(card_width * 0.008))
+            pad_y = max(2, int(band_height * 0.008))
+            px1, px2 = max(0, x1 - pad_x), min(width - 1, x2 + pad_x)
+            py1, py2 = max(0, y1 - pad_y), min(height - 1, y2 + pad_y)
+            cards.append(order_quad(np.array(
+                [[px1, py1], [px2, py1], [px2, py2], [px1, py2]], np.float32)))
+    return sorted(cards, key=lambda quad: (float(quad[:, 1].mean()), float(quad[:, 0].mean())))
+
+
 def full_image_card(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
     return order_quad(np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], np.float32))
@@ -241,6 +398,18 @@ def stacked_fallback(image: np.ndarray) -> list[np.ndarray]:
     return [
         order_quad(np.array([[0, 0], [w - 1, 0], [w - 1, split - 1], [0, split - 1]], np.float32)),
         order_quad(np.array([[0, split], [w - 1, split], [w - 1, h - 1], [0, h - 1]], np.float32)),
+    ]
+
+
+def side_by_side_fallback(image: np.ndarray) -> list[np.ndarray]:
+    """Split a wide two-card scan when neither contour detector finds both sides."""
+    h, w = image.shape[:2]
+    if w / max(1, h) < 2.0:
+        return []
+    split = w // 2
+    return [
+        order_quad(np.array([[0, 0], [split - 1, 0], [split - 1, h - 1], [0, h - 1]], np.float32)),
+        order_quad(np.array([[split, 0], [w - 1, 0], [w - 1, h - 1], [split, h - 1]], np.float32)),
     ]
 
 
@@ -299,18 +468,26 @@ def rotate(image: np.ndarray, code: int | None) -> np.ndarray:
     return image if code is None else cv2.rotate(image, code)
 
 
+def horizontal_field(field: FieldMatch | None) -> bool:
+    """Identity-card retained fields are horizontal after correct orientation."""
+    if not field:
+        return False
+    x1, y1, x2, y2 = field.box
+    return (x2 - x1) >= (y2 - y1) * 1.15
+
+
 def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None, int | None, int | None]:
     candidates = []
     for forward, backward in ROTATIONS:
         oriented = rotate(card, forward)
         items = ocr.read(oriented)
         height, width = oriented.shape[:2]
-        name = find_field(items, "name", ("姓名",), is_name_value, width, height)
+        name = find_name_field(items, width, height)
         validity = find_field(items, "valid_until", ("有效期限", "有效期"), is_validity_value, width, height)
         front_score, back_score = side_scores(items)
-        if name:
+        if name and horizontal_field(name):
             candidates.append((100 + front_score, "front", name, forward, backward))
-        elif validity:
+        elif validity and horizontal_field(validity):
             candidates.append((100 + back_score, "back", validity, forward, backward))
         elif front_score > back_score:
             candidates.append((front_score, "front", None, forward, backward))
@@ -320,6 +497,37 @@ def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None
             candidates.append((0, "unknown", None, forward, backward))
     _, side, field, forward, backward = max(candidates, key=lambda candidate: candidate[0])
     return side, field, forward, backward
+
+
+def recover_page_fields(source: np.ndarray, ocr: CardOcr) -> tuple[FieldMatch | None, FieldMatch | None]:
+    """Recover retained fields at the original page scale after card OCR fails.
+
+    A seal can corrupt the colour boundary and make the perspective crop too
+    tight.  PaddleOCR may still read the small original page correctly.  Keep
+    this fallback fail-closed: require the corresponding ID-side markers, a
+    horizontal field, and a fully valid value before exposing source pixels.
+    """
+    items = ocr.read(source)
+    height, width = source.shape[:2]
+    front_score, back_score = side_scores(items)
+
+    name = find_name_field(items, width, height) if front_score else None
+    if not horizontal_field(name):
+        name = None
+
+    validity = None
+    if back_score:
+        validity = find_field(
+            items, "valid_until",
+            # Red seals commonly turn the blue “有” into “无/视” while the
+            # remaining label and the complete date range stay readable.
+            ("有效期限", "有效期", "无效期限", "无效期", "视效期限", "视效期"),
+            is_validity_value, width, height)
+        if not validity:
+            validity = find_fuzzy_validity_field(items, width, height)
+        if not horizontal_field(validity):
+            validity = None
+    return name, validity
 
 
 def redact_card(source: np.ndarray, quad: np.ndarray, ocr: CardOcr, card_index: int) -> tuple[np.ndarray, np.ndarray, CardResult]:
@@ -346,10 +554,18 @@ def redact_card(source: np.ndarray, quad: np.ndarray, ocr: CardOcr, card_index: 
 
 def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str, page: int) -> tuple[np.ndarray, PageResult]:
     cards = [full_image_card(source)] if layout == "single" else find_cards(source)
-    # 9/11：无清晰矩形边框的上下排身份证，find_cards 可能返回 0；
-    # auto 布局也应尝试上下二分兜底（此前仅 stacked 触发，导致「正反面均未识别」）
+    # 红章跨越正反面时，轮廓法可能把印章识别成唯一的斜四边形（打码结果呈
+    # 菱形且漏掉正面）。蓝色防伪底纹若能明确定位出两张卡，优先采用真实卡片区域。
+    if layout != "single" and len(cards) < 2:
+        blue_cards = find_blue_card_regions(source)
+        if len(blue_cards) >= 2:
+            cards = blue_cards
+    # 无清晰矩形边框的拼图可能让 find_cards 返回 0。先尝试上下二分，
+    # 再处理左右二分；否则低分辨率的横向正反面拼图会在 OCR 前直接整页遮盖。
     if not cards and layout != "single":
         cards = stacked_fallback(source)
+    if not cards and layout != "single":
+        cards = side_by_side_fallback(source)
     if not cards and 1.30 <= source.shape[1] / source.shape[0] <= 1.90:
         cards = [full_image_card(source)]
     if not cards:
@@ -362,6 +578,23 @@ def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str
         layer, mask, result = redact_card(source, quad, ocr, index)
         output[mask > 0] = layer[mask > 0]
         results.append(result)
+
+    missing_front = any(card.side == "front" and not card.name for card in results)
+    missing_back = any(card.side == "back" and not card.valid_until for card in results)
+    if missing_front or missing_back:
+        page_name, page_validity = recover_page_fields(source, ocr)
+        for card in results:
+            field = None
+            if card.side == "front" and not card.name and page_name:
+                card.name = page_name.value
+                field = page_name
+            elif card.side == "back" and not card.valid_until and page_validity:
+                card.valid_until = page_validity.value
+                field = page_validity
+            if field:
+                x1, y1, x2, y2 = field.box
+                output[y1:y2, x1:x2] = source[y1:y2, x1:x2]
+                card.status = "已脱敏"
     return output, PageResult(source_name, page, results)
 
 
