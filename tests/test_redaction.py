@@ -166,6 +166,41 @@ def test_wide_low_resolution_scan_falls_back_to_two_horizontal_cards(monkeypatch
     assert [card.side for card in result.cards] == ["back", "front"]
 
 
+def test_page_scale_recovers_fields_when_seal_breaks_card_crops(monkeypatch):
+    image = np.full((500, 900, 3), 255, dtype=np.uint8)
+    quads = [
+        np.array([[20, 20], [420, 20], [420, 270], [20, 270]], dtype=np.float32),
+        np.array([[20, 290], [420, 290], [420, 490], [20, 490]], dtype=np.float32),
+    ]
+    monkeypatch.setattr(masker, "find_cards", lambda source: quads)
+    monkeypatch.setattr(masker, "split_detected_long", lambda source, cards: cards)
+
+    def failed_card_redaction(source, quad, ocr, card_index):
+        side = "back" if card_index == 1 else "front"
+        return (np.zeros_like(source), np.zeros(source.shape[:2], dtype=np.uint8),
+                masker.CardResult(card_index, side, status="字段未识别，整张遮盖"))
+
+    monkeypatch.setattr(masker, "redact_card", failed_card_redaction)
+
+    class PageOcr:
+        def read(self, source):
+            return [
+                _item("居民身份证", (100, 40, 260, 80)),
+                # The seal corrupts more than one label character, while the
+                # final date remains valid and the complete line is horizontal.
+                _item("新数期2090.99.99-2099.01.01", (90, 190, 360, 220)),
+                _item("姓名测试姓名", (80, 320, 250, 350)),
+                _item("公民身份号码", (80, 430, 240, 460)),
+            ]
+
+    masked, result = masker.process_page(image, PageOcr(), "auto", "synthetic", 1)
+    assert result.cards[0].side == "back" and result.cards[0].valid_until
+    assert result.cards[1].side == "front" and result.cards[1].name == "测试姓名"
+    assert all(card.status == "已脱敏" for card in result.cards)
+    assert masked[190:220, 90:360].max() == 255
+    assert masked[0:10, 0:10].max() == 0
+
+
 def test_analyse_card_rejects_vertical_validity_box_from_wrong_rotation():
     horizontal = [
         _item("有效期限2025.07.01-长期", (400, 800, 1150, 880)),

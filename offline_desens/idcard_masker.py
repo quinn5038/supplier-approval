@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -108,6 +109,30 @@ def normalise_validity(value: str) -> str:
     return normalise_text(value).replace("—", "-").replace("–", "-").replace("~", "-")
 
 
+def _format_date8(value: str) -> str | None:
+    if len(value) != 8:
+        return None
+    try:
+        parsed = date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+    except ValueError:
+        return None
+    return parsed.strftime("%Y.%m.%d")
+
+
+def canonicalise_validity(value: str) -> str:
+    """Return a stable date/range even when OCR loses separators or the start date."""
+    normalised = normalise_validity(value)
+    digits = "".join(char for char in normalised if char.isdigit())
+    if "长期" in normalised and len(digits) == 8:
+        start = _format_date8(digits)
+        return f"{start}-长期" if start else normalised
+    if len(digits) == 16:
+        start, end = _format_date8(digits[:8]), _format_date8(digits[8:])
+        if end:
+            return f"{start}-{end}" if start else end
+    return normalised
+
+
 def is_name_value(value: str) -> bool:
     value = normalise_text(value)
     return 1 < len(value) <= 12 and all("\u3400" <= char <= "\u9fff" or char == "·" for char in value)
@@ -149,7 +174,7 @@ def find_field(
         if validator(suffix):
             char_width = (lx2 - lx1) / max(1, len(raw_label))
             box = (int(lx1 + char_width * start), ly1, lx2, ly2)
-            value = normalise_validity(suffix) if key == "valid_until" else suffix
+            value = canonicalise_validity(suffix) if key == "valid_until" else suffix
             return FieldMatch(key, value, padded_box(box, width, height, min_x=box[0]))
 
         mid_y = (ly1 + ly2) / 2
@@ -166,8 +191,33 @@ def find_field(
             if validator(value):
                 boxes = [candidate.bounds for candidate in same_row[:end]]
                 box = min(box[0] for box in boxes), min(box[1] for box in boxes), max(box[2] for box in boxes), max(box[3] for box in boxes)
-                value = normalise_validity(value) if key == "valid_until" else value
+                value = canonicalise_validity(value) if key == "valid_until" else value
                 return FieldMatch(key, value, padded_box(box, width, height, min_x=box[0]))
+    return None
+
+
+def find_fuzzy_validity_field(items: Iterable[OcrItem], width: int, height: int) -> FieldMatch | None:
+    """Recover an ID validity line whose blue label was damaged by a red seal."""
+    for item in items:
+        raw = normalise_validity(item.text)
+        first_digit = next((index for index, char in enumerate(raw) if char.isdigit()), -1)
+        if first_digit < 2:
+            continue
+        label, value = raw[:first_digit], raw[first_digit:]
+        # The label may be badly recognised, but an ID validity label still ends
+        # in “期/限”. Requiring a valid final YYYYMMDD prevents an ID number or
+        # birth date elsewhere on the page from being exposed.
+        if len(label) > 8 or not label.endswith(("期", "限")):
+            continue
+        digits = "".join(char for char in value if char.isdigit())
+        if len(digits) != 16 or not _format_date8(digits[-8:]):
+            continue
+        x1, y1, x2, y2 = item.bounds
+        char_width = (x2 - x1) / max(1, len(raw))
+        value_box = (int(x1 + char_width * first_digit), y1, x2, y2)
+        return FieldMatch(
+            "valid_until", canonicalise_validity(value),
+            padded_box(value_box, width, height, min_x=value_box[0]))
     return None
 
 
@@ -449,6 +499,37 @@ def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None
     return side, field, forward, backward
 
 
+def recover_page_fields(source: np.ndarray, ocr: CardOcr) -> tuple[FieldMatch | None, FieldMatch | None]:
+    """Recover retained fields at the original page scale after card OCR fails.
+
+    A seal can corrupt the colour boundary and make the perspective crop too
+    tight.  PaddleOCR may still read the small original page correctly.  Keep
+    this fallback fail-closed: require the corresponding ID-side markers, a
+    horizontal field, and a fully valid value before exposing source pixels.
+    """
+    items = ocr.read(source)
+    height, width = source.shape[:2]
+    front_score, back_score = side_scores(items)
+
+    name = find_name_field(items, width, height) if front_score else None
+    if not horizontal_field(name):
+        name = None
+
+    validity = None
+    if back_score:
+        validity = find_field(
+            items, "valid_until",
+            # Red seals commonly turn the blue “有” into “无/视” while the
+            # remaining label and the complete date range stay readable.
+            ("有效期限", "有效期", "无效期限", "无效期", "视效期限", "视效期"),
+            is_validity_value, width, height)
+        if not validity:
+            validity = find_fuzzy_validity_field(items, width, height)
+        if not horizontal_field(validity):
+            validity = None
+    return name, validity
+
+
 def redact_card(source: np.ndarray, quad: np.ndarray, ocr: CardOcr, card_index: int) -> tuple[np.ndarray, np.ndarray, CardResult]:
     card = card_warp(source, quad)
     side, field, forward, backward = analyse_card(card, ocr)
@@ -497,6 +578,23 @@ def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str
         layer, mask, result = redact_card(source, quad, ocr, index)
         output[mask > 0] = layer[mask > 0]
         results.append(result)
+
+    missing_front = any(card.side == "front" and not card.name for card in results)
+    missing_back = any(card.side == "back" and not card.valid_until for card in results)
+    if missing_front or missing_back:
+        page_name, page_validity = recover_page_fields(source, ocr)
+        for card in results:
+            field = None
+            if card.side == "front" and not card.name and page_name:
+                card.name = page_name.value
+                field = page_name
+            elif card.side == "back" and not card.valid_until and page_validity:
+                card.valid_until = page_validity.value
+                field = page_validity
+            if field:
+                x1, y1, x2, y2 = field.box
+                output[y1:y2, x1:x2] = source[y1:y2, x1:x2]
+                card.status = "已脱敏"
     return output, PageResult(source_name, page, results)
 
 

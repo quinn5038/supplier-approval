@@ -147,6 +147,18 @@ def test_business_license_asterisk_term_is_unbounded(placeholder):
     assert not any("营业期限已到期" in issue for issue in result["issues"])
 
 
+@pytest.mark.parametrize("doc_type", ["iso9001", "iso14001", "iso45001"])
+def test_iso_registration_valid_date_allows_ocr_spacing(doc_type):
+    result = tp.extract(
+        doc_type,
+        "管理体系认证证书\n注册有效日期：2028 年 01 月 07 日",
+        {},
+    )
+    assert result["fields"]["有效期至"] == "2028-01-07"
+    assert result["checks"]["在有效期内"] is True
+    assert not any("未识别到有效期" in issue for issue in result["issues"])
+
+
 def test_business_license_incomplete_date_range_does_not_expire_on_start_date():
     result = tp.extract("business_license", "营业期限：2006-07-26 至", {})
     assert result["checks"].get("营业期限长期或有效") is not False
