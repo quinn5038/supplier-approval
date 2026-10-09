@@ -1,20 +1,21 @@
 @echo off
 chcp 65001 >nul
-title ICCEC Supplier Approval WebUI
+title ICCEC Supplier Approval WebUI - OFFLINE OCR
 echo ============================================
-echo   ICCEC Supplier Approval WebUI
+echo   ICCEC Supplier Approval WebUI - OFFLINE OCR
 echo ============================================
 echo.
-echo Starting webui on port 8000 ...
+echo Starting OFFLINE OCR webui on port 8001 ...
 echo.
 echo After this window shows "Application startup complete",
-echo open http://127.0.0.1:8000 in your browser.
+echo open http://127.0.0.1:8001 in your browser.
 echo.
 echo KEEP THIS WINDOW OPEN while using the webui.
 echo Close this window to stop the service.
 echo.
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
+set WEB_PORT=8001
 REM Do not inherit a stale global Python home/path. Either can make a valid
 REM virtual environment fail before startup with "No module named encodings".
 set PYTHONHOME=
