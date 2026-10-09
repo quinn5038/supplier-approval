@@ -904,15 +904,31 @@ def _ensure_inspection_fields(supplier, entry=None):
 
 
 def _performance_files(materials_detail):
-    """E2 uses filenames only, never upload position, description or OCR."""
+    """识别 E2 已上传材料；不读取文件内容，也不调用 OCR。
+
+    平台的「合作业绩证明文件」栏位是有效的上传类别，但历史数据中也存在把
+    售后承诺书误传到该栏位的情况。因此栏位只能作为辅助依据：文件名仍须呈现
+    合同/业绩/履约等证据特征。明确的运输、承运、货运代理合同可直接命中。
+    """
     import unicodedata
     found = []
     for item in materials_detail or []:
-        name = item.get("fileName", "") if isinstance(item, dict) else item[0]
+        if isinstance(item, dict):
+            name = item.get("fileName", "")
+            type_name = item.get("typeName") or item.get("fileinfoTypeName") or ""
+        else:
+            name = item[0]
+            type_name = item[1] if len(item) > 1 else ""
         normalised = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(name)))
+        normalised_type = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(type_name)))
         if re.search(r"无需|未提交|未提供|空白|模板|样本", normalised):
             continue
-        if re.search(r"业绩|履约证明|运输(?:服务)?合同|承运合同|物流(?:服务)?合同|中标通知书|客户评价", normalised):
+        direct_match = re.search(
+            r"业绩|履约证明|运输(?:服务)?合同|承运合同|物流(?:服务)?合同|"
+            r"(?:委托|货运|运输)代理合同|中标通知书|客户评价", normalised)
+        performance_field = "合作业绩证明" in normalised_type
+        plausible_evidence = re.search(r"合同|协议|业绩|履约|中标|订单|客户评价", normalised)
+        if direct_match or (performance_field and plausible_evidence):
             if name not in found:
                 found.append(name)
     return found
@@ -1282,9 +1298,43 @@ def _supplier_type(supplier):
     return str(supplier.get("sup_type_name") or supplier.get("sup_type") or supplier.get("supTypeName") or "")
 
 
+def _supplier_type_labels(supplier):
+    """拆分系统供应商标签，避免把组合标签当成单一类别。"""
+    return [s.strip() for s in re.split(r"[/／、,，;；|\s]+", _supplier_type(supplier)) if s.strip()]
+
+
 def _pure_carrier(supplier):
-    labels = [s.strip() for s in re.split(r"[/／、,，;；|\s]+", _supplier_type(supplier)) if s.strip()]
+    labels = _supplier_type_labels(supplier)
     return bool(labels) and all(s in {"运输商", "承运商", "运输服务商", "道路运输商", "物流运输商"} for s in labels)
+
+
+# 货运代理是运输组织业务，不是产品销售代理。先识别并剔除这些专属短语，
+# 再检查剩余经营范围中是否确有销售/贸易业务，避免“代理”二字造成误分类。
+_CARRIER_SCOPE_PATTERN = re.compile(
+    r"(?:国际|国内|海上|航空|陆路|铁路|集装箱)?货(?:物)?运输代理(?:服务)?"
+    r"|(?:国际|国内)?货运代理(?:服务)?"
+    r"|无船承运(?:业务)?"
+    r"|道路货物运输(?:服务)?"
+    r"|普通货运|网络货运"
+)
+
+
+def _scope_roles(business_scope):
+    scope = str(business_scope or "")
+    has_carrier = bool(_CARRIER_SCOPE_PATTERN.search(scope))
+    non_carrier_scope = _CARRIER_SCOPE_PATTERN.sub("", scope)
+    has_trade = any(k in non_carrier_scope for k in
+                    ("销售", "批发", "零售", "贸易", "经销", "代理", "采购", "进出口"))
+    return has_carrier, has_trade
+
+
+def _scope_should_override_to_carrier(supplier, has_carrier, has_trade):
+    """仅覆盖泛化标签；明确的非承运商标签及组合标签仍沿用原审批优先级。"""
+    if not has_carrier or has_trade:
+        return False
+    labels = _supplier_type_labels(supplier)
+    generic_labels = {"服务商", "代理商", "其他", "一般供应商"}
+    return not labels or all(label in generic_labels for label in labels)
 
 
 def determine_supplier_rules(supplier, cfg):
@@ -1310,8 +1360,9 @@ def determine_supplier_rules(supplier, cfg):
     # 第二部分：按类型选查
     sup_type_name = _supplier_type(supplier)
     business_scope = str(supplier.get("busi_scope") or "")
-    scope_has_trade = any(k in business_scope for k in
-                          ("销售", "批发", "零售", "贸易", "经销", "代理", "采购", "进出口"))
+    scope_has_carrier, scope_has_trade = _scope_roles(business_scope)
+    scope_is_carrier = _scope_should_override_to_carrier(
+        supplier, scope_has_carrier, scope_has_trade)
 
     type_rules = []
     type_label = ""
@@ -1321,6 +1372,10 @@ def determine_supplier_rules(supplier, cfg):
         basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", []) if not is_foreign else []
         type_label = "运输/承运商"
+    elif scope_is_carrier and not is_foreign:
+        basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
+        type_rules = part2.get("domestic_carrier", [])
+        type_label = "运输/承运商（经营范围识别）"
     elif "厂家" in sup_type_name or "生产商" in sup_type_name or "制造商" in sup_type_name:
         if is_foreign:
             type_rules = part2.get("overseas_manufacturer", [])

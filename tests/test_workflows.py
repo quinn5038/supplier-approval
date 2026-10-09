@@ -266,6 +266,40 @@ def test_e2_filename_presence_always_manual(filename):
     assert "转人工核查" in html
 
 
+def test_e2_recognises_freight_agency_contract_in_performance_upload_field():
+    material = {
+        "fileName": "委托代理合同-鲁商-华畅  双签.pdf",
+        "typeName": "合作业绩证明文件",
+        "desc": "",
+        "types": [],
+    }
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist(
+        {}, [r for r in rules if r["id"] == "E2"], [material])
+    assert not missing
+    assert checklist[0]["status"] == "manual"
+    assert checklist[0]["files"] == [material["fileName"]]
+    assert "已提交疑似过往业绩证明" in checklist[0]["detail"]
+    html = gen_stage2_report.render_supplier(
+        "1", {"decision": "manual", "checklist": checklist}, {}, {})
+    assert "已提交（仅文件名核查）" in html
+    assert "材料未上传" not in html
+
+
+def test_e2_performance_field_does_not_accept_unrelated_misplaced_file():
+    material = {
+        "fileName": "售后服务承诺书.pdf",
+        "typeName": "合作业绩证明文件",
+        "types": [],
+    }
+    rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist(
+        {}, [r for r in rules if r["id"] == "E2"], [material])
+    assert missing
+    assert checklist[0]["status"] == "fail"
+    assert checklist[0]["files"] == []
+
+
 @pytest.mark.parametrize("materials", [[], [{"fileName": "材料.pdf", "typeName": "过往业绩证明", "desc": "运输合同"}],
     [{"fileName": "无需业绩证明声明.pdf"}], [{"fileName": "运输合同模板.pdf"}]])
 def test_e2_missing_is_numbered_in_return_opinion(materials):
@@ -359,6 +393,57 @@ def test_service_supplier_scope_supplements_trader_rules_without_dropping_servic
     inferred = gen_stage2_report._infer_supplier_type(supplier, type_desc)
     assert "贸易商/经销商" in inferred
     assert "服务商" in inferred
+
+
+@pytest.mark.parametrize("label", ["服务商", "代理商", "其他", ""])
+def test_freight_forwarder_scope_overrides_generic_label_to_carrier(label):
+    supplier = {
+        "sup_type": label,
+        "busi_scope": "国际货运代理，仓储服务；无船承运。",
+    }
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "运输/承运商（经营范围识别）" in type_desc
+    assert {"A01", "E1", "E2"}.issubset(ids)
+    assert "A07" not in ids
+    assert "D1_03" not in ids
+
+
+@pytest.mark.parametrize("scope", [
+    "国际货物运输代理；国内集装箱货物运输代理",
+    "道路货物运输；普通货运",
+    "网络货运；仓储服务",
+])
+def test_common_freight_scope_phrases_are_classified_as_carrier(scope):
+    rules, type_desc = aa.determine_supplier_rules(
+        {"sup_type": "服务商", "busi_scope": scope}, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "运输/承运商" in type_desc
+    assert {"E1", "E2"}.issubset(ids)
+
+
+@pytest.mark.parametrize("label,scope", [
+    ("服务商", "招标代理；软件开发；技术服务"),
+    ("代理商", "产品销售代理；货物进出口"),
+    ("服务商", "工程设计；设备采购；销售机械设备"),
+])
+def test_non_freight_agency_and_trade_are_not_classified_as_carrier(label, scope):
+    rules, type_desc = aa.determine_supplier_rules(
+        {"sup_type": label, "busi_scope": scope}, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+    assert "运输/承运商" not in type_desc
+    assert "E1" not in ids
+    assert "E2" not in ids
+
+
+def test_carrier_scope_does_not_override_explicit_non_carrier_or_combined_label():
+    for label in ("经销商", "经销商/承运商", "服务商/代理商/承运商"):
+        rules, type_desc = aa.determine_supplier_rules(
+            {"sup_type": label, "busi_scope": "国际货运代理；无船承运"}, aa.load_rules())
+        ids = {rule["id"] for rule in rules}
+        assert "运输/承运商" not in type_desc
+        assert "E1" not in ids
+        assert "D1_03" in ids
 
 
 @pytest.mark.parametrize("text,status", [
