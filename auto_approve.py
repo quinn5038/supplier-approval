@@ -752,7 +752,7 @@ def classify_uploaded_materials(file_list):
         all_text = f"{file_name} {file_desc} {file_summ}"
         
         classified = set()
-        from material_policy import iso_candidate_types
+        from material_policy import iso_candidate_types, resolve_type_conflicts
         classified.update(iso_candidate_types(file_name, type_name))
         
         # 1. 先用 fileinfoTypeName 精确匹配
@@ -778,6 +778,11 @@ def classify_uploaded_materials(file_list):
                 "expected_code": tn_iso,
                 "actual_code": fn_iso,
             })
+
+        # ISO 管理体系证书常带 CNAS 认可标志。CNAS 是发证机构认可信息，
+        # 不是“检验检测机构资质”；清除该关键词造成的双重类型，避免公开
+        # ISO 被安全门禁误拦截。明确写有 CMA/实验室认可等资质语义时仍保留。
+        classified = resolve_type_conflicts(classified, file_name, type_name, file_desc)
         
         materials |= classified
         details.append((file_name, type_name, file_desc, classified))

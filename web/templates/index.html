@@ -25,6 +25,7 @@ window.fetch = (url, options = {}) => {
         </div>
         <div class="actions">
             <a href="/preflight" class="btn btn-outline">启动检查</a>
+            <button class="btn btn-outline" onclick="openCacheCleanup()">清理供应商缓存</button>
             <button class="btn btn-outline" onclick="openCookieModal()">更新平台凭证</button>
         </div>
     </div>
@@ -93,7 +94,7 @@ window.fetch = (url, options = {}) => {
                 <div class="credential-icon" aria-hidden="true">钥</div>
                 <div>
                     <h2 id="credential-title">连接招采平台</h2>
-                    <p id="credential-help">粘贴平台凭证以加载待办；关闭程序后需重新粘贴。</p>
+                    <p id="credential-help">凭证可使用 Windows 加密后保存在当前用户账户中，项目和浏览器不会保存明文。</p>
                 </div>
             </div>
             <div class="credential-body">
@@ -106,7 +107,7 @@ window.fetch = (url, options = {}) => {
                     <input id="platform-cookie" type="password" autocomplete="off" required maxlength="32768" placeholder="粘贴 Cookie 值">
                 </div>
                 <details class="credential-advanced"><summary>高级配置<span>待办或详情无法读取时填写</span></summary>
-                    <p>APP_TOKEN 从 asca 请求头取得；AGENT_ID 从审批页面地址栏的 a= 参数取得。仅在有值时更新，不保存到文件。</p>
+                    <p>APP_TOKEN 从 asca 请求头取得；AGENT_ID 从审批页面地址栏的 a= 参数取得。勾选安全记住时会一并加密保存。</p>
                     <div class="form-field">
                         <label for="platform-app-token">APP_TOKEN</label>
                         <input id="platform-app-token" type="password" autocomplete="off" maxlength="8192">
@@ -116,6 +117,11 @@ window.fetch = (url, options = {}) => {
                         <input id="platform-agent-id" autocomplete="off" maxlength="8192">
                     </div>
                 </details>
+                <label class="credential-remember" for="remember-credentials">
+                    <input id="remember-credentials" type="checkbox" checked>
+                    <span><b>安全记住本机</b><small>使用 Windows DPAPI 加密，仅当前 Windows 用户可读取</small></span>
+                </label>
+                <button id="clear-saved-credentials" type="button" class="credential-clear" onclick="clearSavedCredentials()">清除本机保存的凭证</button>
                 <p id="credential-message" class="credential-error" role="alert" aria-live="polite"></p>
             </div>
             <div class="credential-actions">
@@ -124,6 +130,30 @@ window.fetch = (url, options = {}) => {
             </div>
         </form>
     </dialog>
+
+    <dialog id="cache-dialog" class="credential-dialog cache-dialog" aria-labelledby="cache-title" aria-describedby="cache-help">
+        <div class="credential-form">
+            <div class="credential-header">
+                <div class="credential-icon" aria-hidden="true">存</div>
+                <div>
+                    <h2 id="cache-title">供应商缓存清理</h2>
+                    <p id="cache-help">仅展示缓存时间超过 14 天的供应商。清理后如需查看报告或附件，须重新审批。</p>
+                </div>
+            </div>
+            <div class="credential-body cache-body">
+                <div id="cache-feedback" aria-live="polite"></div>
+                <div class="cache-list-head" aria-hidden="true">
+                    <span>供应商</span><span>操作</span>
+                </div>
+                <div id="cache-list" class="cache-list" aria-live="polite">
+                    <div class="cache-empty">正在读取缓存列表...</div>
+                </div>
+            </div>
+            <div class="credential-actions">
+                <button type="button" class="btn btn-outline" onclick="document.getElementById('cache-dialog').close()">关闭</button>
+            </div>
+        </div>
+    </dialog>
     <script>
         // ===== 状态管理 =====
         let todoItems = [];          // 当前待办列表数据
@@ -131,6 +161,7 @@ window.fetch = (url, options = {}) => {
         const nameById = {};         // todoId → 供应商名称
         const errorById = {};        // todoId → 失败原因（点失败按钮时展示）
         const taskById = {};         // 任务状态独立于搜索结果和 DOM 保存
+        let expiredCacheItems = [];  // 超过 14 天、可逐家清理的缓存
 
         // ===== 使用说明卡折叠 =====
         function toggleGuide() {
@@ -381,10 +412,113 @@ window.fetch = (url, options = {}) => {
             if (el) { el.style.display = 'none'; el.innerHTML = ''; }
         }
 
-        function openCookieModal() {
+        async function openCookieModal() {
             const dialog = document.getElementById('credential-dialog');
             if (!dialog.open) dialog.showModal();
+            try {
+                const response = await fetch('/api/credentials/status');
+                const data = await response.json();
+                // Default to secure persistence for convenience; users can explicitly uncheck it.
+                document.getElementById('remember-credentials').checked = true;
+                document.getElementById('clear-saved-credentials').disabled = !data.saved;
+            } catch (_) {}
         }
+
+        async function clearSavedCredentials() {
+            if (!confirm('确认清除本机加密保存的招采平台凭证？当前运行仍可继续使用。')) return;
+            const message = document.getElementById('credential-message');
+            try {
+                const response = await fetch('/api/credentials', {method:'DELETE'});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '清除失败');
+                document.getElementById('remember-credentials').checked = false;
+                document.getElementById('clear-saved-credentials').disabled = true;
+                message.className = 'credential-success';
+                message.textContent = data.msg;
+            } catch (error) {
+                message.className = 'credential-error';
+                message.textContent = error.message;
+            }
+        }
+
+        // ===== 供应商缓存清理 =====
+        async function openCacheCleanup() {
+            const dialog = document.getElementById('cache-dialog');
+            document.getElementById('cache-feedback').innerHTML = '';
+            if (!dialog.open) dialog.showModal();
+            await loadExpiredCaches();
+        }
+
+        async function loadExpiredCaches() {
+            const list = document.getElementById('cache-list');
+            list.innerHTML = '<div class="cache-empty">正在读取缓存列表...</div>';
+            try {
+                const response = await fetch('/api/cache-cleanup');
+                const data = await response.json();
+                if (response.status === 404) {
+                    throw new Error('WebUI 后端尚未加载缓存清理功能，请重启程序后重试。');
+                }
+                if (!response.ok) throw new Error(data.msg || data.detail || '缓存列表读取失败');
+                expiredCacheItems = (data.items || []).map(item => ({
+                    ...item,
+                    // 老下载目录可能早于 cache_v4 元数据；仍显示该行，并优先用当前待办名称补全。
+                    name: nameById[item.todoId] || item.name,
+                }));
+                if (expiredCacheItems.length === 0) {
+                    list.innerHTML = '<div class="cache-empty"><strong>暂无可清理缓存</strong><span>没有缓存时间超过 14 天的供应商。</span></div>';
+                    return;
+                }
+                list.innerHTML = expiredCacheItems.map(item => `
+                    <div class="cache-row" id="cache-row-${esc(item.todoId)}">
+                        <div class="cache-supplier">
+                            <div class="supplier-name">${esc(item.name)}</div>
+                            <div class="sub-text">缓存 ${esc(item.ageDays)} 天 · ${esc(formatBytes(item.sizeBytes))} · ${esc(item.fileCount)} 个文件</div>
+                        </div>
+                        <button class="btn btn-danger-outline" id="cache-btn-${esc(item.todoId)}"
+                                onclick="cleanSupplierCache('${esc(item.todoId)}')">清理</button>
+                    </div>`).join('');
+            } catch (error) {
+                expiredCacheItems = [];
+                list.innerHTML = '<div class="cache-empty cache-error"><strong>列表加载失败</strong><span>' + esc(error.message) + '</span></div>';
+            }
+        }
+
+        async function cleanSupplierCache(todoId) {
+            const item = expiredCacheItems.find(row => row.todoId === todoId);
+            if (!item) return;
+            if (!confirm(`确认清理“${item.name}”的全部相关缓存和下载文件？\n\n清理后历史报告和脱敏附件将无法查看；如需恢复，必须重新审批。此操作不可撤销。`)) return;
+            const button = document.getElementById('cache-btn-' + todoId);
+            const feedback = document.getElementById('cache-feedback');
+            button.disabled = true;
+            button.textContent = '清理中...';
+            try {
+                const response = await fetch('/api/cache-cleanup/' + encodeURIComponent(todoId), {method: 'DELETE'});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.msg || '清理失败');
+                const todo = todoItems.find(row => String(row.todoId) === String(todoId));
+                if (todo) { todo.hasResult = false; todo.decision = ''; }
+                delete taskById[todoId];
+                feedback.innerHTML = '<div class="alert alert-success cache-alert">' +
+                    esc(data.msg) + '，释放 ' + esc(formatBytes(data.freedBytes)) + '。</div>';
+                await loadExpiredCaches();
+                filterTodos();
+            } catch (error) {
+                feedback.innerHTML = '<div class="alert alert-danger cache-alert">' + esc(error.message) + '</div>';
+                if (button.isConnected) {
+                    button.disabled = false;
+                    button.textContent = '清理';
+                }
+            }
+        }
+
+        function formatBytes(bytes) {
+            const value = Number(bytes) || 0;
+            if (value < 1024) return value + ' B';
+            if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB';
+            if (value < 1024 * 1024 * 1024) return (value / 1024 / 1024).toFixed(1) + ' MB';
+            return (value / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+        }
+
         document.getElementById('credential-form').addEventListener('submit', async event => {
             event.preventDefault();
             const form = event.currentTarget;
@@ -397,10 +531,12 @@ window.fetch = (url, options = {}) => {
                 body.set('cookie', document.getElementById('platform-cookie').value);
                 body.set('app_token', document.getElementById('platform-app-token').value);
                 body.set('agent_id', document.getElementById('platform-agent-id').value);
+                body.set('remember', document.getElementById('remember-credentials').checked ? 'true' : 'false');
                 const response = await fetch('/api/cookie', {method:'POST', body});
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || '连接配置失败');
                 form.reset();
+                message.className = 'credential-error';
                 message.textContent = '';
                 document.getElementById('credential-dialog').close();
                 await loadTodos();

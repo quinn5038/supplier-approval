@@ -36,7 +36,8 @@ def install_security(app):
         allowed = {"127.0.0.1", "localhost", "::1"} | set(os.getenv("WEB_ALLOWED_HOSTS", "").split(","))
         if host not in allowed:
             return JSONResponse({"error": "invalid_host"}, 400)
-        prefixes = ("/approve/", "/api/approve/", "/api/status/", "/api/report/", "/api/desens_image/")
+        prefixes = ("/approve/", "/api/approve/", "/api/status/", "/api/report/",
+                    "/api/desens_image/", "/api/cache-cleanup/")
         if any(request.url.path.startswith(p) for p in prefixes):
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", request.url.path.rsplit("/", 1)[-1]):
                 return JSONResponse({"error": "invalid_todo_id"}, 400)

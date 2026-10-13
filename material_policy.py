@@ -11,6 +11,16 @@ PUBLIC_TYPES = frozenset({"business_license", "iso9001", "iso14001", "iso45001",
                           "tax_credit", "tax_cert", "production_license",
                           "after_sales_cert", "after_sales_statement", "transport_license"})
 SENSITIVE_NAME = re.compile(r"身份证|证件|财务|财报|审[计记]|资产负债|利润表|现金流|银行|账号|保密|涉密|id.?card", re.I)
+ISO_TYPES = frozenset({"iso9001", "iso14001", "iso45001"})
+# CNAS 标志也普遍印在 ISO 管理体系证书上，不能仅凭“CNAS”把证书归为
+# 检验检测机构资质。只有出现明确的检测机构/CMA/实验室认可语义时，才保留
+# inspection_cert；这样既修复 ISO 双重类型，也继续对真正的组合附件 fail closed。
+EXPLICIT_INSPECTION = re.compile(
+    r"检验检测机构资质|检验检测资质|资质认定证书|CMA|实验室认可|计量认证|检定校准",
+    re.I,
+)
+
+_CANONICAL_BUSINESS_LICENSE_POSITIONS = frozenset({"营业执照副本图片", "营业执照"})
 
 
 def iso_candidate_types(filename, type_name=""):
@@ -29,6 +39,16 @@ def iso_candidate_types(filename, type_name=""):
     return result
 
 
+def resolve_type_conflicts(types, filename="", type_name="", description=""):
+    """消除由 ISO 证书上的 CNAS 认可标志造成的 inspection_cert 假阳性。"""
+    resolved = set(types or [])
+    metadata = " ".join(str(value or "") for value in (filename, type_name, description))
+    if resolved & ISO_TYPES and "inspection_cert" in resolved:
+        if not EXPLICIT_INSPECTION.search(metadata):
+            resolved.discard("inspection_cert")
+    return resolved
+
+
 def hydrate_iso_cache(cache):
     """Upgrade legacy ISO routing hints without declaring OCR verification passed."""
     for entry in cache.values():
@@ -37,6 +57,8 @@ def hydrate_iso_cache(cache):
             value = item.get("types") or []
             types = set([value] if isinstance(value, str) else value)
             types.update(iso_candidate_types(item.get("fileName"), item.get("typeName")))
+            types = resolve_type_conflicts(
+                types, item.get("fileName"), item.get("typeName"), item.get("desc"))
             item["types"] = sorted(types)
             found.update(types & {"iso9001", "iso14001", "iso45001"})
         supplier = entry.get("supplier", {})
@@ -53,19 +75,33 @@ def file_types(path, cache):
     bare = re.sub(r"^\d+_", "", path.name)
     entries = cache.get(path.parent.name, {}).get("materials_detail", [])
     types = set()
+    matched_descriptions = []
     for item in entries:
         if item.get("fileName") in (path.name, bare):
             value = item.get("types") or []
             types.update([value] if isinstance(value, str) else value)
             types.update(iso_candidate_types(item.get("fileName"), item.get("typeName")))
             description = " ".join(str(item.get(k) or "") for k in ("fileName", "typeName", "desc"))
+            matched_descriptions.append(description)
             # Existing caches predate E1; recognise certificate routing hints without
             # dropping other types or the sensitive veto. OCR still validates content.
             if re.search(r"道路运输|无船承运", description):
                 types.add("transport_license")
             if SENSITIVE_NAME.search(description):
                 types.add("sensitive")
-    return types
+    # A legacy “组织机构代码证” slot may retain an obsolete licence image whose
+    # filename still contains “营业执照”. If the canonical licence slot is
+    # populated, only that current upload is authoritative for A01. Keep the
+    # legacy slot as a fallback for old records with no canonical upload.
+    canonical_names = {
+        str(item.get("fileName") or "") for item in entries
+        if str(item.get("typeName") or "") in _CANONICAL_BUSINESS_LICENSE_POSITIONS
+        and str(item.get("fileName") or "")
+    }
+    if "business_license" in types and canonical_names \
+            and path.name not in canonical_names and bare not in canonical_names:
+        types.discard("business_license")
+    return resolve_type_conflicts(types, path.name, description=" ".join(matched_descriptions))
 
 
 def is_public_material(path, types):

@@ -45,6 +45,30 @@ def test_sensitive_metadata_overrides_public_type(field):
     assert not is_public_material("1/public.pdf", file_types("1/public.pdf", cache))
 
 
+def test_legacy_iso_cache_with_cnas_false_inspection_type_remains_public():
+    filename = "质量管理体系认证证书-带CNAS标.png"
+    cache = {"1": {"materials_detail": [{
+        "fileName": filename,
+        "typeName": "质量管理体系认证证书",
+        "types": ["iso9001", "inspection_cert"],
+    }]}}
+    types = file_types(f"1/{filename}", cache)
+    assert types == {"iso9001"}
+    assert is_public_material(filename, types)
+
+
+def test_explicit_inspection_evidence_is_not_removed_from_combined_attachment():
+    filename = "ISO9001及CMA检验检测机构资质认定证书.pdf"
+    cache = {"1": {"materials_detail": [{
+        "fileName": filename,
+        "typeName": "检验检测机构资质认定证书",
+        "types": ["iso9001", "inspection_cert"],
+    }]}}
+    types = file_types(f"1/{filename}", cache)
+    assert types == {"iso9001", "inspection_cert"}
+    assert not is_public_material(filename, types)
+
+
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(tp, "BASE", tmp_path)
@@ -256,3 +280,31 @@ def test_aggregate_error_never_passes():
     result = aggregate_materials([{"file": "a", "error": "failed"}, {"file": "b", "checks": {"valid": True}}])
     assert result["issues"]
     assert None in result["checks"].values()
+
+
+def test_current_business_license_position_overrides_legacy_org_code_slot(tmp_path):
+    todo_dir = tmp_path / "46485690"
+    todo_dir.mkdir()
+    old = todo_dir / "10067319053_南星 营业执照.jpg"
+    current = todo_dir / "10094139429_营业执照.jpg"
+    cache = {"46485690": {"materials_detail": [
+        {"fileName": "南星 营业执照.jpg", "typeName": "组织机构代码证图片",
+         "types": ["business_license"]},
+        {"fileName": "营业执照.jpg", "typeName": "营业执照副本图片",
+         "types": ["business_license"]},
+    ]}}
+
+    assert "business_license" not in file_types(old, cache)
+    assert "business_license" in file_types(current, cache)
+
+
+def test_legacy_business_license_remains_fallback_without_current_slot(tmp_path):
+    todo_dir = tmp_path / "legacy"
+    todo_dir.mkdir()
+    old = todo_dir / "10067319053_南星 营业执照.jpg"
+    cache = {"legacy": {"materials_detail": [
+        {"fileName": "南星 营业执照.jpg", "typeName": "组织机构代码证图片",
+         "types": ["business_license"]},
+    ]}}
+
+    assert "business_license" in file_types(old, cache)

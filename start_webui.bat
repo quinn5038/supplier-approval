@@ -15,6 +15,7 @@ echo Close this window to stop the service.
 echo.
 cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
+set PYTHONUTF8=1
 REM Do not inherit a stale global Python home/path. Either can make a valid
 REM virtual environment fail before startup with "No module named encodings".
 set PYTHONHOME=

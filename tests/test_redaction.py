@@ -166,6 +166,40 @@ def test_wide_low_resolution_scan_falls_back_to_two_horizontal_cards(monkeypatch
     assert [card.side for card in result.cards] == ["back", "front"]
 
 
+def test_stacked_scan_recovers_lower_card_when_only_upper_contour_is_found(monkeypatch):
+    # Production-shaped regression: a 436x514 stacked scan where contour
+    # detection finds a normal upper card, not a long combined contour.
+    image = np.full((514, 436, 3), 255, dtype=np.uint8)
+    upper = np.array([[8, 5], [391, 5], [391, 250], [8, 250]], dtype=np.float32)
+    monkeypatch.setattr(masker, "find_cards", lambda source: [upper])
+    monkeypatch.setattr(masker, "find_blue_card_regions", lambda source: [])
+    seen = []
+
+    def fake_redact(source, quad, ocr, card_index):
+        seen.append(quad)
+        side = "front" if card_index == 1 else "back"
+        field = "合成姓名" if side == "front" else "2090.01.01-2099.01.01"
+        result = (masker.CardResult(card_index, side, name=field, status="已脱敏")
+                  if side == "front" else
+                  masker.CardResult(card_index, side, valid_until=field, status="已脱敏"))
+        return (np.zeros_like(source), np.zeros(source.shape[:2], dtype=np.uint8), result)
+
+    monkeypatch.setattr(masker, "redact_card", fake_redact)
+    _, result = masker.process_page(image, EmptyOcr(), "auto", "synthetic", 1)
+
+    assert len(seen) == 2
+    assert seen[0][:, 1].max() < seen[1][:, 1].min()
+    assert [card.side for card in result.cards] == ["front", "back"]
+
+
+def test_single_centred_card_is_not_split_into_fake_front_and_back():
+    image = np.full((600, 500, 3), 255, dtype=np.uint8)
+    centred = np.array([[40, 150], [460, 150], [460, 450], [40, 450]], dtype=np.float32)
+    recovered = masker.recover_missing_pair_from_page_layout(image, [centred])
+    assert len(recovered) == 1
+    assert np.array_equal(recovered[0], centred)
+
+
 def test_page_scale_recovers_fields_when_seal_breaks_card_crops(monkeypatch):
     image = np.full((500, 900, 3), 255, dtype=np.uint8)
     quads = [

@@ -28,12 +28,46 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from state_store import get_state, put_state
+from state_store import delete_state, get_state, put_state, record_event
+from storage_cleanup import (
+    CacheCleanupError,
+    CacheNotExpired,
+    clean_supplier_cache,
+    list_expired_supplier_caches,
+)
+from web.credential_store import (
+    CredentialStoreUnavailable,
+    clear_credentials,
+    has_saved_credentials,
+    load_credentials,
+    save_credentials,
+)
 from web.security import install_security
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 log = logging.getLogger("webui")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+
+def _apply_platform_credentials(values):
+    """Apply secrets without logging or returning them to the browser."""
+    for key in ("SCPMA_COOKIE", "SCPMA_AUTH_TOKEN", "APP_TOKEN", "AGENT_ID"):
+        value = str((values or {}).get(key) or "").strip()
+        if value:
+            os.environ[key] = value
+    module = sys.modules.get("auto_approve")
+    if module is not None:
+        for key in ("APP_TOKEN", "AGENT_ID"):
+            value = str((values or {}).get(key) or "").strip()
+            if value:
+                setattr(module, key, value)
+
+
+try:
+    _apply_platform_credentials(load_credentials())
+except (CredentialStoreUnavailable, OSError):
+    # Manual in-memory credentials remain available if DPAPI storage is unavailable.
+    pass
 
 # ============================================================
 # 配置
@@ -99,11 +133,29 @@ def _run_pipeline_for_one(todo_id: str):
     try:
         _update("正在拉取供应商数据（下载材料入缓存）...", progress=20)
         env = os.environ.copy()
+        # Never pass stale global Python locations to worker processes. A moved
+        # virtual environment otherwise fails before importing the application
+        # with the misleading "No module named encodings" fatal error.
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
         env["FETCH_ONLY"] = "true"
         env["DRY_RUN"] = "true"
         env["ENABLE_LIVE_APPROVAL"] = "false"
         env["FETCH_IDS"] = str(todo_id)
         env["PYTHONIOENCODING"] = "utf-8"
+        runtime_probe = subprocess.run(
+            [PYTHON_EXE, "-I", "-c", "import encodings"],
+            cwd=str(BASE_DIR), env=env,
+            capture_output=True, text=True, encoding="utf-8", timeout=20,
+        )
+        if runtime_probe.returncode != 0:
+            _update(
+                "python_runtime_invalid",
+                status="error",
+                error=("在线版 Python 环境已损坏或项目移动后失效。请关闭当前 WebUI，"
+                       "重新运行 start_webui.bat；启动脚本会自动修复环境。"),
+            )
+            return
         r1 = subprocess.run(
             [PYTHON_EXE, str(BASE_DIR / "auto_approve.py")],
             cwd=str(BASE_DIR), env=env,
@@ -365,6 +417,46 @@ async def api_status_all():
                 for tid, st in _task_status.items()}
 
 
+@app.get("/api/cache-cleanup")
+async def api_cache_cleanup_list():
+    """List per-supplier caches older than the fixed 14-day retention period."""
+    try:
+        items = list_expired_supplier_caches(BASE_DIR)
+    except (OSError, ValueError, json.JSONDecodeError, CacheCleanupError) as exc:
+        log.exception("缓存清理列表读取失败: %s", type(exc).__name__)
+        return JSONResponse({"error": "cache_list_failed", "msg": "缓存列表读取失败，请检查缓存文件。"}, 500)
+    return {"retentionDays": 14, "count": len(items), "items": items}
+
+
+@app.delete("/api/cache-cleanup/{todo_id}")
+async def api_clean_supplier_cache(todo_id: str):
+    """Delete one eligible supplier cache while no approval pipeline is active."""
+    with _task_lock:
+        if any(task.get("status") == "running" for task in _task_status.values()):
+            return JSONResponse({"error": "pipeline_running",
+                                 "msg": "当前有审批任务正在运行，请等待任务结束后再清理缓存。"}, 409)
+        try:
+            result = clean_supplier_cache(BASE_DIR, todo_id)
+        except CacheNotExpired as exc:
+            return JSONResponse({"error": "not_expired", "msg": str(exc)}, 409)
+        except (OSError, ValueError, json.JSONDecodeError, CacheCleanupError) as exc:
+            log.error("缓存清理失败 todo=%s exception=%s", todo_id, type(exc).__name__)
+            return JSONResponse({"error": "cleanup_failed", "msg": "清理失败，文件未能全部删除，请检查占用后重试。"}, 500)
+        _task_status.pop(todo_id, None)
+        delete_state(STATE_DB, "tasks", todo_id)
+        try:
+            record_event(BASE_DIR / "audit.sqlite3", "supplier_cache_cleanup", {
+                "todo_id": todo_id,
+                "supplier": result["name"],
+                "deleted_files": result["fileCount"],
+                "freed_bytes": result["sizeBytes"],
+            })
+        except Exception as exc:
+            log.warning("缓存已清理，但审计记录写入失败: %s", type(exc).__name__)
+    return {"ok": True, "msg": f"已清理 {result['name']} 的缓存",
+            "freedBytes": result["sizeBytes"], "deletedFiles": result["fileCount"]}
+
+
 @app.get("/api/report/{todo_id}")
 async def api_report(todo_id: str):
     """返回审查报告 HTML 片段 + 审批意见纯文本"""
@@ -433,8 +525,9 @@ async def api_desens_image(todo_id: str):
 
 @app.post("/api/cookie")
 async def api_update_cookie(cookie: str = Form(...), auth_token: str = Form(""),
-                            app_token: str = Form(""), agent_id: str = Form("")):
-    """仅更新当前进程；子进程继承，不写入文件或返回凭证。"""
+                            app_token: str = Form(""), agent_id: str = Form(""),
+                            remember: str = Form("false")):
+    """Update process memory and optionally persist a Windows-DPAPI encrypted copy."""
     cookie, auth_token = cookie.strip(), auth_token.strip()
     if any(not value or len(value) > 32768 or "\r" in value or "\n" in value for value in (cookie, auth_token)):
         return JSONResponse({"error": "请填写完整的 Authorization 和 Cookie，值中不要换行。"}, 400)
@@ -444,17 +537,41 @@ async def api_update_cookie(cookie: str = Form(...), auth_token: str = Form(""),
     with _task_lock:
         if any(task.get("status") == "running" for task in _task_status.values()):
             return JSONResponse({"error": "请等待当前任务结束后再更新凭证。"}, 409)
-        os.environ["SCPMA_COOKIE"] = cookie
-        os.environ["SCPMA_AUTH_TOKEN"] = auth_token
-        for key, value in extra.items():
-            if value:
-                os.environ[key] = value
-        # 待办列表可能已导入模块；同步更新本进程的配置，子进程继承环境。
-        import auto_approve
-        for key, value in extra.items():
-            if value:
-                setattr(auto_approve, key, value)
-    return {"ok": True, "msg": "凭证已更新，仅本次运行有效"}
+        values = {
+            "SCPMA_COOKIE": cookie,
+            "SCPMA_AUTH_TOKEN": auth_token,
+            "APP_TOKEN": extra["APP_TOKEN"] or os.getenv("APP_TOKEN", ""),
+            "AGENT_ID": extra["AGENT_ID"] or os.getenv("AGENT_ID", ""),
+        }
+        _apply_platform_credentials(values)
+        remembered = remember.strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            if remembered:
+                save_credentials(values)
+            else:
+                clear_credentials()
+        except (CredentialStoreUnavailable, OSError) as exc:
+            return JSONResponse({"error": f"凭证已用于本次运行，但无法安全保存到本机：{exc}"}, 500)
+    msg = "凭证已更新并安全保存到当前 Windows 用户" if remembered else "凭证已更新，仅本次运行有效"
+    return {"ok": True, "remembered": remembered, "msg": msg}
+
+
+@app.get("/api/credentials/status")
+def api_credential_status():
+    try:
+        saved = has_saved_credentials()
+    except (CredentialStoreUnavailable, OSError):
+        saved = False
+    return {"saved": saved}
+
+
+@app.delete("/api/credentials")
+def api_clear_credentials():
+    try:
+        removed = clear_credentials()
+    except (CredentialStoreUnavailable, OSError) as exc:
+        return JSONResponse({"error": f"无法清除本机凭证：{exc}"}, 500)
+    return {"ok": True, "removed": removed, "msg": "已清除本机保存的凭证；当前运行不受影响"}
 
 
 @app.get("/health")

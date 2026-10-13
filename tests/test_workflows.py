@@ -323,6 +323,51 @@ def test_iso14001_alias_classification(name, position):
     assert "ISO14001" in result["certifications"]
 
 
+@pytest.mark.parametrize("filename,position,expected", [
+    ("衡水安达机械设备有限公司－质量管理体系认证证书-带CNAS标.png",
+     "质量管理体系认证证书", "iso9001"),
+    ("衡水安达机械设备有限公司－环境管理体系认证证书-带CNAS标.png",
+     "环境管理体系认证证书图片", "iso14001"),
+    ("衡水安达机械设备有限公司－职业健康安全管理体系认证证书-带CNAS标.jpg",
+     "健康安全管理体系认证证书图片", "iso45001"),
+])
+def test_iso_cnas_mark_is_not_misclassified_as_inspection_certificate(
+        filename, position, expected):
+    result = aa.classify_uploaded_materials(
+        [{"fileName": filename, "fileinfoTypeName": position}])
+    types = result["details"][0][3]
+    assert expected in types
+    assert "inspection_cert" not in types
+
+
+def test_iso_cnas_certificates_render_their_shared_expiry_date():
+    supplier = {"full_name": "衡水安达机械设备有限公司"}
+    definitions = [
+        ("C1_02", "iso9001", "质量管理体系认证证书"),
+        ("C1_03", "iso14001", "环境管理体系认证证书"),
+        ("C1_04", "iso45001", "职业健康安全管理体系认证证书"),
+    ]
+    textin, checklist, materials = {}, [], []
+    for rule_id, doc_type, title in definitions:
+        textin[doc_type] = tp.extract(
+            doc_type,
+            f"{title}\n兹证明\n衡水安达机械设备有限公司\n"
+            "初次获证日期：2025年07月28日\n签发日期：2025年07月28日\n"
+            "有效日期：2028年07月27日",
+            supplier,
+        )
+        assert textin[doc_type]["fields"]["有效期至"] == "2028-07-27"
+        assert textin[doc_type]["checks"]["在有效期内"] is True
+        checklist.append({"id": rule_id, "name": title, "status": "pass", "detail": "OCR核验通过"})
+        materials.append({"fileName": f"{title}-带CNAS标.png", "types": [doc_type]})
+
+    html = gen_stage2_report.render_supplier(
+        "1", {"decision": "recommend", "checklist": checklist},
+        {"1": textin}, {"1": {"supplier": supplier, "materials_detail": materials}})
+    assert html.count("有效期至 2028-07-27，在有效期内") == 3
+    assert "未识别到有效期" not in html
+
+
 def test_iso_legacy_cache_and_sensitive_veto():
     cache = {"1": {"supplier": {"certifications": []}, "materials_detail": [
         {"fileName": "环境管理.png", "typeName": "环境管理体系认证证书图片", "types": []}]}}

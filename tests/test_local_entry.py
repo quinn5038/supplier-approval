@@ -8,7 +8,7 @@ from web.app import app
 
 
 @pytest.fixture
-def local_client(monkeypatch):
+def local_client(monkeypatch, tmp_path):
     from web import app as web_app
     monkeypatch.setenv("WEB_AUTH_MODE", "local")
     monkeypatch.delenv("WEB_ADMIN_PASSWORD", raising=False)
@@ -18,6 +18,8 @@ def local_client(monkeypatch):
         monkeypatch.setenv(name, "")
         monkeypatch.setattr(auto_approve, name, "")
     monkeypatch.setenv("CODE", "")
+    # Never let tests inspect or remove the real user's saved credential file.
+    monkeypatch.setenv("SUPPLIER_CREDENTIAL_FILE", str(tmp_path / "credentials.bin"))
     monkeypatch.setattr(web_app, "_task_status", {})
     with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 12345)) as client:
         yield client
@@ -63,3 +65,32 @@ def test_credentials_not_switched_during_processing(local_client, monkeypatch):
                                  headers={"origin": "http://localhost", "x-csrf-token": local_client.cookies.get("supplier_csrf")})
     assert response.status_code == 409
     assert os.environ["SCPMA_COOKIE"] == ""
+
+
+def test_credentials_can_be_dpapi_saved_and_cleared(local_client, monkeypatch, tmp_path):
+    from web import app as web_app
+    target = tmp_path / "platform_credentials.bin"
+    monkeypatch.setenv("SUPPLIER_CREDENTIAL_FILE", str(target))
+    local_client.get("/")
+    headers = {"origin": "http://localhost",
+               "x-csrf-token": local_client.cookies.get("supplier_csrf")}
+    values = {"cookie": "session=encrypted-synthetic",
+              "auth_token": "Bearer encrypted-synthetic", "remember": "true"}
+
+    response = local_client.post("/api/cookie", data=values, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["remembered"] is True
+    assert target.is_file()
+    assert b"encrypted-synthetic" not in target.read_bytes()
+    assert web_app.load_credentials()["SCPMA_COOKIE"] == values["cookie"]
+    monkeypatch.setenv("SCPMA_COOKIE", "")
+    monkeypatch.setenv("SCPMA_AUTH_TOKEN", "")
+    web_app._apply_platform_credentials(web_app.load_credentials())
+    assert os.environ["SCPMA_COOKIE"] == values["cookie"]
+    assert os.environ["SCPMA_AUTH_TOKEN"] == values["auth_token"]
+    assert local_client.get("/api/credentials/status").json() == {"saved": True}
+
+    cleared = local_client.delete("/api/credentials", headers=headers)
+    assert cleared.status_code == 200
+    assert not target.exists()

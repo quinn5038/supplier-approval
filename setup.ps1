@@ -1,5 +1,6 @@
 ﻿param([switch]$Test, [switch]$Demo, [switch]$InstallOnly)
 $ErrorActionPreference = 'Stop'
+$env:PYTHONUTF8 = '1'
 Set-Location -LiteralPath $PSScriptRoot
 
 function Test-Python([string]$Executable, [string[]]$PrefixArgs = @()) {
@@ -22,6 +23,19 @@ function Find-BasePython {
     }
     if ((Get-Command py -ErrorAction SilentlyContinue) -and (Test-Python 'py' @('-3.11'))) {
         return @{ Command = 'py'; Args = @('-3.11') }
+    }
+    # A normal per-user Python installation is not necessarily added to PATH.
+    # Check it explicitly so a copied/moved virtual environment can repair itself.
+    $localPythonRoot = Join-Path $env:LOCALAPPDATA 'Programs/Python'
+    if (Test-Path -LiteralPath $localPythonRoot) {
+        $localPythons = Get-ChildItem -LiteralPath $localPythonRoot -Directory -Filter 'Python*' |
+            Sort-Object Name -Descending
+        foreach ($directory in $localPythons) {
+            $candidate = Join-Path $directory.FullName 'python.exe'
+            if ((Test-Path -LiteralPath $candidate) -and (Test-Python $candidate)) {
+                return @{ Command = $candidate; Args = @() }
+            }
+        }
     }
     $systemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
     if ($systemPython -and (Test-Python $systemPython)) {
