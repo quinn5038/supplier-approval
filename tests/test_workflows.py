@@ -103,6 +103,30 @@ def test_business_license_inline_spaced_address_does_not_join_legal_person():
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_business_license_reverse_vertical_name_label_detects_mismatch():
+    """离线 OCR 双栏展平为“公司名称 称”时仍应提取执照主体并触发 A01。"""
+    text = ("法定代表人 马卫东\n"
+            "统一社会信用代码 91370211MA3RNQ0M3R\n"
+            "型 有限责任公司（自然人投资或控股） 青岛亿丰通商贸有限公司 称\n"
+            "注册资本 壹佰万元整\n"
+            "经营范围 汽车销售；互联网销售")
+    supplier = {
+        "social_credit_code": "91370212MACCHYX058",
+        "full_name": "青岛国承科技发展有限公司",
+        "legal_person": "马卫东",
+        "registered_capital": 100,
+        "busi_scope": "技术服务；汽车销售",
+    }
+
+    result = tp.extract("business_license", text, supplier)
+
+    assert result["fields"]["名称"] == "青岛亿丰通商贸有限公司"
+    assert result["checks"]["名称一致"] is False
+    assert "执照名称「青岛亿丰通商贸有限公司」与系统「青岛国承科技发展有限公司」不一致" in result["issues"]
+    assert aa._resolve_supplier_name(supplier, {"title": supplier["full_name"] + "/1"},
+                                     {"business_license": result}) == "青岛亿丰通商贸有限公司"
+
+
 def test_material_name_check_uses_todo_title_not_apply_unit_contract():
     supplier = {"name": "合成简称", "social_credit_code": "91110000123456789X"}
     todo = {
@@ -321,6 +345,51 @@ def test_e2_missing_is_numbered_in_return_opinion(materials):
 def test_iso14001_alias_classification(name, position):
     result = aa.classify_uploaded_materials([{"fileName": name, "fileinfoTypeName": position}])
     assert "ISO14001" in result["certifications"]
+
+
+@pytest.mark.parametrize("filename,position,expected", [
+    ("衡水安达机械设备有限公司－质量管理体系认证证书-带CNAS标.png",
+     "质量管理体系认证证书", "iso9001"),
+    ("衡水安达机械设备有限公司－环境管理体系认证证书-带CNAS标.png",
+     "环境管理体系认证证书图片", "iso14001"),
+    ("衡水安达机械设备有限公司－职业健康安全管理体系认证证书-带CNAS标.jpg",
+     "健康安全管理体系认证证书图片", "iso45001"),
+])
+def test_iso_cnas_mark_is_not_misclassified_as_inspection_certificate(
+        filename, position, expected):
+    result = aa.classify_uploaded_materials(
+        [{"fileName": filename, "fileinfoTypeName": position}])
+    types = result["details"][0][3]
+    assert expected in types
+    assert "inspection_cert" not in types
+
+
+def test_iso_cnas_certificates_render_their_shared_expiry_date():
+    supplier = {"full_name": "衡水安达机械设备有限公司"}
+    definitions = [
+        ("C1_02", "iso9001", "质量管理体系认证证书"),
+        ("C1_03", "iso14001", "环境管理体系认证证书"),
+        ("C1_04", "iso45001", "职业健康安全管理体系认证证书"),
+    ]
+    textin, checklist, materials = {}, [], []
+    for rule_id, doc_type, title in definitions:
+        textin[doc_type] = tp.extract(
+            doc_type,
+            f"{title}\n兹证明\n衡水安达机械设备有限公司\n"
+            "初次获证日期：2025年07月28日\n签发日期：2025年07月28日\n"
+            "有效日期：2028年07月27日",
+            supplier,
+        )
+        assert textin[doc_type]["fields"]["有效期至"] == "2028-07-27"
+        assert textin[doc_type]["checks"]["在有效期内"] is True
+        checklist.append({"id": rule_id, "name": title, "status": "pass", "detail": "OCR核验通过"})
+        materials.append({"fileName": f"{title}-带CNAS标.png", "types": [doc_type]})
+
+    html = gen_stage2_report.render_supplier(
+        "1", {"decision": "recommend", "checklist": checklist},
+        {"1": textin}, {"1": {"supplier": supplier, "materials_detail": materials}})
+    assert html.count("有效期至 2028-07-27，在有效期内") == 3
+    assert "未识别到有效期" not in html
 
 
 def test_iso_legacy_cache_and_sensitive_veto():

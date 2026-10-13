@@ -3,24 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>审批详情 - {{ supplier_name or todo_id }}</title>
+    <title>[离线版] 审批详情 - {{ supplier_name or todo_id }}</title>
     <link rel="stylesheet" href="/static/style.css">
 <script>
 const originalFetch = window.fetch.bind(window);
 window.fetch = (url, options = {}) => {
   const headers = new Headers(options.headers || {});
   if (new URL(url, location.href).origin === location.origin) {
-    const token = document.cookie.split('; ').find(v => v.startsWith('supplier_csrf='));
+    const token = document.cookie.split('; ').find(v => v.startsWith('supplier_offline_csrf='));
     if (token) headers.set('X-CSRF-Token', token.split('=')[1]);
   }
   return originalFetch(url, {...options, headers});
 };
 </script>
 </head>
-<body>
+<body class="offline-edition">
+    <div class="offline-edition-badge" aria-label="当前版本：离线 OCR 版">
+        <strong>离线 OCR 版</strong><span>本地识别</span>
+    </div>
     <div class="topbar">
         <div>
-            <h1 id="page-title">{{ supplier_name or '供应商审批详情' }}</h1>
+            <h1 id="page-title">{{ supplier_name or '供应商审批详情' }} <span class="offline-title-mark">离线版</span></h1>
             <div class="meta">todoId: {{ todo_id }}</div>
         </div>
         <div class="actions">

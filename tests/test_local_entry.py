@@ -5,10 +5,11 @@ from fastapi.testclient import TestClient
 
 import auto_approve
 from web.app import app
+from web.security import CSRF_COOKIE
 
 
 @pytest.fixture
-def local_client(monkeypatch):
+def local_client(monkeypatch, tmp_path):
     from web import app as web_app
     monkeypatch.setenv("WEB_AUTH_MODE", "local")
     monkeypatch.delenv("WEB_ADMIN_PASSWORD", raising=False)
@@ -18,6 +19,8 @@ def local_client(monkeypatch):
         monkeypatch.setenv(name, "")
         monkeypatch.setattr(auto_approve, name, "")
     monkeypatch.setenv("CODE", "")
+    # Never let tests inspect or remove the real user's saved credential file.
+    monkeypatch.setenv("SUPPLIER_CREDENTIAL_FILE", str(tmp_path / "credentials.bin"))
     monkeypatch.setattr(web_app, "_task_status", {})
     with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 12345)) as client:
         yield client
@@ -27,7 +30,7 @@ def test_local_entry_memory_credentials(local_client, monkeypatch):
     from pathlib import Path
     assert local_client.get("/").status_code == 200
     assert local_client.get("/api/todos").status_code == 401
-    headers = {"origin": "http://localhost", "x-csrf-token": local_client.cookies.get("supplier_csrf")}
+    headers = {"origin": "http://localhost", "x-csrf-token": local_client.cookies.get(CSRF_COOKIE)}
     def forbid_write(*args, **kwargs):
         raise AssertionError("Credentials must never be written to disk")
     monkeypatch.setattr(Path, "write_text", forbid_write)
@@ -48,6 +51,24 @@ def test_local_entry_memory_credentials(local_client, monkeypatch):
     assert local_client.get("/api/todos").status_code == 200
 
 
+def test_offline_edition_is_visible_on_main_pages(local_client):
+    home = local_client.get("/")
+    detail = local_client.get("/approve/synthetic")
+    preflight = local_client.get("/preflight")
+    for response in (home, detail, preflight):
+        assert response.status_code == 200
+        assert "离线 OCR 版" in response.text
+        assert "offline-edition-badge" in response.text
+
+
+def test_offline_csrf_cookie_is_namespaced(local_client):
+    response = local_client.get("/")
+    assert response.status_code == 200
+    assert local_client.cookies.get(CSRF_COOKIE)
+    assert local_client.cookies.get("supplier_csrf") is None
+    assert "supplier_offline_csrf=" in response.text
+
+
 def test_local_entry_blocks_remote_and_cross_site(local_client):
     assert local_client.get("/", headers={"sec-fetch-site": "cross-site"}).status_code == 403
     assert local_client.get("/", headers={"host": "evil.test"}).status_code == 400
@@ -60,6 +81,35 @@ def test_credentials_not_switched_during_processing(local_client, monkeypatch):
     local_client.get("/")
     monkeypatch.setattr(web_app, "_task_status", {"1": {"status": "running"}})
     response = local_client.post("/api/cookie", data={"cookie": "a=b", "auth_token": "token"},
-                                 headers={"origin": "http://localhost", "x-csrf-token": local_client.cookies.get("supplier_csrf")})
+                                 headers={"origin": "http://localhost", "x-csrf-token": local_client.cookies.get(CSRF_COOKIE)})
     assert response.status_code == 409
     assert os.environ["SCPMA_COOKIE"] == ""
+
+
+def test_credentials_can_be_dpapi_saved_and_cleared(local_client, monkeypatch, tmp_path):
+    from web import app as web_app
+    target = tmp_path / "platform_credentials.bin"
+    monkeypatch.setenv("SUPPLIER_CREDENTIAL_FILE", str(target))
+    local_client.get("/")
+    headers = {"origin": "http://localhost",
+               "x-csrf-token": local_client.cookies.get(CSRF_COOKIE)}
+    values = {"cookie": "session=encrypted-synthetic",
+              "auth_token": "Bearer encrypted-synthetic", "remember": "true"}
+
+    response = local_client.post("/api/cookie", data=values, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["remembered"] is True
+    assert target.is_file()
+    assert b"encrypted-synthetic" not in target.read_bytes()
+    assert web_app.load_credentials()["SCPMA_COOKIE"] == values["cookie"]
+    monkeypatch.setenv("SCPMA_COOKIE", "")
+    monkeypatch.setenv("SCPMA_AUTH_TOKEN", "")
+    web_app._apply_platform_credentials(web_app.load_credentials())
+    assert os.environ["SCPMA_COOKIE"] == values["cookie"]
+    assert os.environ["SCPMA_AUTH_TOKEN"] == values["auth_token"]
+    assert local_client.get("/api/credentials/status").json() == {"saved": True}
+
+    cleared = local_client.delete("/api/credentials", headers=headers)
+    assert cleared.status_code == 200
+    assert not target.exists()

@@ -413,6 +413,31 @@ def side_by_side_fallback(image: np.ndarray) -> list[np.ndarray]:
     ]
 
 
+def recover_missing_pair_from_page_layout(
+        image: np.ndarray, cards: list[np.ndarray]) -> list[np.ndarray]:
+    """Recover the missing half when exactly one card of a two-card page is found."""
+    if len(cards) != 1:
+        return cards
+    height, width = image.shape[:2]
+    quad = cards[0]
+    x1, x2 = float(quad[:, 0].min()), float(quad[:, 0].max())
+    y1, y2 = float(quad[:, 1].min()), float(quad[:, 1].max())
+    card_width, card_height = x2 - x1, y2 - y1
+    centre_x, centre_y = (x1 + x2) / 2, (y1 + y2) / 2
+
+    if (height / max(1, width) >= 1.05
+            and card_width >= width * 0.65
+            and card_height <= height * 0.62
+            and (centre_y <= height * 0.38 or centre_y >= height * 0.62)):
+        return stacked_fallback(image)
+    if (width / max(1, height) >= 2.0
+            and card_height >= height * 0.65
+            and card_width <= width * 0.62
+            and (centre_x <= width * 0.38 or centre_x >= width * 0.62)):
+        return side_by_side_fallback(image)
+    return cards
+
+
 def split_detected_long(source: np.ndarray, cards: list[np.ndarray]) -> list[np.ndarray]:
     """9/10 方案A：正反面拼图（左右/上下并排）检测不完整时，主动二分整图。
 
@@ -560,6 +585,8 @@ def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str
         blue_cards = find_blue_card_regions(source)
         if len(blue_cards) >= 2:
             cards = blue_cards
+    if layout != "single":
+        cards = recover_missing_pair_from_page_layout(source, cards)
     # 无清晰矩形边框的拼图可能让 find_cards 返回 0。先尝试上下二分，
     # 再处理左右二分；否则低分辨率的横向正反面拼图会在 OCR 前直接整页遮盖。
     if not cards and layout != "single":

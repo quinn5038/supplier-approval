@@ -51,12 +51,32 @@ def test_rerun_download_expiry_then_retry_success(tmp_path, monkeypatch):
     webapp._run_pipeline_for_one("45813273")
     assert webapp._task_status["45813273"]["step"] == "cookie_expired"
     assert webapp._task_status["45813273"]["status"] == "error"
-    assert runner.call_count == 1  # no OCR or stage2 after failed download
+    assert runner.call_count == 2  # runtime probe + fetch; no OCR or stage2 after failed download
     download.side_effect = None
     (tmp_path / "stage2_results.json").write_text(json.dumps({"45813273": {"decision": "manual"}}))
     webapp._run_pipeline_for_one("45813273")
     assert webapp._task_status["45813273"]["status"] == "done"
     assert download.call_count == 2
+
+
+def test_broken_worker_python_reports_repair_instruction(tmp_path, monkeypatch):
+    monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(webapp, "STATE_DB", tmp_path / "state.sqlite3")
+    monkeypatch.setattr(webapp, "_task_status", {})
+    broken = Mock(returncode=1, stderr="No module named 'encodings'")
+    runner = Mock(return_value=broken)
+    monkeypatch.setattr(webapp.subprocess, "run", runner)
+
+    webapp._run_pipeline_for_one("123")
+
+    state = webapp._task_status["123"]
+    assert state["step"] == "python_runtime_invalid"
+    assert state["status"] == "error"
+    assert "start_webui.bat" in state["error"]
+    assert runner.call_count == 1
+    child_env = runner.call_args.kwargs["env"]
+    assert "PYTHONHOME" not in child_env
+    assert "PYTHONPATH" not in child_env
 
 
 def test_homepage_filter_keeps_background_state():

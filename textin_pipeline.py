@@ -247,6 +247,42 @@ def _grab(text, labels, pat):
     return None
 
 
+_COMPANY_SUFFIX = ("有限责任公司", "股份有限公司", "有限公司", "集团公司", "公司")
+
+
+def _extract_business_license_name(text):
+    """Extract the registered name from conventional and column-reversed licences.
+
+    PaddleOCR may flatten the two-column/vertical-label licence layout as
+    ``公司类型 目标企业有限公司 称``.  In that representation the final ``称``
+    belongs to the vertical ``名称`` label, so the normal ``标签 -> 值`` parser
+    cannot see the company name.  Only use the reverse-layout fallback on a
+    line ending in ``称`` and select its last company-shaped token; this avoids
+    mistaking the registration authority or another company in body text for
+    the licence holder.
+    """
+    value = _grab(text, ["名称"], r"[^\n:：]{2,60}?")
+    if value:
+        return value
+
+    suffix = "(?:" + "|".join(map(re.escape, _COMPANY_SUFFIX)) + ")"
+    for raw_line in text.splitlines():
+        line = raw_line.strip(" \t　|。，,；;")
+        if not re.search(r"(?:名\s*)?称\s*$", line):
+            continue
+        prefix = re.sub(r"(?:名\s*)?称\s*$", "", line).strip()
+        # Columns are normally separated by OCR whitespace.  Prefer the last
+        # token because the company type occupies the left-hand column.
+        tokens = [part.strip("()（） ") for part in re.split(r"\s+", prefix) if part.strip()]
+        for token in reversed(tokens):
+            matches = re.findall(rf"[\u4e00-\u9fa5A-Za-z0-9（）()·&]+?{suffix}", token)
+            if matches:
+                candidate = matches[-1].strip("()（） ")
+                if len(candidate) >= 6 and candidate not in _COMPANY_SUFFIX:
+                    return candidate
+    return None
+
+
 def _normalise_field_labels(text):
     """Join whitespace inside known OCR labels while preserving value spacing."""
     labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本",
@@ -377,7 +413,7 @@ def extract_business_license(text, supplier):
         m2 = re.search(r"(?<![0-9A-Za-z])([0-9A-Z]{18})(?![0-9A-Za-z])", t)
         code = m2.group(1) if m2 else None
     fields["统一社会信用代码"] = code.upper() if code else None
-    fields["名称"] = _grab(t, ["名称"], r"[^\n:：]{2,60}?")
+    fields["名称"] = _extract_business_license_name(t)
     fields["法定代表人"] = _grab(t, ["法定代表人"], r"[^\n:：]{2,60}?")
     # 单独保留住所，既便于报告核对，也确保同行排版
     # 「法定代表人 XXX 住 所 XXX」中的住所不会并入法人姓名。

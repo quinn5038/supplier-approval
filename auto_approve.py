@@ -752,7 +752,7 @@ def classify_uploaded_materials(file_list):
         all_text = f"{file_name} {file_desc} {file_summ}"
         
         classified = set()
-        from material_policy import iso_candidate_types
+        from material_policy import iso_candidate_types, resolve_type_conflicts
         classified.update(iso_candidate_types(file_name, type_name))
         
         # 1. 先用 fileinfoTypeName 精确匹配
@@ -778,6 +778,10 @@ def classify_uploaded_materials(file_list):
                 "expected_code": tn_iso,
                 "actual_code": fn_iso,
             })
+
+        # CNAS is commonly an accreditation mark on ISO management-system
+        # certificates, not evidence that the attachment is an inspection licence.
+        classified = resolve_type_conflicts(classified, file_name, type_name, file_desc)
         
         materials |= classified
         details.append((file_name, type_name, file_desc, classified))

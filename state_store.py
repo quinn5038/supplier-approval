@@ -63,3 +63,18 @@ def get_state(path, namespace):
     with connect(path) as db:
         return {key: json.loads(value) for key, value in
                 db.execute("SELECT key,value FROM state WHERE namespace=?", (namespace,))}
+
+
+def delete_state(path, namespace, key):
+    """Delete mutable UI state without touching append-only audit events."""
+    with connect(path) as db:
+        db.execute("DELETE FROM state WHERE namespace=? AND key=?",
+                   (namespace, str(key)))
+
+
+def delete_state_prefix(path, namespace, key_prefix):
+    """Delete cache rows sharing a namespaced key prefix."""
+    with connect(path) as db:
+        db.execute("DELETE FROM state WHERE namespace=? AND key LIKE ? ESCAPE '\\'",
+                   (namespace, str(key_prefix).replace("\\", "\\\\")
+                    .replace("%", "\\%").replace("_", "\\_") + "%"))
