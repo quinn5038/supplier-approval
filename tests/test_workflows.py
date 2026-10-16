@@ -103,6 +103,58 @@ def test_business_license_inline_spaced_address_does_not_join_legal_person():
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_business_license_cross_column_labels_do_not_join_legal_person():
+    text = (
+        "经营范围 法定代表人陈太江 类 名 91320411MABW059K0W 统一社会信用代码\n"
+        "型其他有限责任公司 称台荣建材（常州）有限公司\n"
+        "登记机关 2022年08月12日 500万元整"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "台荣建材（常州）有限公司",
+        "legal_person": "陈太江",
+        "social_credit_code": "91320411MABW059K0W",
+    })
+
+    assert result["fields"]["法定代表人"] == "陈太江"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
+def test_business_license_long_dash_ocr_noise_does_not_join_legal_person():
+    text = (
+        "经营范围 法定代表人马卫东— 米\n"
+        "名 91370211MA3RNQ0M3R 统一社会信用代码\n"
+        "型有限责任公司（自然人投资或控股) 青岛亿丰通商贸有限公司 称"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "青岛国承科技发展有限公司",
+        "legal_person": "马卫东",
+        "social_credit_code": "91370212MACCHYX058",
+    })
+
+    assert result["fields"]["法定代表人"] == "马卫东"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
+def test_business_license_reversed_residence_label_does_not_join_legal_person():
+    text = (
+        "统一社会信用代码 91441900055339351C\n"
+        "名称 东莞市旭佳家具实业有限公司\n"
+        "法定代表人 陈庆中 所东莞市塘厦镇莆沙南路3号C栋\n"
+        "住\n经营范围 家具制造"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "东莞市旭佳家具实业有限公司",
+        "legal_person": "陈庆中",
+        "social_credit_code": "91441900055339351C",
+    })
+
+    assert result["fields"]["法定代表人"] == "陈庆中"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
 def test_material_name_check_uses_todo_title_not_apply_unit_contract():
     supplier = {"name": "合成简称", "social_credit_code": "91110000123456789X"}
     todo = {
@@ -321,6 +373,34 @@ def test_e2_missing_is_numbered_in_return_opinion(materials):
 def test_iso14001_alias_classification(name, position):
     result = aa.classify_uploaded_materials([{"fileName": name, "fileinfoTypeName": position}])
     assert "ISO14001" in result["certifications"]
+
+
+def test_tax_level_proof_in_other_files_satisfies_a03_presence():
+    material = {
+        "fileName": "纳税等级证明.pdf",
+        "fileinfoTypeName": "其他文件",
+        "fileDesc": "",
+    }
+    classified = aa.classify_uploaded_materials([material])
+    types = classified["details"][0][3]
+    assert "tax_credit" in types
+    assert "tax_cert" not in types
+
+    supplier = {"tax_credit_rating_ok": "tax_credit" in classified["materials"]}
+    applicable, _ = aa.determine_supplier_rules({"sup_type": "经销商"}, aa.load_rules())
+    rules = [rule for rule in applicable if rule["id"] == "A03"]
+    checklist, _, missing, _ = aa.build_checklist(supplier, rules, [material])
+    assert not missing
+    assert checklist[0]["status"] == "pending"
+    assert "材料已上传" in checklist[0]["detail"]
+
+
+@pytest.mark.parametrize("filename", ["AAA级信用等级证书.pdf", "企业信用等级证明.pdf"])
+def test_general_credit_rating_in_other_files_is_not_tax_credit(filename):
+    result = aa.classify_uploaded_materials([
+        {"fileName": filename, "fileinfoTypeName": "其他文件", "fileDesc": ""},
+    ])
+    assert "tax_credit" not in result["materials"]
 
 
 @pytest.mark.parametrize("filename,position,expected", [

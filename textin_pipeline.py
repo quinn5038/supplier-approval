@@ -332,6 +332,49 @@ def _grab(text, labels, pat):
     return None
 
 
+def _extract_business_license_legal_person(text):
+    """Extract the legal representative without adjacent column-label debris.
+
+    Two-column licences may be flattened as ``法定代表人张三 类 名 <credit-code>``:
+    ``类`` and ``名`` are the first characters of the vertical 类型/名称 labels.
+    They are not complete labels, so the generic field boundary cannot stop on
+    them.  Cut only at this spaced cross-column marker or at a full credit code;
+    ordinary compound Chinese names remain unchanged.
+    """
+    value = _grab(text, ["法定代表人"], r"[^\n:：]{2,60}?")
+    if not value:
+        return None
+    boundaries = (
+        r"\s+(?:类\s+名|名\s+类)(?=\s|$)",
+        r"\s+(?:类\s*型|名\s*称)(?=\s|$)",
+        # Two-column OCR can order the right-hand vertical label as value first,
+        # yielding ``法定代表人 陈庆中 所东莞市...`` followed by a lone ``住``.
+        # Treat the orphan ``所`` as the residence-field boundary only when the
+        # following text contains an address marker; a name is never truncated
+        # merely because it contains this character.
+        r"\s+(?:住\s*)?所(?=[^\n]{0,40}(?:省|自治区|市|区|县|镇|街道|路|道|号|栋|村))",
+        r"(?<![0-9A-Za-z])[0-9A-Z]{15,18}(?![0-9A-Za-z])",
+    )
+    end = len(value)
+    for pattern in boundaries:
+        match = re.search(pattern, value, re.I)
+        if match:
+            end = min(end, match.start())
+    cleaned = value[:end].strip(" \t　。，,；;、")
+    # OCR may flatten a nearby column glyph into the name, for example
+    # ``法定代表人马卫东— 米``. Only remove this suffix for the tightly
+    # constrained shape "plausible Chinese name + long dash + 1-3 Han glyphs".
+    # This avoids fixed-length truncation and preserves ordinary hyphenated or
+    # longer names.
+    noise_suffix = re.fullmatch(
+        r"(?P<name>[\u4e00-\u9fff·]{2,12})\s*[—–－]\s*[\u4e00-\u9fff]{1,3}",
+        cleaned,
+    )
+    if noise_suffix:
+        cleaned = noise_suffix.group("name")
+    return cleaned or None
+
+
 def _normalise_field_labels(text):
     """Join whitespace inside known OCR labels while preserving value spacing."""
     labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本",
@@ -463,7 +506,7 @@ def extract_business_license(text, supplier):
         code = m2.group(1) if m2 else None
     fields["统一社会信用代码"] = code.upper() if code else None
     fields["名称"] = _grab(t, ["名称"], r"[^\n:：]{2,60}?")
-    fields["法定代表人"] = _grab(t, ["法定代表人"], r"[^\n:：]{2,60}?")
+    fields["法定代表人"] = _extract_business_license_legal_person(t)
     # 单独保留住所，既便于报告核对，也确保同行排版
     # 「法定代表人 XXX 住 所 XXX」中的住所不会并入法人姓名。
     fields["住所"] = _grab(t, ["住所"], r"[^\n:：]{2,120}?")
