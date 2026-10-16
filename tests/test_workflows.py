@@ -103,6 +103,58 @@ def test_business_license_inline_spaced_address_does_not_join_legal_person():
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_business_license_cross_column_labels_do_not_join_legal_person():
+    text = (
+        "经营范围 法定代表人陈太江 类 名 91320411MABW059K0W 统一社会信用代码\n"
+        "型其他有限责任公司 称台荣建材（常州）有限公司\n"
+        "登记机关 2022年08月12日 500万元整"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "台荣建材（常州）有限公司",
+        "legal_person": "陈太江",
+        "social_credit_code": "91320411MABW059K0W",
+    })
+
+    assert result["fields"]["法定代表人"] == "陈太江"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
+def test_business_license_long_dash_ocr_noise_does_not_join_legal_person():
+    text = (
+        "经营范围 法定代表人马卫东— 米\n"
+        "名 91370211MA3RNQ0M3R 统一社会信用代码\n"
+        "型有限责任公司（自然人投资或控股) 青岛亿丰通商贸有限公司 称"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "青岛国承科技发展有限公司",
+        "legal_person": "马卫东",
+        "social_credit_code": "91370212MACCHYX058",
+    })
+
+    assert result["fields"]["法定代表人"] == "马卫东"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
+def test_business_license_reversed_residence_label_does_not_join_legal_person():
+    text = (
+        "统一社会信用代码 91441900055339351C\n"
+        "名称 东莞市旭佳家具实业有限公司\n"
+        "法定代表人 陈庆中 所东莞市塘厦镇莆沙南路3号C栋\n"
+        "住\n经营范围 家具制造"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "东莞市旭佳家具实业有限公司",
+        "legal_person": "陈庆中",
+        "social_credit_code": "91441900055339351C",
+    })
+
+    assert result["fields"]["法定代表人"] == "陈庆中"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
 def test_business_license_reverse_vertical_name_label_detects_mismatch():
     """离线 OCR 双栏展平为“公司名称 称”时仍应提取执照主体并触发 A01。"""
     text = ("法定代表人 马卫东\n"
@@ -181,6 +233,61 @@ def test_iso_registration_valid_date_allows_ocr_spacing(doc_type):
     assert result["fields"]["有效期至"] == "2028-01-07"
     assert result["checks"]["在有效期内"] is True
     assert not any("未识别到有效期" in issue for issue in result["issues"])
+
+
+@pytest.mark.parametrize(("doc_type", "title", "standard"), [
+    ("iso9001", "质量管理体系认证证书", "GB/T19001-2016 idt ISO9001:2015"),
+    ("iso14001", "环境管理体系认证证书", "GB/T24001-2016 idt ISO14001:2015"),
+    ("iso45001", "职业健康安全管理体系认证证书", "GB/T45001-2020 idt ISO45001:2018"),
+])
+def test_iso_decorative_low_confidence_does_not_force_manual_review(
+        doc_type, title, standard):
+    text = (f"{title}\n成都伯斯曼实业有限公司\n{standard}\n"
+            "有效期至：2028年07月18日")
+    result = tp.extract(doc_type, text, {"full_name": "成都伯斯曼实业有限公司"})
+    detail = [
+        {"text": title, "confidence": .99},
+        {"text": "成都伯斯曼实业有限公司", "confidence": .99},
+        {"text": standard, "confidence": .98},
+        {"text": "有效期至：2028年07月18日", "confidence": .99},
+        {"text": "IAF", "confidence": .74},
+        {"text": "（贴花）", "confidence": .77},
+    ]
+
+    tp._apply_ocr_confidence_review(doc_type, result, detail)
+
+    assert result["checks"]["OCR文字置信度充足"] is True
+    assert not any("置信度" in issue for issue in result["issues"])
+
+
+def test_iso_low_confidence_holder_still_requires_manual_review():
+    text = ("质量管理体系认证证书\n成都伯斯曼实业有限公司\n"
+            "GB/T19001-2016 idt ISO9001:2015\n有效期至：2028年07月18日")
+    result = tp.extract("iso9001", text, {"full_name": "成都伯斯曼实业有限公司"})
+    detail = [
+        {"text": "质量管理体系认证证书", "confidence": .99},
+        {"text": "成都伯斯曼实业有限公司", "confidence": .82},
+        {"text": "GB/T19001-2016 idt ISO9001:2015", "confidence": .98},
+        {"text": "有效期至：2028年07月18日", "confidence": .99},
+    ]
+
+    tp._apply_ocr_confidence_review("iso9001", result, detail)
+
+    assert result["checks"]["OCR文字置信度充足"] is None
+    assert "ISO关键字段获证组织文字置信度较低（0.82），转人工核验" in result["issues"]
+
+
+def test_iso_missing_confidence_detail_still_requires_manual_review():
+    result = tp.extract(
+        "iso9001",
+        "质量管理体系认证证书\n成都伯斯曼实业有限公司\n有效期至：2028年07月18日",
+        {"full_name": "成都伯斯曼实业有限公司"},
+    )
+
+    tp._apply_ocr_confidence_review("iso9001", result, None)
+
+    assert result["checks"]["OCR文字置信度充足"] is None
+    assert "OCR置信度明细缺失，转人工核验" in result["issues"]
 
 
 def test_business_license_incomplete_date_range_does_not_expire_on_start_date():
@@ -345,6 +452,34 @@ def test_e2_missing_is_numbered_in_return_opinion(materials):
 def test_iso14001_alias_classification(name, position):
     result = aa.classify_uploaded_materials([{"fileName": name, "fileinfoTypeName": position}])
     assert "ISO14001" in result["certifications"]
+
+
+def test_tax_level_proof_in_other_files_satisfies_a03_presence():
+    material = {
+        "fileName": "纳税等级证明.pdf",
+        "fileinfoTypeName": "其他文件",
+        "fileDesc": "",
+    }
+    classified = aa.classify_uploaded_materials([material])
+    types = classified["details"][0][3]
+    assert "tax_credit" in types
+    assert "tax_cert" not in types
+
+    supplier = {"tax_credit_rating_ok": "tax_credit" in classified["materials"]}
+    applicable, _ = aa.determine_supplier_rules({"sup_type": "经销商"}, aa.load_rules())
+    rules = [rule for rule in applicable if rule["id"] == "A03"]
+    checklist, _, missing, _ = aa.build_checklist(supplier, rules, [material])
+    assert not missing
+    assert checklist[0]["status"] == "pending"
+    assert "材料已上传" in checklist[0]["detail"]
+
+
+@pytest.mark.parametrize("filename", ["AAA级信用等级证书.pdf", "企业信用等级证明.pdf"])
+def test_general_credit_rating_in_other_files_is_not_tax_credit(filename):
+    result = aa.classify_uploaded_materials([
+        {"fileName": filename, "fileinfoTypeName": "其他文件", "fileDesc": ""},
+    ])
+    assert "tax_credit" not in result["materials"]
 
 
 @pytest.mark.parametrize("filename,position,expected", [

@@ -247,6 +247,49 @@ def _grab(text, labels, pat):
     return None
 
 
+def _extract_business_license_legal_person(text):
+    """Extract the legal representative without adjacent column-label debris.
+
+    Two-column licences may be flattened as ``法定代表人张三 类 名 <credit-code>``:
+    ``类`` and ``名`` are the first characters of the vertical 类型/名称 labels.
+    They are not complete labels, so the generic field boundary cannot stop on
+    them. Cut only at this spaced cross-column marker or at a full credit code;
+    ordinary compound Chinese names remain unchanged.
+    """
+    value = _grab(text, ["法定代表人"], r"[^\n:：]{2,60}?")
+    if not value:
+        return None
+    boundaries = (
+        r"\s+(?:类\s+名|名\s+类)(?=\s|$)",
+        r"\s+(?:类\s*型|名\s*称)(?=\s|$)",
+        # Two-column OCR can order the right-hand vertical label as value first,
+        # yielding ``法定代表人 陈庆中 所东莞市...`` followed by a lone ``住``.
+        # Treat the orphan ``所`` as the residence-field boundary only when the
+        # following text contains an address marker; a name is never truncated
+        # merely because it contains this character.
+        r"\s+(?:住\s*)?所(?=[^\n]{0,40}(?:省|自治区|市|区|县|镇|街道|路|道|号|栋|村))",
+        r"(?<![0-9A-Za-z])[0-9A-Z]{15,18}(?![0-9A-Za-z])",
+    )
+    end = len(value)
+    for pattern in boundaries:
+        match = re.search(pattern, value, re.I)
+        if match:
+            end = min(end, match.start())
+    cleaned = value[:end].strip(" \t　。，,；;、")
+    # OCR may flatten a nearby column glyph into the name, for example
+    # ``法定代表人马卫东— 米``. Only remove this suffix for the tightly
+    # constrained shape "plausible Chinese name + long dash + 1-3 Han glyphs".
+    # This avoids fixed-length truncation and preserves ordinary hyphenated or
+    # longer names.
+    noise_suffix = re.fullmatch(
+        r"(?P<name>[\u4e00-\u9fff·]{2,12})\s*[—–－]\s*[\u4e00-\u9fff]{1,3}",
+        cleaned,
+    )
+    if noise_suffix:
+        cleaned = noise_suffix.group("name")
+    return cleaned or None
+
+
 _COMPANY_SUFFIX = ("有限责任公司", "股份有限公司", "有限公司", "集团公司", "公司")
 
 
@@ -414,7 +457,7 @@ def extract_business_license(text, supplier):
         code = m2.group(1) if m2 else None
     fields["统一社会信用代码"] = code.upper() if code else None
     fields["名称"] = _extract_business_license_name(t)
-    fields["法定代表人"] = _grab(t, ["法定代表人"], r"[^\n:：]{2,60}?")
+    fields["法定代表人"] = _extract_business_license_legal_person(t)
     # 单独保留住所，既便于报告核对，也确保同行排版
     # 「法定代表人 XXX 住 所 XXX」中的住所不会并入法人姓名。
     fields["住所"] = _grab(t, ["住所"], r"[^\n:：]{2,120}?")
@@ -1195,6 +1238,98 @@ def extract(doc_type, text, supplier=None, detail=None):
     return extract_generic_cert(text)
 
 
+_ISO_CONFIDENCE_THRESHOLD = 0.9
+_ISO_TYPE_MARKERS = {
+    "iso9001": "质量管理体系认证证书",
+    "iso14001": "环境管理体系认证证书",
+    "iso45001": "职业健康安全管理体系认证证书",
+}
+
+
+def _best_detail_confidence(detail, predicate):
+    """Return the strongest OCR confidence for matching evidence text."""
+    scores = []
+    for item in detail or []:
+        if not isinstance(item, dict):
+            continue
+        text = _norm(str(item.get("text", "")))
+        if not predicate(text):
+            continue
+        confidence = item.get("confidence")
+        if confidence is None:
+            continue
+        try:
+            scores.append(float(confidence))
+        except (TypeError, ValueError):
+            continue
+    if scores:
+        return max(scores)
+    return None
+
+
+def _detail_confidence_is_low(item):
+    """Treat absent or malformed confidence as insufficient, without crashing."""
+    try:
+        return float(item.get("confidence")) < _ISO_CONFIDENCE_THRESHOLD
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
+def _apply_ocr_confidence_review(doc_type, result, detail):
+    """Attach confidence review without letting decorative ISO text fail a page.
+
+    ISO decisions use the certificate type, holder and validity.  Confidence is
+    therefore evaluated on those evidence lines only; footer logos, signatures,
+    seals and supervision stickers are retained in OCR detail for diagnostics but
+    cannot by themselves force a manual review.
+    """
+    checks = result.setdefault("checks", {})
+    issues = result.setdefault("issues", [])
+    if not detail:
+        checks["OCR文字置信度充足"] = None
+        issues.append("OCR置信度明细缺失，转人工核验")
+        return
+
+    if doc_type not in _ISO_TYPE_MARKERS:
+        if any(_detail_confidence_is_low(item) for item in detail):
+            checks["OCR文字置信度充足"] = None
+            issues.append("存在低置信度或缺失置信度文字，转人工核验")
+        return
+
+    iso_code = doc_type[3:]
+    fields = result.get("fields") or {}
+    evidence = []
+    if checks.get("材料类型正确") is True:
+        marker = _norm(_ISO_TYPE_MARKERS[doc_type])
+        evidence.append(("证书类型", lambda text, code=iso_code, marker=marker:
+                         "ISO" + code in text.upper() or marker in text))
+    holder = _norm(fields.get("获证组织") or "")
+    if checks.get("持有人一致") is True and holder:
+        evidence.append(("获证组织", lambda text, holder=holder: holder in text))
+    expiry = fields.get("有效期至")
+    if checks.get("在有效期内") is True and expiry:
+        if expiry == "长期":
+            evidence.append(("有效期", lambda text:
+                             any(word in text for word in ("长期", "永久", "无固定期限"))))
+        else:
+            expiry_digits = re.sub(r"\D", "", str(expiry))
+            evidence.append(("有效期", lambda text, digits=expiry_digits:
+                             digits and digits in re.sub(r"\D", "", text)))
+
+    problems = []
+    for label, predicate in evidence:
+        confidence = _best_detail_confidence(detail, predicate)
+        if confidence is None:
+            problems.append(f"{label}缺少OCR置信度")
+        elif confidence < _ISO_CONFIDENCE_THRESHOLD:
+            problems.append(f"{label}文字置信度较低（{confidence:.2f}）")
+    if problems:
+        checks["OCR文字置信度充足"] = None
+        issues.append("ISO关键字段" + "、".join(problems) + "，转人工核验")
+    elif evidence:
+        checks["OCR文字置信度充足"] = True
+
+
 # ============================================================
 # 文件扫描/解析/结果组装
 # ============================================================
@@ -1504,9 +1639,7 @@ def run_parse(only_todo=None, *, offline=False):
             r = extract(doc_type, md, supplier, detail)
             r["ocr_engine"] = "paddleocr-local"
             r["ocr_model_identity"] = engine_identity
-            if not detail or any(float(item.get("confidence", 0)) < 0.9 for item in detail):
-                r.setdefault("checks", {})["OCR文字置信度充足"] = None
-                r.setdefault("issues", []).append("存在低置信度或缺失置信度文字，转人工核验")
+            _apply_ocr_confidence_review(doc_type, r, detail)
             r["file"] = fpath.name
             r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
             store_result(todo_id, doc_type, r)
