@@ -600,6 +600,11 @@ _SERVICE_HINTS = ("服务", "咨询", "运输", "工程", "维修")
 
 def _infer_supplier_type(supplier, tdesc):
     """根据经营范围与公司类型推断供应商实际类目（用于与系统 sup_type_name 交叉验证）"""
+    # 审批阶段已经结合系统标签、经营范围和组合标签优先级完成分类。
+    # 对明确判定的承运商直接沿用结果，避免“货运代理/进出口”里的“代理”
+    # 在报告展示层被二次解释为产品经销代理。
+    if "运输/承运商" in (tdesc or ""):
+        return "运输/承运商"
     busi = (supplier.get("busi_scope") or "") + " " + (tdesc or "")
     if not busi.strip():
         return ""

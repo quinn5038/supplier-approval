@@ -1311,9 +1311,17 @@ def _supplier_type_labels(supplier):
     return [s.strip() for s in re.split(r"[/／、,，;；|\s]+", _supplier_type(supplier)) if s.strip()]
 
 
+_CARRIER_ONLY_LABELS = {
+    "运输商", "承运商", "运输服务商", "道路运输商", "物流运输商",
+    # ICCEC 对货代/物流企业使用的明确运输类标签。此前遗漏“物流服务商”，
+    # 导致其经营范围中的“贸易代理/进出口”等附带业务反向触发经销商规则。
+    "物流服务商", "货运代理商", "国际货运代理商", "货代服务商",
+}
+
+
 def _pure_carrier(supplier):
     labels = _supplier_type_labels(supplier)
-    return bool(labels) and all(s in {"运输商", "承运商", "运输服务商", "道路运输商", "物流运输商"} for s in labels)
+    return bool(labels) and all(s in _CARRIER_ONLY_LABELS for s in labels)
 
 
 # 货运代理是运输组织业务，不是产品销售代理。先识别并剔除这些专属短语，

@@ -214,7 +214,10 @@ def _sanitize_detail(doc_type, detail):
 # ============================================================
 # 字段抽取（纯函数，可离线测试）
 # ============================================================
-_DATE = r"(\d{4})\s*[年.\-/]\s*(\d{1,2})\s*[月.\-/]\s*(\d{1,2})"
+# The final negative lookahead prevents an incomplete Chinese date such as
+# ``2024年12月 2027年...`` from stealing ``20`` from the following year and
+# becoming the fake date 2024-12-20 after OCR splits a seal-covered line.
+_DATE = r"(\d{4})\s*[年.\-/]\s*(\d{1,2})\s*[月.\-/]\s*(\d{1,2})(?!\d)"
 
 # 通用证书：检测"有效期至/失效日期/发证日期"等明显标签（无标签→不取最后日期兜底）
 # 拆成两段避免 Python 3.13 parser 对多行中文 raw string 拼接的边界 bug
@@ -409,9 +412,11 @@ def _valid_until(text):
     if re.search(r"长期|永久|无固定期限", _norm(text)):
         return None, True
 
-    # 1) "证书有效日期"——当前认证周期的权威字段。
+    # 1) "证书有效日期/有效期"——当前认证周期的权威字段。
     #    支持"起始 至 结束"（取结束日）与单日期两种形态。
-    m = re.search(r"有效日期\s*[:：]?\s*" + _DATE, text)
+    m = re.search(
+        r"(?<!上周期)(?<!上一周期)(?<!上期)(?<!原周期)(?<!上一年度)(?<!上一期)"
+        r"(?:证书)?有效(?:日期|期)\s*[:：]?\s*" + _DATE, text)
     if m:
         tail = text[m.end():m.end() + 30]
         # 中文日期"2025年03月19日"的"日"不在 _DATE 内，需在"至"前跳过可选"日"
