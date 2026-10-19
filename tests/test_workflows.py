@@ -235,6 +235,19 @@ def test_iso_registration_valid_date_allows_ocr_spacing(doc_type):
     assert not any("未识别到有效期" in issue for issue in result["issues"])
 
 
+@pytest.mark.parametrize("doc_type,title", [
+    ("iso9001", "质量管理体系认证证书"),
+    ("iso14001", "环境管理体系认证证书"),
+])
+def test_iso_seal_split_date_range_does_not_use_issue_or_fake_day(doc_type, title):
+    text = (f"{title}\n合成重工科技有限公司\n"
+            "发证日期：2024年12月31日 有效期：2024年12月 2027年12月30日\n31 日至")
+    result = tp.extract(doc_type, text, {"full_name": "合成重工科技有限公司"})
+
+    assert result["fields"]["有效期至"] == "2027-12-30"
+    assert result["checks"]["在有效期内"] is True
+
+
 @pytest.mark.parametrize(("doc_type", "title", "standard"), [
     ("iso9001", "质量管理体系认证证书", "GB/T19001-2016 idt ISO9001:2015"),
     ("iso14001", "环境管理体系认证证书", "GB/T24001-2016 idt ISO14001:2015"),
@@ -626,6 +639,25 @@ def test_common_freight_scope_phrases_are_classified_as_carrier(scope):
     assert {"E1", "E2"}.issubset(ids)
 
 
+@pytest.mark.parametrize("name,scope", [
+    ("广州港物流有限公司",
+     "国内集装箱货物运输代理；海上国际货物运输代理；国内贸易代理；食品销售；无船承运业务"),
+    ("上海邑航国际物流有限公司",
+     "海上、航空、公路国际货物运输代理；道路货物运输代理；从事货物及技术的进出口业务"),
+])
+def test_logistics_service_label_uses_carrier_rules_despite_incidental_trade(name, scope):
+    supplier = {"name": name, "sup_type": "物流服务商", "busi_scope": scope}
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+
+    assert aa._pure_carrier(supplier) is True
+    assert "运输/承运商" in type_desc
+    assert {"A01", "E1", "E2"}.issubset(ids)
+    assert "A07" not in ids
+    assert "D1_03" not in ids
+    assert gen_stage2_report._infer_supplier_type(supplier, type_desc) == "运输/承运商"
+
+
 @pytest.mark.parametrize("label,scope", [
     ("服务商", "招标代理；软件开发；技术服务"),
     ("代理商", "产品销售代理；货物进出口"),
@@ -641,7 +673,7 @@ def test_non_freight_agency_and_trade_are_not_classified_as_carrier(label, scope
 
 
 def test_carrier_scope_does_not_override_explicit_non_carrier_or_combined_label():
-    for label in ("经销商", "经销商/承运商", "服务商/代理商/承运商"):
+    for label in ("经销商", "经销商/承运商", "服务商/代理商/承运商", "物流服务商/经销商"):
         rules, type_desc = aa.determine_supplier_rules(
             {"sup_type": label, "busi_scope": "国际货运代理；无船承运"}, aa.load_rules())
         ids = {rule["id"] for rule in rules}

@@ -8,7 +8,12 @@ import pytest
 import local_ocr
 import textin_pipeline as tp
 from offline_desens.idcard_masker import OcrItem
-from offline_desens.material_ocr import deny_network, ordered_lines, parse_document
+from offline_desens.material_ocr import (
+    deny_network,
+    ordered_lines,
+    parse_document,
+    read_with_red_seal_retry,
+)
 
 
 def item(text, x, y, confidence=.99):
@@ -22,6 +27,31 @@ def test_reading_order_and_coordinates():
     assert all(row["page_id"] == 2 for row in detail)
     assert detail[0]["confidence"] == .99
     assert len(detail[0]["position"]) == 4
+
+
+def test_red_seal_retry_is_used_only_when_it_recovers_more_complete_dates():
+    image = np.full((120, 240, 3), 255, dtype=np.uint8)
+    image[30:90, 80:160] = (0, 0, 255)
+    original = [item("有效期：2024年12月", 0, 0),
+                item("发证日期：2024年12月31日", 0, 30)]
+    recovered = [item("有效期：2024年12月31日至2027年12月30日", 0, 0),
+                 item("发证日期：2024年12月31日", 0, 30)]
+    ocr = Mock()
+    ocr.read.side_effect = [original, recovered]
+
+    assert read_with_red_seal_retry(image, ocr) is recovered
+    assert ocr.read.call_count == 2
+
+
+def test_red_seal_retry_keeps_original_when_date_evidence_does_not_improve():
+    image = np.full((120, 240, 3), 255, dtype=np.uint8)
+    image[30:90, 80:160] = (0, 0, 255)
+    original = [item("有效期至：2027年12月30日", 0, 0)]
+    ocr = Mock()
+    ocr.read.side_effect = [original, list(original)]
+
+    assert read_with_red_seal_retry(image, ocr) is original
+    assert ocr.read.call_count == 2
 
 
 def test_pdf_page_boundaries(tmp_path):

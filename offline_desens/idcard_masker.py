@@ -606,22 +606,30 @@ def process_page(source: np.ndarray, ocr: CardOcr, layout: str, source_name: str
         output[mask > 0] = layer[mask > 0]
         results.append(result)
 
-    missing_front = any(card.side == "front" and not card.name for card in results)
-    missing_back = any(card.side == "back" and not card.valid_until for card in results)
+    # A seal may make contour detection return only one side.  The old condition
+    # checked only whether an already detected front/back card lacked its field;
+    # a completely absent side therefore never triggered page-scale recovery.
+    # Treat absence and an empty field alike, while keeping recovery fail-closed
+    # inside recover_page_fields (ID-side markers + validated horizontal value).
+    missing_front = not any(card.side == "front" and card.name for card in results)
+    missing_back = not any(card.side == "back" and card.valid_until for card in results)
     if missing_front or missing_back:
         page_name, page_validity = recover_page_fields(source, ocr)
-        for card in results:
-            field = None
-            if card.side == "front" and not card.name and page_name:
-                card.name = page_name.value
-                field = page_name
-            elif card.side == "back" and not card.valid_until and page_validity:
-                card.valid_until = page_validity.value
-                field = page_validity
-            if field:
-                x1, y1, x2, y2 = field.box
-                output[y1:y2, x1:x2] = source[y1:y2, x1:x2]
-                card.status = "已脱敏"
+        recoveries = (("front", "name", page_name),
+                      ("back", "valid_until", page_validity))
+        for side, attribute, field in recoveries:
+            if not field or any(card.side == side and getattr(card, attribute)
+                                for card in results):
+                continue
+            card = next((card for card in results if card.side == side), None)
+            if card is None:
+                card = CardResult(max((item.card_index for item in results), default=0) + 1,
+                                  side)
+                results.append(card)
+            setattr(card, attribute, field.value)
+            x1, y1, x2, y2 = field.box
+            output[y1:y2, x1:x2] = source[y1:y2, x1:x2]
+            card.status = "已脱敏"
     return output, PageResult(source_name, page, results)
 
 

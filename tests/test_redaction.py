@@ -233,6 +233,39 @@ def test_page_scale_recovers_fields_when_seal_breaks_card_crops(monkeypatch):
     assert masked[0:10, 0:10].max() == 0
 
 
+def test_page_scale_recovers_completely_missing_front_side(monkeypatch):
+    image = np.full((500, 900, 3), 255, dtype=np.uint8)
+    back_quad = np.array(
+        [[30, 40], [300, 40], [300, 210], [30, 210]], dtype=np.float32)
+    monkeypatch.setattr(masker, "find_cards", lambda source: [back_quad])
+    monkeypatch.setattr(masker, "find_blue_card_regions", lambda source: [])
+    monkeypatch.setattr(masker, "split_detected_long", lambda source, cards: cards)
+
+    def back_only_redaction(source, quad, ocr, card_index):
+        return (np.zeros_like(source), np.zeros(source.shape[:2], dtype=np.uint8),
+                masker.CardResult(card_index, "back",
+                                  valid_until="2090.01.01-2099.01.01",
+                                  status="已脱敏"))
+
+    monkeypatch.setattr(masker, "redact_card", back_only_redaction)
+
+    class PageOcr:
+        def read(self, source):
+            return [
+                _item("姓名测试姓名", (420, 300, 600, 335)),
+                _item("性别男民族汉", (420, 350, 620, 385)),
+                _item("公民身份号码", (420, 420, 620, 455)),
+            ]
+
+    masked, result = masker.process_page(image, PageOcr(), "auto", "synthetic", 1)
+
+    assert [card.side for card in result.cards] == ["back", "front"]
+    assert result.cards[1].name == "测试姓名"
+    assert result.cards[1].status == "已脱敏"
+    assert masked[300:335, 420:600].max() == 255
+    assert masked[350:385, 420:620].max() == 0
+
+
 def test_analyse_card_rejects_vertical_validity_box_from_wrong_rotation():
     horizontal = [
         _item("有效期限2025.07.01-长期", (400, 800, 1150, 880)),

@@ -1,6 +1,7 @@
 """Local document OCR worker; communicates through JSON files, never a cloud API."""
 import argparse
 import json
+import re
 import socket
 import sys
 from pathlib import Path
@@ -11,6 +12,39 @@ import pymupdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from offline_desens.idcard_masker import CardOcr
+
+_COMPLETE_DATE = re.compile(
+    r"(?:19|20)\d{2}\s*[年.\-/]\s*\d{1,2}\s*[月.\-/]\s*\d{1,2}(?!\d)")
+
+
+def _complete_date_count(items):
+    return sum(len(_COMPLETE_DATE.findall(str(item.text))) for item in items)
+
+
+def _has_red_seal(image):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    red = (((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170))
+           & (hsv[:, :, 1] >= 60) & (hsv[:, :, 2] >= 80))
+    return float(red.mean()) >= .001
+
+
+def read_with_red_seal_retry(image, ocr):
+    """Retry seal-covered validity rows through the red channel.
+
+    Red stamp pixels are bright in the red channel while black printed text stays
+    dark. Use the retry only when normal OCR saw an effective-date label and the
+    retry recovers more complete dates; otherwise preserve the original OCR.
+    """
+    original = ocr.read(image)
+    original_text = "".join(str(item.text).replace(" ", "") for item in original)
+    if (not _has_red_seal(image)
+            or not re.search(r"有效(?:期|日期)", original_text)):
+        return original
+    red_channel = cv2.cvtColor(image[:, :, 2], cv2.COLOR_GRAY2BGR)
+    retried = ocr.read(red_channel)
+    if _complete_date_count(retried) > _complete_date_count(original):
+        return retried
+    return original
 
 
 def deny_network(*args, **kwargs):
@@ -53,7 +87,8 @@ def parse_document(path, ocr, dpi=200):
                 # Rasterize even text PDFs: use one consistent coordinate system.
                 pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
                 rgb = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
-                text, detail = ordered_lines(ocr.read(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)), number)
+                image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                text, detail = ordered_lines(read_with_red_seal_retry(image, ocr), number)
                 if not detail:
                     raise ValueError(f"第{number}页未识别到文字，转人工")
                 pages.append(text)
@@ -62,7 +97,7 @@ def parse_document(path, ocr, dpi=200):
         image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("无法读取材料图片")
-        text, details = ordered_lines(ocr.read(image), 1)
+        text, details = ordered_lines(read_with_red_seal_retry(image, ocr), 1)
         pages.append(text)
     else:
         raise ValueError("第一阶段仅支持 PDF、PNG、JPEG、BMP；其他格式转人工")

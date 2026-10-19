@@ -15,7 +15,8 @@ SUPPORTED_TYPES = frozenset({"business_license", "tax_credit", "tax_cert", "iso9
 def cache_identity():
     import desensitize
     model_dir = Path(desensitize._PADDLE_MODEL_DIR)
-    parts = ["paddleocr-2.9.1/material-v1/dpi200"]
+    # Bump whenever preprocessing/reading changes so stale OCR cache is rebuilt.
+    parts = ["paddleocr-2.9.1/material-v2-red-seal-retry/dpi200"]
     for part in ("det", "rec", "cls"):
         for name in ("inference.pdmodel", "inference.pdiparams"):
             path = model_dir / part / name
