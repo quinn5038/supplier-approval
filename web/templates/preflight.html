@@ -3,13 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>启动检查 - 招采平台供应商智能辅助审批</title>
+    <title>[{{ '在线版' if ocr_mode == 'online' else '离线版' }}] 启动检查 - 招采平台供应商智能辅助审批</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="ocr-mode-{{ ocr_mode }}">
+    <div class="ocr-edition-badge" aria-label="当前版本：{{ ocr_mode_label }}">
+        <strong>{{ '在线 OCR 版' if ocr_mode == 'online' else '离线 OCR 版' }}</strong>
+        <span>{{ 'TextIn 识别' if ocr_mode == 'online' else '本地识别' }}</span>
+    </div>
     <header class="topbar">
         <div>
-            <h1>招采平台供应商智能辅助审批</h1>
+            <h1>招采平台供应商智能辅助审批 <span class="ocr-title-mark">{{ '在线版' if ocr_mode == 'online' else '离线版' }}</span></h1>
             <div class="meta">运行环境检查</div>
         </div>
         <div class="actions"><a href="/" class="btn btn-outline page-back">返回待办列表</a></div>

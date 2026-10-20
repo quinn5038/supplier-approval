@@ -15,8 +15,10 @@ import re
 import sys
 from pathlib import Path
 
+from ocr_runtime import get_ocr_mode, readable_result_path
+
 BASE = Path(__file__).parent
-OUT_DIR = BASE / "output"
+OUT_DIR = BASE / "output" / get_ocr_mode(BASE)
 
 
 def _load(path):
@@ -278,7 +280,7 @@ def build_opinion(tid, s2, textin, cache):
                 failed_iso.append(iso_name)
         if failed_iso:
             supplement_items.append(
-                "、".join(failed_iso) + " 体系认证证书（须为该公司认证且在有效期内）")
+                "、".join(failed_iso) + " 体系认证证书（须为你公司认证且在有效期内）")
         for cid, cname, desc in supplement_fails:
             if cid in iso_fail_map:
                 continue
@@ -348,8 +350,10 @@ def build_opinion(tid, s2, textin, cache):
 
 
 def main():
-    stage2 = _load("stage2_results.json")
-    textin = _load("textin_results.json")
+    stage2_path = readable_result_path(BASE, "stage2_results.json")
+    textin_path = readable_result_path(BASE, "textin_results.json")
+    stage2 = json.loads(stage2_path.read_text(encoding="utf-8")) if stage2_path.exists() else {}
+    textin = json.loads(textin_path.read_text(encoding="utf-8")) if textin_path.exists() else {}
     cache = _load("cache_v4.json")
 
     args = [a for a in sys.argv[1:] if a != "--all"]

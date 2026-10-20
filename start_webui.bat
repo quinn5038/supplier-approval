@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
-title ICCEC Supplier Approval WebUI
+title ICCEC Supplier Approval WebUI - DUAL OCR
 echo ============================================
-echo   ICCEC Supplier Approval WebUI
+echo   ICCEC Supplier Approval WebUI - ONLINE / OFFLINE OCR
 echo ============================================
 echo.
-echo Starting webui on port 8000 ...
+echo Starting unified WebUI on port 8000 ...
 echo.
 echo After this window shows "Application startup complete",
 echo open http://127.0.0.1:8000 in your browser.

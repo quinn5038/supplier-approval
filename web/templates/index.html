@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>招采平台供应商智能辅助审批</title>
+    <title>[{{ '在线版' if ocr_mode == 'online' else '离线版' }}] 招采平台供应商智能辅助审批</title>
     <link rel="stylesheet" href="/static/style.css">
 <script>
 const originalFetch = window.fetch.bind(window);
@@ -17,13 +17,23 @@ window.fetch = (url, options = {}) => {
 };
 </script>
 </head>
-<body>
+<body class="ocr-mode-{{ ocr_mode }}">
+    <div class="ocr-edition-badge" aria-label="当前版本：{{ ocr_mode_label }}">
+        <strong>{{ '在线 OCR 版' if ocr_mode == 'online' else '离线 OCR 版' }}</strong>
+        <span>{{ 'TextIn 识别' if ocr_mode == 'online' else '本地识别' }}</span>
+    </div>
     <div class="topbar">
         <div>
-            <h1>招采平台供应商智能辅助审批</h1>
+            <h1>招采平台供应商智能辅助审批 <span class="ocr-title-mark">{{ '在线版' if ocr_mode == 'online' else '离线版' }}</span></h1>
             <div class="meta" id="meta">加载中...</div>
         </div>
         <div class="actions">
+            <div class="ocr-mode-switch" role="group" aria-label="OCR 后端切换">
+                <button type="button" class="mode-button {{ 'active' if ocr_mode == 'online' else '' }}"
+                        onclick="switchOcrMode('online')" {{ 'disabled' if ocr_mode == 'online' else '' }}>在线 OCR</button>
+                <button type="button" class="mode-button {{ 'active' if ocr_mode == 'offline' else '' }}"
+                        onclick="switchOcrMode('offline')" {{ 'disabled' if ocr_mode == 'offline' else '' }}>离线 OCR</button>
+            </div>
             <a href="/preflight" class="btn btn-outline">启动检查</a>
             <button class="btn btn-outline" onclick="openCacheCleanup()">清理供应商缓存</button>
             <button class="btn btn-outline" onclick="openCookieModal()">更新平台凭证</button>
@@ -162,6 +172,23 @@ window.fetch = (url, options = {}) => {
         const errorById = {};        // todoId → 失败原因（点失败按钮时展示）
         const taskById = {};         // 任务状态独立于搜索结果和 DOM 保存
         let expiredCacheItems = [];  // 超过 14 天、可逐家清理的缓存
+        const activeOcrMode = '{{ ocr_mode }}';
+
+        async function switchOcrMode(mode) {
+            if (mode === activeOcrMode) return;
+            const label = mode === 'online' ? '在线 OCR（TextIn）' : '离线 OCR（PaddleOCR）';
+            if (!confirm(`切换到${label}？\n\n两种模式的 OCR 结果与审查报告独立保存。`)) return;
+            const body = new FormData();
+            body.set('mode', mode);
+            try {
+                const response = await fetch('/api/ocr-mode', {method: 'POST', body});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.msg || '切换失败');
+                location.reload();
+            } catch (error) {
+                showErrorAlert(error.message);
+            }
+        }
 
         // ===== 使用说明卡折叠 =====
         function toggleGuide() {

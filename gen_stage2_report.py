@@ -12,10 +12,12 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from ocr_runtime import get_ocr_mode, readable_result_path
+
 # 复用 gen_opinion 的意见生成逻辑（9/3：意见表与审查报告整合成一个 HTML）
 
 BASE = Path(__file__).parent
-OUT_DIR = BASE / "output"
+OUT_DIR = BASE / "output" / get_ocr_mode(BASE)
 
 STATUS_MARK = {
     "pass":   ("✓", "#e6f4ea", "#1e7e34"),   # 绿
@@ -619,9 +621,10 @@ def _infer_supplier_type(supplier, tdesc):
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    stage2 = json.loads((BASE/"stage2_results.json").read_text(encoding="utf-8"))
+    stage2_path = readable_result_path(BASE, "stage2_results.json")
+    stage2 = json.loads(stage2_path.read_text(encoding="utf-8"))
     textin = {}
-    tp = BASE/"textin_results.json"
+    tp = readable_result_path(BASE, "textin_results.json")
     if tp.exists():
         textin = json.loads(tp.read_text(encoding="utf-8"))
     cache = {}

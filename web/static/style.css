@@ -18,6 +18,9 @@
     --color-done: #009876;
     --color-done-hover: #007a5e;
     --color-done-bg: #e0f5f0;
+    --color-offline: #6d28d9;
+    --color-offline-dark: #4c1d95;
+    --color-offline-light: #ede9fe;
     --radius: 8px;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
@@ -30,6 +33,78 @@ body {
     color: var(--color-text);
     font-size: 14px;
     line-height: 1.6;
+}
+
+/* ===== 双 OCR 模式标识：所有页面和加载状态下均可见 ===== */
+.ocr-edition-badge {
+    position: fixed;
+    z-index: 1200;
+    right: 18px;
+    bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    color: #fff;
+    background: var(--color-primary);
+    border: 1px solid rgba(255,255,255,.35);
+    border-radius: 999px;
+    box-shadow: 0 6px 18px rgba(76,29,149,.25);
+    pointer-events: none;
+}
+.ocr-mode-offline .ocr-edition-badge { background: var(--color-offline); }
+.ocr-edition-badge strong { font-size: 13px; letter-spacing: .04em; }
+.ocr-edition-badge span {
+    padding-left: 8px;
+    border-left: 1px solid rgba(255,255,255,.45);
+    font-size: 11px;
+    opacity: .9;
+}
+.ocr-title-mark {
+    display: inline-flex;
+    vertical-align: 2px;
+    margin-left: 6px;
+    padding: 2px 7px;
+    color: var(--color-primary-dark);
+    background: var(--color-primary-light);
+    border: 1px solid #b8d4ef;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+.ocr-mode-offline .ocr-title-mark {
+    color: var(--color-offline-dark);
+    background: var(--color-offline-light);
+    border-color: #c4b5fd;
+}
+.ocr-mode-switch {
+    display: inline-flex;
+    padding: 3px;
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    background: #f3f4f6;
+}
+.mode-button {
+    border: 0;
+    border-radius: 7px;
+    padding: 6px 10px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+}
+.mode-button.active {
+    color: #fff;
+    background: var(--color-primary);
+    box-shadow: var(--shadow);
+    cursor: default;
+}
+.ocr-mode-offline .mode-button.active { background: var(--color-offline); }
+.mode-button:disabled { opacity: 1; }
+@media (max-width: 640px) {
+    .ocr-edition-badge { right: 10px; bottom: 10px; }
 }
 
 /* ===== 顶部导航 ===== */

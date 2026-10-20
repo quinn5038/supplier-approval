@@ -40,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 from eval import safe_eval_rule
+from ocr_runtime import mode_result_path, readable_result_path
 
 # ============================================================
 # 自动加载 .env 文件（不需要安装额外依赖）
@@ -106,7 +107,7 @@ RULES_FILE = BASE_DIR / "rules.yaml"
 PROGRESS_FILE = BASE_DIR / "progress_v4.jsonl"   # 断点续跑进度（每处理完一条追加）
 CACHE_FILE = BASE_DIR / "cache_v4.json"          # 供应商原始数据缓存（fetch时写入，stage2离线用）
 QCC_FILE = BASE_DIR / "qcc_results.json"         # 企查查核验结果（agent调用MCP后写入）
-STAGE2_FILE = BASE_DIR / "stage2_results.json"   # 阶段2输出（合并企查查后的清单+意见）
+STAGE2_FILE = mode_result_path(BASE_DIR, "stage2_results.json")
 
 # 企查查核验模式：仅拉数据入缓存，不做决策（供阶段2离线重跑）
 FETCH_ONLY = os.getenv("FETCH_ONLY", "").lower() == "true"
@@ -1139,7 +1140,7 @@ MATERIAL_REQUIREMENTS = {
     "A01 法律主体资格": "营业执照副本（须持有统一社会信用代码，且执照信息与基本信息栏的供应商名称、注册资本、法人一致）",
     "A02 法人身份证明": "法人身份证正反面（或护照首页，须在有效期内）",
     "A03 纳税信用等级": "国家税务总局网站或信用中国下载的纳税信用等级证明（须为C级及以上）",
-    "A07 售后服务": "正规机构出具的售后服务五星认证或厂家出具的售后服务证明函",
+    "A07 售后服务": "正规机构出具的售后服务五星认证或售后服务证明函",
     "A08 资金财务状况": "上年度经审计的财务报表（2026年须提交2025年财报）",
     "C1_02 ISO 9001": "ISO 9001质量管理体系认证证书（须为该公司认证且在有效期内）",
     "C1_03 ISO 14001": "ISO 14001环境管理体系认证证书（须为该公司认证且在有效期内）",
@@ -2264,7 +2265,7 @@ def run_stage2():
         except Exception as e:
             log.warning(f"企查查结果文件损坏，按无结果处理: {e}")
     textin = {}
-    textin_path = BASE_DIR / "textin_results.json"
+    textin_path = readable_result_path(BASE_DIR, "textin_results.json")
     if textin_path.exists():
         try:
             textin = json.loads(textin_path.read_text(encoding="utf-8"))

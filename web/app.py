@@ -28,6 +28,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ocr_runtime import (
+    MODE_LABELS,
+    get_ocr_mode,
+    readable_result_path,
+    set_ocr_mode,
+)
 from state_store import delete_state, get_state, put_state, record_event
 from storage_cleanup import (
     CacheCleanupError,
@@ -45,6 +51,9 @@ from web.credential_store import (
 from web.security import install_security
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Pin the persisted UI choice before auto_approve loads .env, so a template
+# default cannot silently override a button selection later in the process.
+os.environ["OCR_MODE"] = get_ocr_mode(BASE_DIR)
 log = logging.getLogger("webui")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
@@ -115,6 +124,8 @@ def _env_file_path():
 
 def _run_pipeline_for_one(todo_id: str):
     """在后台线程中跑完整审批流水线（单家供应商）"""
+    mode = get_ocr_mode(BASE_DIR)
+
     def _update(step, status="running", error=None, progress=None):
         with _task_lock:
             prev = _task_status.get(todo_id, {})
@@ -125,6 +136,7 @@ def _run_pipeline_for_one(todo_id: str):
                 "status": status,
                 "error": error,
                 "progress": new_progress,
+                "ocr_mode": mode,
                 "started_at": prev.get("started_at", datetime.now().isoformat()),
                 "updated_at": datetime.now().isoformat(),
             }
@@ -143,6 +155,7 @@ def _run_pipeline_for_one(todo_id: str):
         env["ENABLE_LIVE_APPROVAL"] = "false"
         env["FETCH_IDS"] = str(todo_id)
         env["PYTHONIOENCODING"] = "utf-8"
+        env["OCR_MODE"] = mode
         runtime_probe = subprocess.run(
             [PYTHON_EXE, "-I", "-c", "import encodings"],
             cwd=str(BASE_DIR), env=env,
@@ -152,7 +165,7 @@ def _run_pipeline_for_one(todo_id: str):
             _update(
                 "python_runtime_invalid",
                 status="error",
-                error=("在线版 Python 环境已损坏或项目移动后失效。请关闭当前 WebUI，"
+                error=("当前 Python 环境已损坏或项目移动后失效。请关闭当前 WebUI，"
                        "重新运行 start_webui.bat；启动脚本会自动修复环境。"),
             )
             return
@@ -189,7 +202,9 @@ def _run_pipeline_for_one(todo_id: str):
                     error=f"材料下载失败（{type(exc).__name__}），请检查平台连接后重新审批；本次未生成新报告。")
             return
 
-        _update("正在 OCR 识别证件文件（TextIn）...", progress=70)
+        ocr_step = ("正在调用 TextIn 在线 OCR 识别证明材料..." if mode == "online"
+                    else "正在使用本地 PaddleOCR 识别证明材料...")
+        _update(ocr_step, progress=70)
         # 9/6 修复：必须传 parse <todo_id> 单家过滤——不带参数会 OCR 全部
         # files_cache_desens/ 下 33 家文件，跑 10+ 分钟，子进程超时报错，
         # 前端永久卡在处理中（"进度条不动"根因）
@@ -214,7 +229,7 @@ def _run_pipeline_for_one(todo_id: str):
 
         _update("正在生成审查报告和审批意见...", status="running", progress=95)
         # 验证结果是否存在
-        stage2_path = BASE_DIR / "stage2_results.json"
+        stage2_path = readable_result_path(BASE_DIR, "stage2_results.json", mode)
         if not stage2_path.exists():
             _update("no_result", status="error", error="stage2 结果文件不存在，可能该供应商被分流跳过")
             return
@@ -250,9 +265,11 @@ def _has_valid_result(todo_id: str) -> bool:
     报告页综合核验表处写出「不适用」及具体原因，与业务需求一致。
     """
     with _task_lock:
-        if _task_status.get(str(todo_id), {}).get("status") in ("running", "error"):
+        task = _task_status.get(str(todo_id), {})
+        if (task.get("ocr_mode") in (None, get_ocr_mode(BASE_DIR))
+                and task.get("status") in ("running", "error")):
             return False
-    stage2_path = BASE_DIR / "stage2_results.json"
+    stage2_path = readable_result_path(BASE_DIR, "stage2_results.json")
     if not stage2_path.exists():
         return False
     try:
@@ -267,8 +284,8 @@ def _load_stage2_for_todo(todo_id: str):
     if os.getenv("DEMO_MODE", "false").lower() == "true":
         from demo import cases
         return cases().get(str(todo_id), {}), {}, {}
-    stage2_path = BASE_DIR / "stage2_results.json"
-    textin_path = BASE_DIR / "textin_results.json"
+    stage2_path = readable_result_path(BASE_DIR, "stage2_results.json")
+    textin_path = readable_result_path(BASE_DIR, "textin_results.json")
     cache_path = BASE_DIR / "cache_v4.json"
 
     stage2 = {}
@@ -291,7 +308,10 @@ def _load_stage2_for_todo(todo_id: str):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """首页：待办列表"""
-    return templates.TemplateResponse(request, "index.html")
+    mode = get_ocr_mode(BASE_DIR)
+    return templates.TemplateResponse(request, "index.html", {
+        "ocr_mode": mode, "ocr_mode_label": MODE_LABELS[mode],
+    })
 
 
 @app.get("/api/todos")
@@ -368,7 +388,9 @@ async def approve(request: Request, todo_id: str):
         except Exception:
             pass
     return templates.TemplateResponse(request, "detail.html",
-                                      {"todo_id": todo_id, "supplier_name": name})
+                                      {"todo_id": todo_id, "supplier_name": name,
+                                       "ocr_mode": get_ocr_mode(BASE_DIR),
+                                       "ocr_mode_label": MODE_LABELS[get_ocr_mode(BASE_DIR)]})
 
 
 @app.post("/api/approve/{todo_id}")
@@ -385,6 +407,7 @@ async def api_start_approve(todo_id: str):
         _task_status[todo_id] = {
             "status": "running", "step": "已进入处理队列，等待前序任务完成...",
             "error": None, "progress": 0, "started_at": now, "updated_at": now,
+            "ocr_mode": get_ocr_mode(BASE_DIR),
         }
 
     put_state(STATE_DB, "tasks", todo_id, _task_status[todo_id])
@@ -403,6 +426,8 @@ async def api_status(todo_id: str):
             return {"status": "done", "step": "离线合成演示完成", "progress": 100}
     with _task_lock:
         st = _task_status.get(todo_id, {"status": "idle", "step": "未开始"})
+        if st.get("ocr_mode") not in (None, get_ocr_mode(BASE_DIR)):
+            st = {"status": "idle", "step": "当前 OCR 模式尚未审批"}
     return st
 
 
@@ -410,11 +435,42 @@ async def api_status(todo_id: str):
 async def api_status_all():
     """批量查询所有审批任务状态（首页恢复各行按钮状态用，只返回轻量字段）"""
     with _task_lock:
+        mode = get_ocr_mode(BASE_DIR)
         return {tid: {"status": st.get("status"),
                       "step": st.get("step"),
                       "error": st.get("error"),
                       "progress": st.get("progress", 0)}
-                for tid, st in _task_status.items()}
+                for tid, st in _task_status.items()
+                if st.get("ocr_mode") in (None, mode)}
+
+
+@app.get("/api/ocr-mode")
+async def api_get_ocr_mode():
+    mode = get_ocr_mode(BASE_DIR)
+    return {"mode": mode, "label": MODE_LABELS[mode]}
+
+
+@app.post("/api/ocr-mode")
+async def api_set_ocr_mode(mode: str = Form(...)):
+    """Switch backend only while the single approval worker is idle."""
+    with _task_lock:
+        if any(task.get("status") == "running" for task in _task_status.values()):
+            return JSONResponse({
+                "error": "pipeline_running",
+                "msg": "当前有审批任务正在运行，请等待完成后再切换 OCR 模式。",
+            }, 409)
+        try:
+            selected = set_ocr_mode(BASE_DIR, mode)
+        except ValueError as exc:
+            return JSONResponse({"error": "invalid_mode", "msg": str(exc)}, 400)
+        os.environ["OCR_MODE"] = selected
+        try:
+            record_event(BASE_DIR / "audit.sqlite3", "ocr_mode_changed", {
+                "mode": selected,
+            })
+        except Exception as exc:
+            log.warning("OCR 模式已切换，但审计记录写入失败: %s", type(exc).__name__)
+    return {"ok": True, "mode": selected, "label": MODE_LABELS[selected]}
 
 
 @app.get("/api/cache-cleanup")
@@ -461,7 +517,9 @@ async def api_clean_supplier_cache(todo_id: str):
 async def api_report(todo_id: str):
     """返回审查报告 HTML 片段 + 审批意见纯文本"""
     with _task_lock:
-        if _task_status.get(todo_id, {}).get("status") in ("running", "error"):
+        task = _task_status.get(todo_id, {})
+        if (task.get("ocr_mode") in (None, get_ocr_mode(BASE_DIR))
+                and task.get("status") in ("running", "error")):
             return JSONResponse({"error": "stale_result", "msg": "本次处理尚未成功，历史报告不可作为当前审批依据。"}, 409)
     s2, textin, cache = _load_stage2_for_todo(todo_id)
     if not s2:
@@ -502,7 +560,7 @@ async def api_desens_image(todo_id: str):
 
     # 9/10 修复：优先用 textin_results 里 legal_person_id 的 file 字段精确匹配，
     # 避免身份证文件名不含「身份证/证件」关键词（如「柯力发(2)(1).pdf」）时查不到。
-    textin_path = BASE_DIR / "textin_results.json"
+    textin_path = readable_result_path(BASE_DIR, "textin_results.json")
     if textin_path.exists():
         try:
             textin = json.loads(textin_path.read_text(encoding="utf-8"))
@@ -576,7 +634,8 @@ def api_clear_credentials():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "time": datetime.now().isoformat()}
+    mode = get_ocr_mode(BASE_DIR)
+    return {"status": "ok", "time": datetime.now().isoformat(), "ocrMode": mode}
 
 
 @app.get("/preflight", response_class=HTMLResponse)
@@ -584,7 +643,9 @@ def preflight(request: Request):
     from preflight import checks, describe_checks
     rows = describe_checks(checks(BASE_DIR))
     core = [row for row in rows if row["kind"] == "core"]
+    mode = get_ocr_mode(BASE_DIR)
     return templates.TemplateResponse(request, "preflight.html", {"rows": rows,
+                                      "ocr_mode": mode, "ocr_mode_label": MODE_LABELS[mode],
                                       "ready_count": sum(row["ready"] for row in core),
                                       "total_count": len(core)})
 

@@ -1,0 +1,149 @@
+{
+  "method": "deterministic stratified sample; historical TextIn cache is a comparator, not ground truth",
+  "sample_documents": 16,
+  "sample_by_type": {
+    "after_sales_cert": 2,
+    "business_license": 2,
+    "iso14001": 2,
+    "iso45001": 2,
+    "iso9001": 2,
+    "production_license": 2,
+    "tax_cert": 2,
+    "tax_credit": 2
+  },
+  "local_speed": {
+    "seconds": 45.017,
+    "seconds_per_document": 2.814
+  },
+  "comparison_totals": {
+    "documents": 16,
+    "comparable_fields": 44,
+    "matching_fields": 35,
+    "comparable_checks": 37,
+    "matching_checks": 34,
+    "same_pass_decision": 10,
+    "local_auto_pass": 1,
+    "legacy_auto_pass": 7,
+    "low_confidence_documents": 15
+  },
+  "comparison_by_type": {
+    "after_sales_cert": {
+      "documents": 2,
+      "comparable_fields": 3,
+      "matching_fields": 3,
+      "comparable_checks": 4,
+      "matching_checks": 3,
+      "same_pass_decision": 0,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 2,
+      "low_confidence_documents": 2
+    },
+    "business_license": {
+      "documents": 2,
+      "comparable_fields": 9,
+      "matching_fields": 4,
+      "comparable_checks": 7,
+      "matching_checks": 7,
+      "same_pass_decision": 2,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 0,
+      "low_confidence_documents": 2
+    },
+    "iso14001": {
+      "documents": 2,
+      "comparable_fields": 7,
+      "matching_fields": 7,
+      "comparable_checks": 5,
+      "matching_checks": 4,
+      "same_pass_decision": 1,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 1,
+      "low_confidence_documents": 2
+    },
+    "iso45001": {
+      "documents": 2,
+      "comparable_fields": 7,
+      "matching_fields": 6,
+      "comparable_checks": 5,
+      "matching_checks": 5,
+      "same_pass_decision": 1,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 1,
+      "low_confidence_documents": 2
+    },
+    "iso9001": {
+      "documents": 2,
+      "comparable_fields": 7,
+      "matching_fields": 6,
+      "comparable_checks": 5,
+      "matching_checks": 4,
+      "same_pass_decision": 1,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 1,
+      "low_confidence_documents": 2
+    },
+    "production_license": {
+      "documents": 2,
+      "comparable_fields": 4,
+      "matching_fields": 3,
+      "comparable_checks": 6,
+      "matching_checks": 6,
+      "same_pass_decision": 1,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 1,
+      "low_confidence_documents": 2
+    },
+    "tax_cert": {
+      "documents": 2,
+      "comparable_fields": 2,
+      "matching_fields": 2,
+      "comparable_checks": 2,
+      "matching_checks": 2,
+      "same_pass_decision": 2,
+      "local_auto_pass": 0,
+      "legacy_auto_pass": 0,
+      "low_confidence_documents": 2
+    },
+    "tax_credit": {
+      "documents": 2,
+      "comparable_fields": 5,
+      "matching_fields": 4,
+      "comparable_checks": 3,
+      "matching_checks": 3,
+      "same_pass_decision": 2,
+      "local_auto_pass": 1,
+      "legacy_auto_pass": 1,
+      "low_confidence_documents": 1
+    }
+  },
+  "confidence_distribution": {
+    "document_minimum_median": 0.7205,
+    "documents_below_0_70": 7,
+    "documents_below_0_80": 12,
+    "documents_below_0_90": 15
+  },
+  "difference_categories": {
+    "field_mismatches": {
+      "business_license:法定代表人": 1,
+      "business_license:经营范围": 2,
+      "business_license:经营范围差异": 1,
+      "business_license:经营范围相似度": 1,
+      "iso45001:证书编号": 1,
+      "iso9001:证书编号": 1,
+      "production_license:有效期至": 1,
+      "tax_credit:来源标记": 1
+    },
+    "check_mismatches": {
+      "after_sales_cert:落款时间在3个月内": 1,
+      "iso14001:材料类型正确": 1,
+      "iso9001:材料类型正确": 1
+    }
+  },
+  "main_live_speed": {
+    "documents": 16,
+    "failures": 0,
+    "seconds": 24.492,
+    "seconds_per_document": 1.531,
+    "note": "same deterministic sample; network/API latency; consumes TextIn quota"
+  }
+}

@@ -71,6 +71,7 @@ def test_explicit_inspection_evidence_is_not_removed_from_combined_attachment():
 
 @pytest.fixture
 def pipeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCR_MODE", "offline")
     monkeypatch.setattr(tp, "BASE", tmp_path)
     monkeypatch.setattr(tp, "FILES_DIR", tmp_path / "files_cache")
     monkeypatch.setattr(tp, "FILES_DESENS_DIR", tmp_path / "files_cache_desens")
@@ -93,12 +94,41 @@ def test_pipeline_never_sends_sensitive(pipeline, monkeypatch):
     pipeline([("财报.pdf", ["financial_report"]), ("id.pdf", ["legal_person_id"]),
               ("财务与纳税.pdf", ["tax_credit"]), ("unknown.pdf", ["unknown"])])
     send = Mock(side_effect=AssertionError("must not send"))
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     tp.run_parse("1")
     send.assert_not_called()
     result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]
     assert all(r.get("issues") for r in result.values())
     assert not list(tp.FILES_DESENS_DIR.rglob("*.pdf"))
+
+
+def test_online_mode_uses_textin_for_allowlisted_public_material(pipeline, monkeypatch):
+    pipeline([("license.pdf", ["business_license"])])
+    monkeypatch.setenv("OCR_MODE", "online")
+    online = Mock(return_value=("营业执照\n名称 测试有限公司", []))
+    local = Mock(side_effect=AssertionError("online mode must not invoke material PaddleOCR"))
+    monkeypatch.setattr(tp, "parse_file_textin", online)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", local)
+
+    tp.run_parse("1")
+
+    online.assert_called_once()
+    local.assert_not_called()
+    result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["business_license"]
+    assert result["ocr_engine"] == "textin-xparse"
+
+
+def test_online_mode_still_blocks_sensitive_material(pipeline, monkeypatch):
+    pipeline([("financial.pdf", ["financial_report"]),
+              ("identity.pdf", ["legal_person_id"])])
+    monkeypatch.setenv("OCR_MODE", "online")
+    online = Mock(side_effect=AssertionError("sensitive material must not leave the device"))
+    monkeypatch.setattr(tp, "parse_file_textin", online)
+
+    tp.run_parse("1")
+
+    online.assert_not_called()
 
 
 def test_transport_gate_precedes_request(pipeline, monkeypatch):
@@ -119,7 +149,8 @@ def test_desens_failure_stops_network(pipeline, monkeypatch):
     pipeline([("license.pdf", ["business_license"])])
     monkeypatch.setattr(ds, "desensitize_dir", Mock(side_effect=OSError("failure")))
     send = Mock()
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     with pytest.raises(RuntimeError, match="脱敏失败"):
         tp.run_parse("1")
     send.assert_not_called()
@@ -129,7 +160,8 @@ def test_after_sales_material_reaches_ocr_and_uses_statement_rule(pipeline, monk
     pipeline([("售后服务证明函.pdf", ["after_sales_cert"])])
     recent = (date.today() - timedelta(days=20)).strftime("%Y年%m月%d日")
     send = Mock(return_value=(f"售后服务证明函\n提供售后服务保障\n日期：{recent}", []))
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     tp.run_parse("1")
     send.assert_called_once()
     result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["after_sales_cert"]
@@ -140,7 +172,8 @@ def test_after_sales_material_reaches_ocr_and_uses_statement_rule(pipeline, monk
 def test_multiple_materials_and_hash_refresh(pipeline, monkeypatch):
     pipeline([("one.pdf", ["iso9001"]), ("two.pdf", ["iso9001"])])
     send = Mock(side_effect=[("first", []), ("second", []), ("changed", [])])
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     monkeypatch.setattr(tp, "extract", lambda kind, text, *args: {"checks": {"valid": text != "first"}, "fields": {}, "issues": []})
     tp.run_parse("1")
     result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["iso9001"]
@@ -156,7 +189,8 @@ def test_multiple_materials_and_hash_refresh(pipeline, monkeypatch):
 def test_offline_extract_never_calls_api(pipeline, monkeypatch):
     pipeline([("one.pdf", ["iso9001"])])
     send = Mock()
-    monkeypatch.setattr(tp, "parse_file_textin", send)
+    monkeypatch.setattr(tp.local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): dict(zip(("markdown", "detail"), send(path))) for path in paths})
     tp.run_parse("1", offline=True)
     send.assert_not_called()
 
@@ -262,11 +296,11 @@ def test_login_csrf_roles_timeout(client):
     assert login(client).status_code == 303
     assert client.get("/").status_code == 200
     assert client.post("/api/approve/1").status_code == 403
-    assert client.post("/api/cookie", data={"cookie": "secret"}, headers={"origin": "http://localhost", "x-csrf-token": client.cookies.get("supplier_csrf")}).status_code == 400
-    security._sessions[client.cookies.get("supplier_session")]["expires"] = time.monotonic() - 1
+    assert client.post("/api/cookie", data={"cookie": "secret"}, headers={"origin": "http://localhost", "x-csrf-token": client.cookies.get(security.CSRF_COOKIE)}).status_code == 400
+    security._sessions[client.cookies.get(security.SESSION_COOKIE)]["expires"] = time.monotonic() - 1
     assert client.get("/api/status/1").status_code == 401
     assert login(client, "viewer", "view-password").status_code == 303
-    assert client.post("/api/approve/1", headers={"origin": "http://localhost", "x-csrf-token": client.cookies.get("supplier_csrf")}).status_code == 403
+    assert client.post("/api/approve/1", headers={"origin": "http://localhost", "x-csrf-token": client.cookies.get(security.CSRF_COOKIE)}).status_code == 403
 
 
 def test_bruteforce_and_host(client):

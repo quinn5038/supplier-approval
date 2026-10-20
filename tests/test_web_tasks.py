@@ -40,6 +40,22 @@ def test_download_session_expiry_is_preserved(tmp_path, monkeypatch):
         tp.download_supplier_files("1")
 
 
+def test_report_loader_keeps_online_and_offline_results_separate(tmp_path, monkeypatch):
+    monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
+    (tmp_path / "cache_v4.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "stage2_results.online.json").write_text(
+        json.dumps({"1": {"decision": "recommend"}}), encoding="utf-8")
+    (tmp_path / "stage2_results.offline.json").write_text(
+        json.dumps({"1": {"decision": "manual"}}), encoding="utf-8")
+    (tmp_path / "textin_results.online.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "textin_results.offline.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("OCR_MODE", "online")
+    assert webapp._load_stage2_for_todo("1")[0]["decision"] == "recommend"
+    monkeypatch.setenv("OCR_MODE", "offline")
+    assert webapp._load_stage2_for_todo("1")[0]["decision"] == "manual"
+
+
 def test_rerun_download_expiry_then_retry_success(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
     monkeypatch.setattr(webapp, "STATE_DB", tmp_path / "state.sqlite3")

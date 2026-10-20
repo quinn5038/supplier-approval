@@ -155,6 +155,30 @@ def test_business_license_reversed_residence_label_does_not_join_legal_person():
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_business_license_reverse_vertical_name_label_detects_mismatch():
+    """离线 OCR 双栏展平为“公司名称 称”时仍应提取执照主体并触发 A01。"""
+    text = ("法定代表人 马卫东\n"
+            "统一社会信用代码 91370211MA3RNQ0M3R\n"
+            "型 有限责任公司（自然人投资或控股） 青岛亿丰通商贸有限公司 称\n"
+            "注册资本 壹佰万元整\n"
+            "经营范围 汽车销售；互联网销售")
+    supplier = {
+        "social_credit_code": "91370212MACCHYX058",
+        "full_name": "青岛国承科技发展有限公司",
+        "legal_person": "马卫东",
+        "registered_capital": 100,
+        "busi_scope": "技术服务；汽车销售",
+    }
+
+    result = tp.extract("business_license", text, supplier)
+
+    assert result["fields"]["名称"] == "青岛亿丰通商贸有限公司"
+    assert result["checks"]["名称一致"] is False
+    assert "执照名称「青岛亿丰通商贸有限公司」与系统「青岛国承科技发展有限公司」不一致" in result["issues"]
+    assert aa._resolve_supplier_name(supplier, {"title": supplier["full_name"] + "/1"},
+                                     {"business_license": result}) == "青岛亿丰通商贸有限公司"
+
+
 def test_material_name_check_uses_todo_title_not_apply_unit_contract():
     supplier = {"name": "合成简称", "social_credit_code": "91110000123456789X"}
     todo = {
@@ -222,6 +246,61 @@ def test_iso_seal_split_date_range_does_not_use_issue_or_fake_day(doc_type, titl
 
     assert result["fields"]["有效期至"] == "2027-12-30"
     assert result["checks"]["在有效期内"] is True
+
+
+@pytest.mark.parametrize(("doc_type", "title", "standard"), [
+    ("iso9001", "质量管理体系认证证书", "GB/T19001-2016 idt ISO9001:2015"),
+    ("iso14001", "环境管理体系认证证书", "GB/T24001-2016 idt ISO14001:2015"),
+    ("iso45001", "职业健康安全管理体系认证证书", "GB/T45001-2020 idt ISO45001:2018"),
+])
+def test_iso_decorative_low_confidence_does_not_force_manual_review(
+        doc_type, title, standard):
+    text = (f"{title}\n成都伯斯曼实业有限公司\n{standard}\n"
+            "有效期至：2028年07月18日")
+    result = tp.extract(doc_type, text, {"full_name": "成都伯斯曼实业有限公司"})
+    detail = [
+        {"text": title, "confidence": .99},
+        {"text": "成都伯斯曼实业有限公司", "confidence": .99},
+        {"text": standard, "confidence": .98},
+        {"text": "有效期至：2028年07月18日", "confidence": .99},
+        {"text": "IAF", "confidence": .74},
+        {"text": "（贴花）", "confidence": .77},
+    ]
+
+    tp._apply_ocr_confidence_review(doc_type, result, detail)
+
+    assert result["checks"]["OCR文字置信度充足"] is True
+    assert not any("置信度" in issue for issue in result["issues"])
+
+
+def test_iso_low_confidence_holder_still_requires_manual_review():
+    text = ("质量管理体系认证证书\n成都伯斯曼实业有限公司\n"
+            "GB/T19001-2016 idt ISO9001:2015\n有效期至：2028年07月18日")
+    result = tp.extract("iso9001", text, {"full_name": "成都伯斯曼实业有限公司"})
+    detail = [
+        {"text": "质量管理体系认证证书", "confidence": .99},
+        {"text": "成都伯斯曼实业有限公司", "confidence": .82},
+        {"text": "GB/T19001-2016 idt ISO9001:2015", "confidence": .98},
+        {"text": "有效期至：2028年07月18日", "confidence": .99},
+    ]
+
+    tp._apply_ocr_confidence_review("iso9001", result, detail)
+
+    assert result["checks"]["OCR文字置信度充足"] is None
+    assert "ISO关键字段获证组织文字置信度较低（0.82），转人工核验" in result["issues"]
+
+
+def test_iso_missing_confidence_detail_still_requires_manual_review():
+    result = tp.extract(
+        "iso9001",
+        "质量管理体系认证证书\n成都伯斯曼实业有限公司\n有效期至：2028年07月18日",
+        {"full_name": "成都伯斯曼实业有限公司"},
+    )
+
+    tp._apply_ocr_confidence_review("iso9001", result, None)
+
+    assert result["checks"]["OCR文字置信度充足"] is None
+    assert "OCR置信度明细缺失，转人工核验" in result["issues"]
 
 
 def test_business_license_incomplete_date_range_does_not_expire_on_start_date():

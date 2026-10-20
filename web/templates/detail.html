@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>审批详情 - {{ supplier_name or todo_id }}</title>
+    <title>[{{ '在线版' if ocr_mode == 'online' else '离线版' }}] 审批详情 - {{ supplier_name or todo_id }}</title>
     <link rel="stylesheet" href="/static/style.css">
 <script>
 const originalFetch = window.fetch.bind(window);
@@ -17,10 +17,14 @@ window.fetch = (url, options = {}) => {
 };
 </script>
 </head>
-<body>
+<body class="ocr-mode-{{ ocr_mode }}">
+    <div class="ocr-edition-badge" aria-label="当前版本：{{ ocr_mode_label }}">
+        <strong>{{ '在线 OCR 版' if ocr_mode == 'online' else '离线 OCR 版' }}</strong>
+        <span>{{ 'TextIn 识别' if ocr_mode == 'online' else '本地识别' }}</span>
+    </div>
     <div class="topbar">
         <div>
-            <h1 id="page-title">{{ supplier_name or '供应商审批详情' }}</h1>
+            <h1 id="page-title">{{ supplier_name or '供应商审批详情' }} <span class="ocr-title-mark">{{ '在线版' if ocr_mode == 'online' else '离线版' }}</span></h1>
             <div class="meta">todoId: {{ todo_id }}</div>
         </div>
         <div class="actions">

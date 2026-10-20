@@ -61,6 +61,7 @@ output/
 dist/*
 !dist/SupplierApproval-Setup.exe
 .installer-cache/
+.runtime/
 
 # 临时输出
 run_v4_*.txt

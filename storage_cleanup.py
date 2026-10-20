@@ -14,7 +14,11 @@ _CACHE_DIRS = ("files_cache", "files_cache_desens")
 _KEYED_JSON_FILES = (
     "cache_v4.json",
     "textin_results.json",
+    "textin_results.online.json",
+    "textin_results.offline.json",
     "stage2_results.json",
+    "stage2_results.online.json",
+    "stage2_results.offline.json",
     "qcc_results.json",
 )
 

@@ -1,31 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-TextIn xParse 材料解析管道（阶段3：材料内容核验）
+"""双后端材料解析管道。
 
-流程:
-    files_cache/<todoId>/  下的资质文件（图片/PDF/Word）
-      → TextIn xParse API 解析成 Markdown（直连模式，凭据在 .env）
-      → 按材料类型抽取字段（执照/身份证/纳税/财报/ISO/授权）
-      → textin_results.json（todoId → 各材料字段+核验结论）
-      → auto_approve.py --stage2 合并进核查清单
-
-文件来源（三选一）:
-    A. 文件直链API下载（待补：需浏览器录HAR拿到真实下载接口）
-    B. 手动下载放入 files_cache/<todoId>/（过渡期测试用）
-    C. TextIn 支持 URL 直传（拿到直链后可省下载步骤）
-
-凭据（.env）:
-    TEXTIN_APP_ID=xxx        # textin.com 工作台-账号设置-开发者信息
-    TEXTIN_SECRET_CODE=xxx
-    （新注册送100页；加官方福利官再送1000页；新客套餐9.9元/1000页）
-
-用量参考: 一家供应商关键材料约5-10页，37家全量约200-400页/轮。
-
-用法:
-    python textin_pipeline.py scan                 # 扫描 files_cache/ 并分类
-    python textin_pipeline.py parse [todoId]       # 调TextIn解析→抽取→写textin_results.json
-    python textin_pipeline.py extract [todoId]     # 仅从已缓存的 .md 抽取（不调API）
-    python textin_pipeline.py test                 # 离线自测（mock材料）
+``OCR_MODE=online`` 使用 TextIn，``OCR_MODE=offline`` 使用本地 PaddleOCR。
+身份证始终仅在本机识别与脱敏；两种后端的结构化结果和 OCR 缓存相互隔离。
 """
 import json
 import logging
@@ -38,12 +15,19 @@ from pathlib import Path
 
 import requests
 
+import local_ocr
 from material_policy import (
     aggregate_materials,
     digest,
     file_types,
     is_public_material,
     load_cache,
+)
+from ocr_runtime import (
+    cache_suffix,
+    get_ocr_mode,
+    mode_result_path,
+    readable_result_path,
 )
 
 # 9/5 修复：之前 run_parse 里用了 log.info 但模块没定义 log，导致 OCR 集成脱敏后崩溃
@@ -66,11 +50,7 @@ logging.getLogger("urllib3").addFilter(_SuppressHeaderParse())
 BASE = Path(__file__).parent
 FILES_DIR = BASE / "files_cache"
 FILES_DESENS_DIR = BASE / "files_cache_desens"  # 2026-09-04 保密合规：脱敏后给 OCR 用的中间目录
-RESULTS_FILE = BASE / "textin_results.json"
 TEXTIN_API = "https://api.textin.com/ai/service/v1/pdf_to_markdown"
-# 注：新版 xParse 端点 /ai/service/v1 实测返回 400「缺少必要参数或参数值不正确」，
-# 旧版 pdf_to_markdown 端点实测可用（9/2 验证），故用旧版。
-
 # ---------- .env 加载 ----------
 _env_file = BASE / ".env"
 if _env_file.exists():
@@ -83,6 +63,9 @@ if _env_file.exists():
 
 TEXTIN_APP_ID = os.getenv("TEXTIN_APP_ID", "")
 TEXTIN_SECRET_CODE = os.getenv("TEXTIN_SECRET_CODE", "")
+OCR_MODE = get_ocr_mode(BASE)
+RESULTS_FILE = mode_result_path(BASE, "textin_results.json", OCR_MODE)
+
 
 # 需要解析的材料类型 → 对应核查清单项
 DOC_TYPES = [
@@ -131,12 +114,9 @@ FILE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".pdf",
 # TextIn API 直连解析
 # ============================================================
 def parse_file_textin(path, doc_type=None):
-    """调 TextIn xParse 解析单个文件 → 返回 (markdown, detail)（失败抛异常）
-
-    9/7 改造：markdown_details=1 以拿到字段坐标 detail（含 position + 纯文本 text）。
-    - markdown：正文（身份证会返回 [DESENSITIZED] + HTML 注释敏感信息）
-    - detail：结构化字段列表，text 是纯文本（无 HTML 注释包裹），供身份证提取姓名/有效期
-    """
+    """Send one allow-listed public material to TextIn and return text/detail."""
+    if get_ocr_mode(BASE) != "online":
+        raise PermissionError("离线 OCR 模式已禁用 TextIn，禁止材料外发")
     path = Path(path).resolve()
     if not path.is_relative_to(FILES_DESENS_DIR.resolve()):
         raise PermissionError("外部 OCR 只允许经检查的公开材料暂存目录")
@@ -144,53 +124,50 @@ def parse_file_textin(path, doc_type=None):
     if doc_type not in types or not is_public_material(path, types):
         raise PermissionError("材料类型不在公开允许列表，禁止外发")
     if not TEXTIN_APP_ID or not TEXTIN_SECRET_CODE:
-        raise RuntimeError("未配置 TEXTIN_APP_ID / TEXTIN_SECRET_CODE（.env），"
-                           "无法直连TextIn解析")
-    path = Path(path)
-    with open(path, "rb") as f:
-        data = f.read()
+        raise RuntimeError("未配置 TEXTIN_APP_ID / TEXTIN_SECRET_CODE，无法使用在线 OCR")
+    data = path.read_bytes()
     headers = {
         "x-ti-app-id": TEXTIN_APP_ID,
         "x-ti-secret-code": TEXTIN_SECRET_CODE,
         "Content-Type": "application/octet-stream",
     }
     params = {
-        "parse_mode": "auto",       # 引擎自动选择（图片=scan，电子档=parse）
-        "apply_document_tree": 0,   # 不需要标题树
-        "table_flavor": "md",       # 表格按md输出（财报数字在表格里）
+        "parse_mode": "auto",
+        "apply_document_tree": 0,
+        "table_flavor": "md",
         "get_image": "none",
-        "markdown_details": 1,      # 9/7：拿 detail 坐标，身份证需要定位姓名/有效期
+        "markdown_details": 1,
     }
-    # 审计先于网络请求落盘；失败时不发送。只存元数据，不存原文。
     import hashlib
 
     from state_store import record_event
     record_event(BASE / "audit.sqlite3", "external_ocr", {
-        "types": sorted(types), "sha256": hashlib.sha256(data).hexdigest(),
-        "destination": TEXTIN_API, "desensitization": "public_allowlist",
+        "types": sorted(types),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "destination": TEXTIN_API,
+        "desensitization": "public_allowlist",
     })
-    resp = requests.post(TEXTIN_API, headers=headers, params=params,
-                         data=data, timeout=120, allow_redirects=False,
-                         proxies={"http": None, "https": None})  # 不走系统代理（防换网络后 ProxyError）
-    resp.raise_for_status()
-    result = resp.json()
-    if result.get("code") not in (200, "200"):
-        raise RuntimeError(f"TextIn返回异常: code={result.get('code')} "
-                           f"msg={result.get('msg') or result.get('message')}")
-    # 兼容多种返回结构
-    r = result.get("result") or result.get("data") or {}
-    md = (r.get("markdown") or r.get("markdown_text") or r.get("text")
-          or result.get("markdown") or "")
-    if not md:
-        # 有的版本放在 content 列表里
-        content = r.get("content") or []
+    response = requests.post(
+        TEXTIN_API, headers=headers, params=params, data=data, timeout=120,
+        allow_redirects=False, proxies={"http": None, "https": None},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") not in (200, "200"):
+        raise RuntimeError(
+            f"TextIn返回异常: code={payload.get('code')} "
+            f"msg={payload.get('msg') or payload.get('message')}")
+    result = payload.get("result") or payload.get("data") or {}
+    markdown = (result.get("markdown") or result.get("markdown_text")
+                or result.get("text") or payload.get("markdown") or "")
+    if not markdown:
+        content = result.get("content") or []
         if isinstance(content, list):
-            md = "\n".join(str(x.get("text", x) if isinstance(x, dict) else x)
-                           for x in content)
-    detail = r.get("detail") or []
-    if not isinstance(detail, list):
-        detail = []
-    return md, detail
+            markdown = "\n".join(str(item.get("text", item)
+                                     if isinstance(item, dict) else item)
+                                   for item in content)
+    detail = result.get("detail") or []
+    return markdown, detail if isinstance(detail, list) else []
 
 
 def _sanitize_detail(doc_type, detail):
@@ -378,6 +355,42 @@ def _extract_business_license_legal_person(text):
     return cleaned or None
 
 
+_COMPANY_SUFFIX = ("有限责任公司", "股份有限公司", "有限公司", "集团公司", "公司")
+
+
+def _extract_business_license_name(text):
+    """Extract the registered name from conventional and column-reversed licences.
+
+    PaddleOCR may flatten the two-column/vertical-label licence layout as
+    ``公司类型 目标企业有限公司 称``.  In that representation the final ``称``
+    belongs to the vertical ``名称`` label, so the normal ``标签 -> 值`` parser
+    cannot see the company name.  Only use the reverse-layout fallback on a
+    line ending in ``称`` and select its last company-shaped token; this avoids
+    mistaking the registration authority or another company in body text for
+    the licence holder.
+    """
+    value = _grab(text, ["名称"], r"[^\n:：]{2,60}?")
+    if value:
+        return value
+
+    suffix = "(?:" + "|".join(map(re.escape, _COMPANY_SUFFIX)) + ")"
+    for raw_line in text.splitlines():
+        line = raw_line.strip(" \t　|。，,；;")
+        if not re.search(r"(?:名\s*)?称\s*$", line):
+            continue
+        prefix = re.sub(r"(?:名\s*)?称\s*$", "", line).strip()
+        # Columns are normally separated by OCR whitespace.  Prefer the last
+        # token because the company type occupies the left-hand column.
+        tokens = [part.strip("()（） ") for part in re.split(r"\s+", prefix) if part.strip()]
+        for token in reversed(tokens):
+            matches = re.findall(rf"[\u4e00-\u9fa5A-Za-z0-9（）()·&]+?{suffix}", token)
+            if matches:
+                candidate = matches[-1].strip("()（） ")
+                if len(candidate) >= 6 and candidate not in _COMPANY_SUFFIX:
+                    return candidate
+    return None
+
+
 def _normalise_field_labels(text):
     """Join whitespace inside known OCR labels while preserving value spacing."""
     labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本",
@@ -510,7 +523,7 @@ def extract_business_license(text, supplier):
         m2 = re.search(r"(?<![0-9A-Za-z])([0-9A-Z]{18})(?![0-9A-Za-z])", t)
         code = m2.group(1) if m2 else None
     fields["统一社会信用代码"] = code.upper() if code else None
-    fields["名称"] = _grab(t, ["名称"], r"[^\n:：]{2,60}?")
+    fields["名称"] = _extract_business_license_name(t)
     fields["法定代表人"] = _extract_business_license_legal_person(t)
     # 单独保留住所，既便于报告核对，也确保同行排版
     # 「法定代表人 XXX 住 所 XXX」中的住所不会并入法人姓名。
@@ -1292,6 +1305,98 @@ def extract(doc_type, text, supplier=None, detail=None):
     return extract_generic_cert(text)
 
 
+_ISO_CONFIDENCE_THRESHOLD = 0.9
+_ISO_TYPE_MARKERS = {
+    "iso9001": "质量管理体系认证证书",
+    "iso14001": "环境管理体系认证证书",
+    "iso45001": "职业健康安全管理体系认证证书",
+}
+
+
+def _best_detail_confidence(detail, predicate):
+    """Return the strongest OCR confidence for matching evidence text."""
+    scores = []
+    for item in detail or []:
+        if not isinstance(item, dict):
+            continue
+        text = _norm(str(item.get("text", "")))
+        if not predicate(text):
+            continue
+        confidence = item.get("confidence")
+        if confidence is None:
+            continue
+        try:
+            scores.append(float(confidence))
+        except (TypeError, ValueError):
+            continue
+    if scores:
+        return max(scores)
+    return None
+
+
+def _detail_confidence_is_low(item):
+    """Treat absent or malformed confidence as insufficient, without crashing."""
+    try:
+        return float(item.get("confidence")) < _ISO_CONFIDENCE_THRESHOLD
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
+def _apply_ocr_confidence_review(doc_type, result, detail):
+    """Attach confidence review without letting decorative ISO text fail a page.
+
+    ISO decisions use the certificate type, holder and validity.  Confidence is
+    therefore evaluated on those evidence lines only; footer logos, signatures,
+    seals and supervision stickers are retained in OCR detail for diagnostics but
+    cannot by themselves force a manual review.
+    """
+    checks = result.setdefault("checks", {})
+    issues = result.setdefault("issues", [])
+    if not detail:
+        checks["OCR文字置信度充足"] = None
+        issues.append("OCR置信度明细缺失，转人工核验")
+        return
+
+    if doc_type not in _ISO_TYPE_MARKERS:
+        if any(_detail_confidence_is_low(item) for item in detail):
+            checks["OCR文字置信度充足"] = None
+            issues.append("存在低置信度或缺失置信度文字，转人工核验")
+        return
+
+    iso_code = doc_type[3:]
+    fields = result.get("fields") or {}
+    evidence = []
+    if checks.get("材料类型正确") is True:
+        marker = _norm(_ISO_TYPE_MARKERS[doc_type])
+        evidence.append(("证书类型", lambda text, code=iso_code, marker=marker:
+                         "ISO" + code in text.upper() or marker in text))
+    holder = _norm(fields.get("获证组织") or "")
+    if checks.get("持有人一致") is True and holder:
+        evidence.append(("获证组织", lambda text, holder=holder: holder in text))
+    expiry = fields.get("有效期至")
+    if checks.get("在有效期内") is True and expiry:
+        if expiry == "长期":
+            evidence.append(("有效期", lambda text:
+                             any(word in text for word in ("长期", "永久", "无固定期限"))))
+        else:
+            expiry_digits = re.sub(r"\D", "", str(expiry))
+            evidence.append(("有效期", lambda text, digits=expiry_digits:
+                             digits and digits in re.sub(r"\D", "", text)))
+
+    problems = []
+    for label, predicate in evidence:
+        confidence = _best_detail_confidence(detail, predicate)
+        if confidence is None:
+            problems.append(f"{label}缺少OCR置信度")
+        elif confidence < _ISO_CONFIDENCE_THRESHOLD:
+            problems.append(f"{label}文字置信度较低（{confidence:.2f}）")
+    if problems:
+        checks["OCR文字置信度充足"] = None
+        issues.append("ISO关键字段" + "、".join(problems) + "，转人工核验")
+    elif evidence:
+        checks["OCR文字置信度充足"] = True
+
+
 # ============================================================
 # 文件扫描/解析/结果组装
 # ============================================================
@@ -1437,11 +1542,15 @@ def _supplier_context_for_material_checks(supplier, todo, registered_name=None):
 
 
 def run_parse(only_todo=None, *, offline=False):
-    """解析 files_cache 下所有文件 → textin_results.json
+    """Parse materials with the selected backend into its isolated result file.
 
-    2026-09-04 保密合规改造：先调用 desensitize 助手脱敏到 files_cache_desens/，
-    然后 scan_files 改读脱敏目录，OCR 永远不接触原始敏感数据。
+    ``offline=True`` retains the historical CLI meaning of cache-only extraction;
+    it does not select the OCR backend. Backend selection comes from ``OCR_MODE``.
     """
+    mode = get_ocr_mode(BASE)
+    # Kept as a module variable so isolated integration tests and embedders can
+    # redirect results without touching real supplier data.
+    results_file = RESULTS_FILE
     # 阶段 1.5：脱敏（缺库时优雅降级——不改任何文件，正常返回）
     idcard_fields = {}  # PaddleOCR 识别的身份证字段（方案B：替代 TextIn 二次 OCR）
     # 9/9 优化：单家审批（only_todo）时只脱敏该家目录，不再全量跑 PaddleOCR
@@ -1465,9 +1574,11 @@ def run_parse(only_todo=None, *, offline=False):
     tasks = [t for t in scan_files()
              if not only_todo or t[0] == only_todo]
     results = {}
-    if RESULTS_FILE.exists():
+    previous_results = (results_file if results_file.exists()
+                        else readable_result_path(BASE, "textin_results.json", mode))
+    if previous_results.exists():
         try:
-            results = json.loads(RESULTS_FILE.read_text(encoding="utf-8"))
+            results = json.loads(previous_results.read_text(encoding="utf-8"))
         except Exception:
             results = {}
 
@@ -1483,6 +1594,34 @@ def run_parse(only_todo=None, *, offline=False):
     # 企查查结果：有企业全名（缓存里常只有简称，名称/持有人比对需要全名）
     qcc = json.loads((BASE / "qcc_results.json").read_text(encoding="utf-8")) \
         if (BASE / "qcc_results.json").exists() else {}
+
+    engine_identity = (local_ocr.cache_identity() if mode == "offline"
+                       else "textin-xparse-v1")
+    suffix = cache_suffix(mode)
+
+    def cache_paths(path):
+        return (path.with_suffix(path.suffix + suffix + ".md"),
+                path.with_suffix(path.suffix + suffix + ".detail.json"),
+                path.with_suffix(path.suffix + suffix + ".sha256"))
+
+    def cache_key(path):
+        return digest(path) + ":" + engine_identity
+
+    pending = []
+    for _, path, kind in tasks:
+        types = file_types(path, cache)
+        if (mode != "offline" or kind not in local_ocr.SUPPORTED_TYPES
+                or not path.is_file() or not is_public_material(path, types)):
+            continue
+        md_cache, _, key_cache = cache_paths(path)
+        if not (md_cache.exists() and key_cache.exists() and key_cache.read_text() == cache_key(path)):
+            pending.append(path)
+    local_results = {}
+    if pending and not offline and mode == "offline":
+        try:
+            local_results = local_ocr.parse_files(list(dict.fromkeys(pending)))
+        except Exception:
+            local_results = {str(path.resolve()): {"error": "本地 OCR 环境或工作进程失败，请检查安装与模型"} for path in pending}
 
     n_ok = n_fail = 0
     for todo_id, fpath, doc_type in tasks:
@@ -1530,16 +1669,19 @@ def run_parse(only_todo=None, *, offline=False):
         types = file_types(fpath, cache)
         if not is_public_material(fpath, types) or not fpath.is_file():
             store_result(todo_id, doc_type, {
-                "file": fpath.name, "checks": {"允许外部OCR": None},
-                "issues": ["材料未通过公开类型检查，禁止外发，转人工核验"],
+                "file": fpath.name, "checks": {"允许OCR处理": None},
+                "issues": ["材料未通过公开类型检查，禁止处理，转人工核验"],
             })
             continue
 
+        if mode == "offline" and doc_type not in local_ocr.SUPPORTED_TYPES:
+            store_result(todo_id, doc_type, {"file": fpath.name, "checks": {"离线核验完成": None},
+                "issues": ["该材料不在第一阶段离线 OCR 范围，转人工核验"]})
+            continue
+
         # 同目录已有缓存的 .md 就直接用（extract 模式 / 重跑不烧额度）
-        md_path = fpath.with_suffix(fpath.suffix + ".md")
-        detail_path = fpath.with_suffix(fpath.suffix + ".detail.json")
-        hash_path = fpath.with_suffix(fpath.suffix + ".sha256")
-        if md_path.exists() and hash_path.exists() and hash_path.read_text() == digest(fpath):
+        md_path, detail_path, hash_path = cache_paths(fpath)
+        if md_path.exists() and hash_path.exists() and hash_path.read_text() == cache_key(fpath):
             md = md_path.read_text(encoding="utf-8")
             detail = json.loads(detail_path.read_text(encoding="utf-8")) \
                 if detail_path.exists() else None
@@ -1549,7 +1691,13 @@ def run_parse(only_todo=None, *, offline=False):
                 continue
             try:
                 print(f"[解析] {todo_id}/{fpath.name} ({doc_type}) ...")
-                md, detail = parse_file_textin(fpath, doc_type)
+                if mode == "offline":
+                    parsed = local_results.get(str(fpath.resolve()), {})
+                    if parsed.get("error") or not parsed.get("markdown"):
+                        raise RuntimeError(parsed.get("error") or "本地 OCR 未返回结果")
+                    md, detail = parsed["markdown"], parsed.get("detail", [])
+                else:
+                    md, detail = parse_file_textin(fpath, doc_type)
                 # 9/7：缓存 markdown——身份证过滤注释（敏感信息不落盘），
                 # 其他类型（营业执照等证照内容也在注释里）原样保留
                 if doc_type == "legal_person_id":
@@ -1561,8 +1709,9 @@ def run_parse(only_todo=None, *, offline=False):
                     detail_path.write_text(
                         json.dumps(_sanitize_detail(doc_type, detail),
                                    ensure_ascii=False), encoding="utf-8")
-                hash_path.write_text(digest(fpath))
-                time.sleep(1)
+                hash_path.write_text(cache_key(fpath))
+                if mode == "online":
+                    time.sleep(1)
             except Exception as e:
                 print(f"  [失败] {fpath.name}: {e}")
                 store_result(todo_id, doc_type, {"file": fpath.name, "error": type(e).__name__, "issues": ["OCR 失败，转人工核验"]})
@@ -1570,6 +1719,10 @@ def run_parse(only_todo=None, *, offline=False):
                 continue
         try:
             r = extract(doc_type, md, supplier, detail)
+            r["ocr_engine"] = "paddleocr-local" if mode == "offline" else "textin-xparse"
+            r["ocr_model_identity"] = engine_identity
+            if mode == "offline":
+                _apply_ocr_confidence_review(doc_type, r, detail)
             r["file"] = fpath.name
             r["parsed_at"] = datetime.now().isoformat(timespec="seconds")
             store_result(todo_id, doc_type, r)
@@ -1582,10 +1735,10 @@ def run_parse(only_todo=None, *, offline=False):
             n_fail += 1
 
     # 避免 OCR 子进程被中断时破坏已有结果文件。
-    tmp = RESULTS_FILE.with_suffix(RESULTS_FILE.suffix + ".tmp")
+    tmp = results_file.with_suffix(results_file.suffix + ".tmp")
     tmp.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, RESULTS_FILE)
-    print(f"\n完成: 成功 {n_ok} | 失败 {n_fail} → {RESULTS_FILE.name}")
+    os.replace(tmp, results_file)
+    print(f"\n完成: 后端 {mode} | 成功 {n_ok} | 失败 {n_fail} → {results_file.name}")
 
 
 # ============================================================

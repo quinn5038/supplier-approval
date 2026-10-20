@@ -15,13 +15,24 @@ _attempts = {}
 _lock = threading.Lock()
 TTL = 1800
 _local_csrf = secrets.token_urlsafe(32)
+SESSION_COOKIE = "supplier_session"
+CSRF_COOKIE = "supplier_csrf"
 
 LOGIN = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<title>登录供应商辅助审批</title><h1>登录供应商辅助审批</h1>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录供应商辅助审批</title>
+<style>body{font-family:"Microsoft YaHei",sans-serif;background:#f5f3ff;color:#1f2937;
+display:grid;place-items:center;min-height:100vh;margin:0}.login-card{background:#fff;padding:32px;
+border:1px solid #ddd6fe;border-radius:12px;box-shadow:0 12px 30px #4c1d9520;min-width:300px}
+.offline-login-mark{display:inline-block;background:#185fa5;color:#fff;border-radius:999px;
+padding:4px 10px;font-size:12px;font-weight:700}label,input,button{display:block;width:100%;box-sizing:border-box}
+label{margin-top:14px;font-size:13px}input{margin-top:5px;padding:9px;border:1px solid #cbd5e1;border-radius:6px}
+button{margin-top:20px;padding:10px;border:0;border-radius:6px;background:#185fa5;color:#fff;font-weight:700}</style>
+<main class="login-card"><span class="offline-login-mark">在线 / 离线双 OCR</span><h1>登录供应商辅助审批</h1>
 <form method="post" action="/login"><label for="username">账户</label>
 <input id="username" name="username" autocomplete="username" required>
 <label for="password">密码</label><input id="password" name="password" type="password"
-autocomplete="current-password" required><button>登录</button></form></html>"""
+autocomplete="current-password" required><button>登录</button></form></main></html>"""
 
 
 def same_origin(request):
@@ -53,7 +64,7 @@ def install_security(app):
                     return JSONResponse({"error": "csrf_failed"}, 403)
             request.state.role = "admin"
             response = await call_next(request)
-            response.set_cookie("supplier_csrf", _local_csrf, samesite="strict")
+            response.set_cookie(CSRF_COOKIE, _local_csrf, samesite="strict")
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["X-Frame-Options"] = "DENY"
@@ -67,7 +78,7 @@ def install_security(app):
             for key in list(_sessions):
                 if _sessions[key]["expires"] <= now:
                     del _sessions[key]
-            session = _sessions.get(request.cookies.get("supplier_session"))
+            session = _sessions.get(request.cookies.get(SESSION_COOKIE))
         if session is None:
             if request.url.path.startswith("/api/"):
                 return JSONResponse({"error": "login_required"}, 401)
@@ -114,15 +125,15 @@ def install_security(app):
             _attempts.pop(peer, None)
         response = RedirectResponse("/", 303)
         secure = request.url.scheme == "https"
-        response.set_cookie("supplier_session", token, httponly=True, secure=secure, samesite="strict", max_age=TTL)
-        response.set_cookie("supplier_csrf", csrf, secure=secure, samesite="strict", max_age=TTL)
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, secure=secure, samesite="strict", max_age=TTL)
+        response.set_cookie(CSRF_COOKIE, csrf, secure=secure, samesite="strict", max_age=TTL)
         return response
 
     @app.post("/logout")
     async def logout(request: Request):
         with _lock:
-            _sessions.pop(request.cookies.get("supplier_session"), None)
+            _sessions.pop(request.cookies.get(SESSION_COOKIE), None)
         response = RedirectResponse("/login", 303)
-        response.delete_cookie("supplier_session")
-        response.delete_cookie("supplier_csrf")
+        response.delete_cookie(SESSION_COOKIE)
+        response.delete_cookie(CSRF_COOKIE)
         return response
