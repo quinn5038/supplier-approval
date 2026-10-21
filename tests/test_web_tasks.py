@@ -47,13 +47,40 @@ def test_report_loader_keeps_online_and_offline_results_separate(tmp_path, monke
         json.dumps({"1": {"decision": "recommend"}}), encoding="utf-8")
     (tmp_path / "stage2_results.offline.json").write_text(
         json.dumps({"1": {"decision": "manual"}}), encoding="utf-8")
-    (tmp_path / "textin_results.online.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "textin_results.offline.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "textin_results.online.json").write_text('{"1": {}}', encoding="utf-8")
+    (tmp_path / "textin_results.offline.json").write_text('{"1": {}}', encoding="utf-8")
 
     monkeypatch.setenv("OCR_MODE", "online")
     assert webapp._load_stage2_for_todo("1")[0]["decision"] == "recommend"
     monkeypatch.setenv("OCR_MODE", "offline")
     assert webapp._load_stage2_for_todo("1")[0]["decision"] == "manual"
+
+
+def test_report_loader_rejects_stage2_entry_without_same_mode_ocr(tmp_path, monkeypatch):
+    monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(webapp, "_task_status", {})
+    (tmp_path / "cache_v4.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "stage2_results.online.json").write_text(
+        json.dumps({"1": {"decision": "recommend"}, "2": {"decision": "manual"}}),
+        encoding="utf-8")
+    (tmp_path / "textin_results.online.json").write_text(
+        json.dumps({"1": {}}), encoding="utf-8")
+
+    monkeypatch.setenv("OCR_MODE", "online")
+    assert webapp._has_valid_result("1") is True
+    assert webapp._has_valid_result("2") is False
+    assert webapp._load_stage2_for_todo("2")[0] == {}
+
+
+def test_legacy_task_state_belongs_to_online_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(webapp, "_task_status", {"1": {"status": "done", "step": "完成"}})
+
+    monkeypatch.setenv("OCR_MODE", "online")
+    assert "1" in asyncio.run(webapp.api_status_all())
+    monkeypatch.setenv("OCR_MODE", "offline")
+    assert "1" not in asyncio.run(webapp.api_status_all())
+    assert asyncio.run(webapp.api_status("1"))["status"] == "idle"
 
 
 def test_rerun_download_expiry_then_retry_success(tmp_path, monkeypatch):

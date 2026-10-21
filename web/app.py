@@ -266,17 +266,18 @@ def _has_valid_result(todo_id: str) -> bool:
     """
     with _task_lock:
         task = _task_status.get(str(todo_id), {})
-        if (task.get("ocr_mode") in (None, get_ocr_mode(BASE_DIR))
+        if (_task_matches_mode(task)
                 and task.get("status") in ("running", "error")):
             return False
-    stage2_path = readable_result_path(BASE_DIR, "stage2_results.json")
-    if not stage2_path.exists():
-        return False
-    try:
-        stage2 = json.loads(stage2_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return stage2.get(str(todo_id), {}).get("decision") in ("reject", "manual", "recommend", "skip")
+    stage2, _, _ = _load_stage2_for_todo(todo_id)
+    return stage2.get("decision") in ("reject", "manual", "recommend", "skip")
+
+
+def _task_matches_mode(task: dict, mode: str | None = None) -> bool:
+    """旧版无模式状态只归入在线版；新版状态必须与当前模式严格一致。"""
+    mode = mode or get_ocr_mode(BASE_DIR)
+    task_mode = task.get("ocr_mode")
+    return task_mode == mode or (task_mode is None and mode == "online")
 
 
 def _load_stage2_for_todo(todo_id: str):
@@ -299,7 +300,19 @@ def _load_stage2_for_todo(todo_id: str):
         from material_policy import hydrate_iso_cache
         cache = hydrate_iso_cache(json.loads(cache_path.read_text(encoding="utf-8")))
 
-    return stage2.get(str(todo_id), {}), textin, cache
+    todo_id = str(todo_id)
+    result = stage2.get(todo_id, {})
+    # stage2 只有在同模式 OCR 确实处理过该供应商时才有效。该约束同时隔离
+    # 历史上因 stage2 全量遍历共享 cache 而污染的在线/离线结果文件。
+    if todo_id not in textin:
+        result = {}
+    elif isinstance(result, dict):
+        result_mode = result.get("ocr_mode")
+        current_mode = get_ocr_mode(BASE_DIR)
+        if result_mode not in (None, current_mode):
+            result = {}
+
+    return result, textin, cache
 
 
 # ============================================================
@@ -426,7 +439,7 @@ async def api_status(todo_id: str):
             return {"status": "done", "step": "离线合成演示完成", "progress": 100}
     with _task_lock:
         st = _task_status.get(todo_id, {"status": "idle", "step": "未开始"})
-        if st.get("ocr_mode") not in (None, get_ocr_mode(BASE_DIR)):
+        if not _task_matches_mode(st):
             st = {"status": "idle", "step": "当前 OCR 模式尚未审批"}
     return st
 
@@ -441,7 +454,7 @@ async def api_status_all():
                       "error": st.get("error"),
                       "progress": st.get("progress", 0)}
                 for tid, st in _task_status.items()
-                if st.get("ocr_mode") in (None, mode)}
+                if _task_matches_mode(st, mode)}
 
 
 @app.get("/api/ocr-mode")
@@ -518,7 +531,7 @@ async def api_report(todo_id: str):
     """返回审查报告 HTML 片段 + 审批意见纯文本"""
     with _task_lock:
         task = _task_status.get(todo_id, {})
-        if (task.get("ocr_mode") in (None, get_ocr_mode(BASE_DIR))
+        if (_task_matches_mode(task)
                 and task.get("status") in ("running", "error")):
             return JSONResponse({"error": "stale_result", "msg": "本次处理尚未成功，历史报告不可作为当前审批依据。"}, 409)
     s2, textin, cache = _load_stage2_for_todo(todo_id)

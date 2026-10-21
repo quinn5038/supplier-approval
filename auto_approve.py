@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 from eval import safe_eval_rule
-from ocr_runtime import mode_result_path, readable_result_path
+from ocr_runtime import get_ocr_mode, mode_result_path, readable_result_path
 
 # ============================================================
 # 自动加载 .env 文件（不需要安装额外依赖）
@@ -2271,12 +2271,36 @@ def run_stage2():
             textin = json.loads(textin_path.read_text(encoding="utf-8"))
         except Exception as e:
             log.warning(f"TextIn 结果文件损坏，按无结果处理: {e}")
-    log.info(f"=== 阶段2开始: 缓存 {len(cache)} 家，企查查结果 {len(qcc)} 条，"
-             f"TextIn OCR 结果 {len(textin)} 家 ===")
+    requested_ids = {str(todo_id) for todo_id in FETCH_IDS}
+    target_cache = ({str(tid): entry for tid, entry in cache.items()
+                     if str(tid) in requested_ids}
+                    if requested_ids else cache)
+    missing_requested = requested_ids - {str(tid) for tid in cache}
+    if missing_requested:
+        log.warning("阶段2指定的待办不在缓存中: %s", ", ".join(sorted(missing_requested)))
+    log.info(f"=== 阶段2开始: 缓存 {len(cache)} 家，本次处理 {len(target_cache)} 家，"
+             f"企查查结果 {len(qcc)} 条，TextIn OCR 结果 {len(textin)} 家 ===")
 
+    # WebUI 单家审批会传 FETCH_IDS。此前这里仍遍历整个共享 cache_v4.json，
+    # 导致某一 OCR 模式的 stage2 文件被写入另一模式从未 OCR 的供应商，首页数量
+    # 和报告随之混用。单家运行只更新目标供应商，并仅保留当前模式确有 OCR 结果
+    # 的历史条目；批量命令仍按原行为从头生成全部结果。
     results = {}
+    if requested_ids and STAGE2_FILE.exists():
+        try:
+            previous_results = json.loads(STAGE2_FILE.read_text(encoding="utf-8"))
+            if isinstance(previous_results, dict):
+                completed_ocr_ids = {str(tid) for tid in textin}
+                results = {
+                    str(tid): result for tid, result in previous_results.items()
+                    if str(tid) in completed_ocr_ids and isinstance(result, dict)
+                }
+        except (OSError, TypeError, json.JSONDecodeError) as exc:
+            log.warning("阶段2历史结果文件损坏，按空结果重建: %s", exc)
+
     n_qcc = 0
-    for tid, entry in cache.items():
+    for tid, entry in target_cache.items():
+        tid = str(tid)
         supplier = entry.get("supplier", {})
         todo = entry.get("todo", {})
 
@@ -2396,6 +2420,12 @@ def run_stage2():
         log.info(f"[阶段2] {full_name} | {d_cn}"
                  f"{'（企查查发现' + str(len(qcc_issues)) + '项问题）' if qcc_issues else ''}"
                  f"{n_textin_extra}")
+
+    active_mode = get_ocr_mode(BASE_DIR)
+    for tid in target_cache:
+        result = results.get(str(tid))
+        if isinstance(result, dict):
+            result["ocr_mode"] = active_mode
 
     _atomic_write_json(STAGE2_FILE, results)
     n_rej = sum(1 for r in results.values() if r["decision"] == "reject")

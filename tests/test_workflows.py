@@ -797,6 +797,32 @@ def test_hmt_stage2_and_opinion(tmp_path, monkeypatch):
     assert "同意" not in gen_opinion.build_opinion("1", result, {}, cache)
 
 
+def test_stage2_fetch_ids_only_updates_current_mode_ocr_results(tmp_path, monkeypatch):
+    cache = {
+        "1": {"supplier": {"name": "合成港澳台公司一", "is_hmt": True}, "todo": {}},
+        "2": {"supplier": {"name": "合成港澳台公司二", "is_hmt": True}, "todo": {}},
+    }
+    textin_path = tmp_path / "textin_results.online.json"
+    textin_path.write_text(json.dumps({"1": {}}), encoding="utf-8")
+    stage2_path = tmp_path / "stage2_results.online.json"
+    stage2_path.write_text(json.dumps({
+        "1": {"decision": "manual"},
+        "2": {"decision": "manual"},
+    }), encoding="utf-8")
+    monkeypatch.setenv("OCR_MODE", "online")
+    monkeypatch.setattr(aa, "_load_cache", lambda: cache)
+    monkeypatch.setattr(aa, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(aa, "QCC_FILE", tmp_path / "none.json")
+    monkeypatch.setattr(aa, "STAGE2_FILE", stage2_path)
+    monkeypatch.setattr(aa, "FETCH_IDS", {"1"})
+
+    aa.run_stage2()
+
+    results = json.loads(stage2_path.read_text(encoding="utf-8"))
+    assert set(results) == {"1"}
+    assert results["1"]["ocr_mode"] == "online"
+
+
 def test_empty_checklist_never_recommends():
     assert "同意" not in gen_opinion.build_opinion("1", {"decision": "manual"}, {}, {})
 
