@@ -978,6 +978,51 @@ def test_fetch_only_refreshes_existing(tmp_path, monkeypatch):
     detail.assert_called_once_with("1")
 
 
+def test_post_rechecks_single_code_111_before_expiring_session(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+            self.text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    post = Mock(side_effect=[Response({"code": 111}), Response({"code": 0, "data": {}})])
+    monkeypatch.setattr(aa._SESSION, "post", post)
+    monkeypatch.setattr(aa.time, "sleep", Mock())
+
+    result = aa._post("https://asca.iccec.cn/apis/asca/todo/home/list", {}, {},
+                      retry_waits=[], auth_retry_waits=[0])
+
+    assert result["code"] == 0
+    assert post.call_count == 2
+
+
+def test_pending_todos_retries_without_stale_app_token(monkeypatch):
+    monkeypatch.setattr(aa, "APP_TOKEN", "stale-synthetic")
+    monkeypatch.setenv("SCPMA_COOKIE", "session=synthetic")
+    monkeypatch.setenv("SCPMA_AUTH_TOKEN", "Bearer synthetic")
+    post = Mock(side_effect=[
+        aa.SessionExpiredError("synthetic conflict"),
+        {"code": 0, "data": {"rows": [], "recordsTotal": 0}},
+    ])
+    monkeypatch.setattr(aa, "_post", post)
+
+    result = aa.fetch_pending_todos()
+
+    assert result["code"] == 0
+    assert post.call_count == 2
+    first_headers = post.call_args_list[0].args[1]
+    fallback_headers = post.call_args_list[1].args[1]
+    assert first_headers["APP_TOKEN"] == "stale-synthetic"
+    assert first_headers["Authorization"] == "Bearer synthetic"
+    assert "APP_TOKEN" not in fallback_headers
+    assert fallback_headers["Authorization"] == "Bearer synthetic"
+
+
 def test_report_escapes_attributes():
     text = gen_stage2_report.esc("<script>'\"")
     assert "<" not in text and '"' not in text and "'" not in text

@@ -600,6 +600,11 @@ async def api_update_cookie(cookie: str = Form(...), auth_token: str = Form(""),
                             remember: str = Form("false")):
     """Update process memory and optionally persist a Windows-DPAPI encrypted copy."""
     cookie, auth_token = cookie.strip(), auth_token.strip()
+    # 兼容直接从开发者工具复制整行请求头，而不只是复制冒号后的值。
+    if cookie.lower().startswith("cookie:"):
+        cookie = cookie.split(":", 1)[1].strip()
+    if auth_token.lower().startswith("authorization:"):
+        auth_token = auth_token.split(":", 1)[1].strip()
     if any(not value or len(value) > 32768 or "\r" in value or "\n" in value for value in (cookie, auth_token)):
         return JSONResponse({"error": "请填写完整的 Authorization 和 Cookie，值中不要换行。"}, 400)
     extra = {"APP_TOKEN": app_token.strip(), "AGENT_ID": agent_id.strip()}

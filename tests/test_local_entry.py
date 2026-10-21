@@ -37,7 +37,8 @@ def test_local_entry_memory_credentials(local_client, monkeypatch):
         raise AssertionError("Credentials must never be written to disk")
     monkeypatch.setattr(Path, "write_text", forbid_write)
     monkeypatch.setattr(Path, "write_bytes", forbid_write)
-    data = {"cookie": "session=synthetic", "auth_token": "Bearer synthetic",
+    data = {"cookie": "Cookie: session=synthetic",
+            "auth_token": "Authorization: Bearer synthetic",
             "app_token": "app-synthetic", "agent_id": "agent-synthetic", "code": "code-synthetic"}
     assert local_client.post("/api/cookie", data=data).status_code == 403
     assert local_client.post("/api/cookie", data=data, headers={**headers, "origin": "https://evil.test"}).status_code == 403
@@ -46,6 +47,7 @@ def test_local_entry_memory_credentials(local_client, monkeypatch):
     assert "synthetic" not in result.text
     assert auto_approve._scpma_headers()["Authorization"] == "Bearer synthetic"
     assert auto_approve._asca_headers()["APP_TOKEN"] == "app-synthetic"
+    assert auto_approve._asca_headers()["Authorization"] == "Bearer synthetic"
     assert auto_approve.AGENT_ID == "agent-synthetic"
     assert os.environ["CODE"] == ""
     assert os.environ.copy()["SCPMA_COOKIE"] == "session=synthetic"

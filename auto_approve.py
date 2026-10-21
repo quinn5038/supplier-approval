@@ -134,7 +134,7 @@ _SESSION.trust_env = False
 
 
 def _asca_headers():
-    """asca.iccec.cn 的请求头（需要 APP_TOKEN + Cookie 双重认证）"""
+    """asca.iccec.cn 请求头；兼容平台当前的 Authorization 登录态。"""
     h = {
         "APP_TOKEN": APP_TOKEN,
         "Content-Type": "application/json",
@@ -143,6 +143,9 @@ def _asca_headers():
     _c = _scpma_cookie()
     if _c:
         h["Cookie"] = _c
+    _a = _scpma_auth()
+    if _a:
+        h["Authorization"] = _a
     return h
 
 
@@ -193,7 +196,7 @@ class SessionExpiredError(RuntimeError):
 WAF_RETRY_WAITS = [600, 900]
 
 
-def _post(url, headers, body, timeout=30, retry_waits=None):
+def _post(url, headers, body, timeout=30, retry_waits=None, auth_retry_waits=None):
     """统一的 POST 请求，带超时熔断（scpma 的 WAF 限流时会超时）
     - 全局 Session keep-alive 长连接（减少TLS握手）
     - scpma 超时 → 长冷却重试 600s/900s，仍超时 → 抛 WafBlockedError（主流程熔断退出）
@@ -203,8 +206,11 @@ def _post(url, headers, body, timeout=30, retry_waits=None):
     is_scpma = "scpma.iccec.cn" in url
     if retry_waits is None:
         retry_waits = WAF_RETRY_WAITS if is_scpma else [15, 30]
+    if auth_retry_waits is None:
+        auth_retry_waits = [1]
     last_exc = None
     attempt = 0
+    auth_attempt = 0
     while True:
         try:
             resp = _SESSION.post(url, headers=headers, json=body, timeout=timeout)
@@ -216,9 +222,18 @@ def _post(url, headers, body, timeout=30, retry_waits=None):
             # 统一拦截登录态过期：code=111 说明 Cookie/APP_TOKEN 失效
             # （不拦截会被上层误读成"0条待办"或"待办已关闭"）
             if isinstance(result, dict) and str(result.get("code")) == "111":
+                if auth_attempt < len(auth_retry_waits):
+                    wait = auth_retry_waits[auth_attempt]
+                    auth_attempt += 1
+                    log.warning("[认证复核] %s 暂时返回 code=111，%s秒后复核（%s/%s）",
+                                url.split("/")[-1], wait, auth_attempt,
+                                len(auth_retry_waits))
+                    if wait:
+                        time.sleep(wait)
+                    continue
                 raise SessionExpiredError(
                     f"{url.split('/')[2]}/{url.split('/')[-1]} 返回 code=111"
-                    f"（用户信息超时或未登录）—— .env 里的登录凭据已过期"
+                    "（连续复核后仍为用户信息超时或未登录）"
                 )
             return result
         except requests.exceptions.Timeout as e:
@@ -259,7 +274,19 @@ def fetch_pending_todos(page_no=1, page_size=50):
         "businessName": "",
         "agentId": "100005",   # 固定值
     }
-    result = _post(url, _asca_headers(), body)
+    headers = _asca_headers()
+    try:
+        result = _post(url, headers, body)
+    except SessionExpiredError:
+        # 旧 APP_TOKEN 有时会与仍有效的 Cookie + Authorization 冲突。
+        # 自动去掉可选旧令牌再验证一次，避免把单个令牌冲突误报为 Cookie 过期。
+        if headers.get("APP_TOKEN") and headers.get("Authorization"):
+            fallback_headers = dict(headers)
+            fallback_headers.pop("APP_TOKEN", None)
+            log.warning("[认证复核] ASCA 待办接口改用 Cookie + Authorization 再验证")
+            result = _post(url, fallback_headers, body)
+        else:
+            raise
     data = result.get("data", {})
     rows = data.get("rows", []) if isinstance(data, dict) else []
     total = data.get("recordsTotal", 0) if isinstance(data, dict) else 0
