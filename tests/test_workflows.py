@@ -823,6 +823,32 @@ def test_stage2_fetch_ids_only_updates_current_mode_ocr_results(tmp_path, monkey
     assert results["1"]["ocr_mode"] == "online"
 
 
+def test_missing_after_sales_opinion_uses_concise_requirement():
+    rule = next(
+        item
+        for item in aa.load_rules()["part_1_basic"]["domestic"]
+        if item.get("id") == "A07"
+    )
+    assert rule["requirement"] == "售后服务五星认证或售后服务证明函"
+
+    stage2 = {
+        "decision": "reject",
+        "checklist": [{
+            "id": "A07",
+            "name": "售后服务",
+            "status": "fail",
+            "detail": "缺少售后服务五星认证或厂家出具的售后服务证明函；贸易商/经销商也需提交",
+        }],
+    }
+    cache = {"1": {"supplier": {}, "materials_detail": []}}
+
+    opinion = gen_opinion.build_opinion("1", stage2, {}, cache)
+
+    assert "缺少售后服务五星认证或售后服务证明函" in opinion
+    assert "厂家出具" not in opinion
+    assert "贸易商/经销商也需提交" not in opinion
+
+
 def test_empty_checklist_never_recommends():
     assert "同意" not in gen_opinion.build_opinion("1", {"decision": "manual"}, {}, {})
 

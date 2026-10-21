@@ -84,6 +84,7 @@ def test_legacy_task_state_belongs_to_online_only(tmp_path, monkeypatch):
 
 
 def test_rerun_download_expiry_then_retry_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCR_MODE", "online")
     monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
     monkeypatch.setattr(webapp, "STATE_DB", tmp_path / "state.sqlite3")
     monkeypatch.setattr(webapp, "_task_status", {})

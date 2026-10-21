@@ -63,7 +63,7 @@ part_1_basic:
       order: 6
       check_type: material
       rule: "supplier.get('has_after_sales_cert', False) or supplier.get('has_after_sales_statement', False)"
-      requirement: 售后服务五星认证或厂家出具的售后服务证明函；贸易商/经销商也需提交
+      requirement: 售后服务五星认证或售后服务证明函
       verify: 机构认证证书看过期；供应商自拟承诺书/证明函看落款时间（9/2：落款在3个月内即有效，超过3个月要求重新出具）
       note: 9/5 改造：贸易商/经销商也需要提交售后服务证明（不仅是厂家）。供应商自拟承诺书/证明函落款3个月内即有效
 
