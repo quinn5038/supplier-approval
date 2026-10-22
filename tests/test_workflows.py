@@ -388,6 +388,27 @@ def test_iso_declaration_separates_certification_body_from_holder(
     assert not any("持有人" in issue and "不一致" in issue for issue in result["issues"])
 
 
+def test_iso45001_split_title_keeps_header_body_out_of_holder():
+    text = (
+        "合成联合认证中心\n"
+        "职业健康安全管理体系\n"
+        "认证证书\n"
+        "注册号：06525S01483R0M\n"
+        "合成勘察设计有限公司\n"
+        "统一社会信用代码：91110000SYNTHETIC\n"
+        "GB/T45001-2020/ISO45001:2018\n"
+        "证书有效期：2025年11月28日至2028年11月27日"
+    )
+
+    result = tp.extract(
+        "iso45001", text, {"full_name": "合成勘察设计有限公司"})
+
+    assert result["fields"]["获证组织"] == "合成勘察设计有限公司"
+    assert result["fields"]["获证组织_来源"] == "证书版面推断（无标签）"
+    assert result["fields"]["认证机构"] == "合成联合认证中心"
+    assert result["checks"]["持有人一致"] is True
+
+
 @pytest.mark.parametrize("labels,carrier", [("承运商", True), ("运输商/承运商", True),
     ("经销商/承运商", False), ("服务商/代理商/承运商", False), ("服务商", False)])
 def test_carrier_e2_replaces_a07_only_for_pure_carriers(labels, carrier):

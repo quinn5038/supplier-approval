@@ -941,7 +941,7 @@ def _extract_iso_holder(text):
         following = text[match.end():match.end() + 240]
         next_company = re.search(rf"(?m)^\s*({company})\s*$", following)
         cert_title = re.search(
-            r"(?:质量|环境|职业健康安全)管理体系认证证书|"
+            r"(?:质量|环境|职业健康安全)管理体系\s*认证证书|"
             r"(?:QMS|EMS|OHSMS)\s+CERTIFICATE\s+OF\s+REGISTRATION",
             following, re.I)
         if cert_title and (not next_company or cert_title.start() < next_company.start()):
@@ -968,7 +968,7 @@ def _extract_iso_certification_body(text, holder=None):
         following = text[match.end():match.end() + 240]
         next_company = re.search(rf"(?m)^\s*({company})\s*$", following)
         cert_title = re.search(
-            r"(?:质量|环境|职业健康安全)管理体系认证证书|"
+            r"(?:质量|环境|职业健康安全)管理体系\s*认证证书|"
             r"(?:QMS|EMS|OHSMS)\s+CERTIFICATE\s+OF\s+REGISTRATION",
             following, re.I)
         if cert_title and (not next_company or cert_title.start() < next_company.start()):
