@@ -1,4 +1,5 @@
 import os
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -112,6 +113,7 @@ def test_credentials_not_switched_during_processing(local_client, monkeypatch):
     assert os.environ["SCPMA_COOKIE"] == ""
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI success path")
 def test_credentials_can_be_dpapi_saved_and_cleared(local_client, monkeypatch, tmp_path):
     from web import app as web_app
     target = tmp_path / "platform_credentials.bin"
@@ -139,3 +141,37 @@ def test_credentials_can_be_dpapi_saved_and_cleared(local_client, monkeypatch, t
     cleared = local_client.delete("/api/credentials", headers=headers)
     assert cleared.status_code == 200
     assert not target.exists()
+
+
+def test_unavailable_secure_store_never_falls_back_to_plaintext(
+        local_client, monkeypatch, tmp_path):
+    from web import app as web_app
+    target = tmp_path / "platform_credentials.bin"
+    monkeypatch.setenv("SUPPLIER_CREDENTIAL_FILE", str(target))
+    monkeypatch.setattr(
+        web_app,
+        "save_credentials",
+        Mock(side_effect=web_app.CredentialStoreUnavailable("synthetic unavailable")),
+    )
+    local_client.get("/")
+    headers = {
+        "origin": "http://localhost",
+        "x-csrf-token": local_client.cookies.get("supplier_csrf"),
+    }
+
+    response = local_client.post(
+        "/api/cookie",
+        data={
+            "cookie": "session=memory-only-synthetic",
+            "auth_token": "Bearer memory-only-synthetic",
+            "remember": "true",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 500
+    assert "无法安全保存" in response.json()["error"]
+    assert "memory-only-synthetic" not in response.text
+    assert not target.exists()
+    assert os.environ["SCPMA_COOKIE"] == "session=memory-only-synthetic"
+    assert os.environ["SCPMA_AUTH_TOKEN"] == "Bearer memory-only-synthetic"
