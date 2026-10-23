@@ -1036,13 +1036,15 @@ def build_checklist(supplier, rules_list, materials_detail=None):
             ok, _ = evaluate_rule(rule, supplier)
             if ok:
                 if rid == "C1_01":
-                    entry["detail"] = f"注册资本{supplier.get('registered_capital', 0):g}万元，达到500万元要求"
+                    entry["detail"] = (f"注册资本{supplier.get('registered_capital', 0):g}万元，"
+                                       "符合不小于500万元要求")
                 else:
                     entry["detail"] = "通过"
             else:
                 entry["status"] = "fail"
                 if rid == "C1_01":
-                    entry["detail"] = f"注册资本{supplier.get('registered_capital', 0):g}万元，未达到500万元要求"
+                    entry["detail"] = (f"注册资本{supplier.get('registered_capital', 0):g}万元，"
+                                       "不符合不小于500万元要求")
                 else:
                     entry["detail"] = "未达标"
                 auto_failed_rules.append(rule)
@@ -1224,7 +1226,7 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
                 rid = rule.get("id", "")
                 if rid == "C1_01":
                     cap = supplier.get("registered_capital", 0)
-                    problem_lines.append(f"注册资本{cap:g}万元，未达到500万元要求")
+                    problem_lines.append(f"注册资本{cap:g}万元，不符合不小于500万元要求")
                 else:
                     problem_lines.append(f"{rid} {rule.get('name','')}未达标")
             opinion_parts.append("存在问题：")
@@ -1407,16 +1409,28 @@ def determine_supplier_rules(supplier, cfg):
     scope_has_carrier, scope_has_trade = _scope_roles(business_scope)
     scope_is_carrier = _scope_should_override_to_carrier(
         supplier, scope_has_carrier, scope_has_trade)
+    # 不能把“生产/制造 + 销售”的组合经营范围按互斥分支只归为贸易商。
+    # 旧缓存还可能只有 is_manufacturer 标志而没有完整类型文字；两种情况都
+    # 必须补上厂家规则，否则 C1_01 的注册资本门槛会偶发缺席。
+    scope_has_manufacture = any(
+        keyword in business_scope for keyword in ("生产", "制造", "加工"))
+    type_has_manufacture = any(
+        keyword in sup_type_name for keyword in ("厂家", "生产商", "制造商", "生产"))
+    manufacturer_signal = bool(
+        supplier.get("is_manufacturer") or type_has_manufacture or scope_has_manufacture)
 
     type_rules = []
     type_label = ""
+    carrier_route = False
 
     # 9/5 改造：先用 ICCEC 系统 sup_type_name 匹配，匹配不上时按经营范围交叉验证
     if _pure_carrier(supplier):
+        carrier_route = True
         basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", []) if not is_foreign else []
         type_label = "运输/承运商"
     elif scope_is_carrier and not is_foreign:
+        carrier_route = True
         basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", [])
         type_label = "运输/承运商（经营范围识别）"
@@ -1446,7 +1460,6 @@ def determine_supplier_rules(supplier, cfg):
             type_rules = []
             type_label = "服务商"
 
-    all_rules = basic_rules
     # 9/5 改造：sup_type_name="其他"时按经营范围交叉验证推断类目
     if not type_label and not is_foreign:
         busi = business_scope + " " + (supplier.get("supTypeName") or "")
@@ -1456,6 +1469,18 @@ def determine_supplier_rules(supplier, cfg):
         elif any(k in busi for k in ("生产", "制造", "加工")):
             type_rules = part2.get("domestic_manufacturer", [])
             type_label = "境内厂家（推断自经营范围）"
+
+    # 组合类别按“宁多勿缺”叠加规则。尤其是生产企业经营范围通常同时写有
+    # “销售”，不能因为贸易分支先命中而漏掉 C1_01 注册资本≥500万元。
+    if manufacturer_signal and not is_foreign and not carrier_route:
+        existing_ids = {rule.get("id") for rule in type_rules}
+        manufacturer_rules = part2.get("domestic_manufacturer", [])
+        type_rules = type_rules + [
+            rule for rule in manufacturer_rules if rule.get("id") not in existing_ids]
+        if "厂家" not in type_label:
+            type_label = ((type_label + "/厂家（经营范围补充识别）")
+                          if type_label else "境内厂家（经营范围识别）")
+
     all_rules = basic_rules + type_rules
     return all_rules, f"{region_label}{'·' + type_label if type_label else ''}"
 

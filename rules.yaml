@@ -164,6 +164,7 @@ part_2_by_type:
       name: 生产能力
       check_type: auto
       rule: "supplier.get('registered_capital', 0) >= 500"
+      requirement: 注册资本不小于500万元
       fail_action: reject
       note: 审核位置=基本信息栏注册资本，注册资本≥500万（8/31确认从200万上调）
 

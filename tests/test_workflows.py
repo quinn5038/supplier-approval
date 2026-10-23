@@ -633,6 +633,54 @@ def test_service_supplier_scope_supplements_trader_rules_without_dropping_servic
     assert "服务商" in inferred
 
 
+def test_manufacturer_scope_with_sales_keeps_capital_and_trader_rules():
+    supplier = {
+        "sup_type": "其他",
+        "registered_capital": 800,
+        "busi_scope": "机械设备生产、加工、销售；货物进出口",
+    }
+
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = [rule["id"] for rule in rules]
+
+    assert "C1_01" in ids
+    assert "D1_03" in ids
+    assert ids.count("C1_01") == 1
+    assert "厂家" in type_desc
+
+
+def test_legacy_manufacturer_flag_keeps_capital_rule_without_type_text():
+    rules, type_desc = aa.determine_supplier_rules(
+        {"is_manufacturer": True, "registered_capital": 500}, aa.load_rules())
+
+    assert "C1_01" in {rule["id"] for rule in rules}
+    assert "厂家" in type_desc
+
+
+def test_pure_trader_does_not_gain_manufacturer_capital_rule():
+    rules, _ = aa.determine_supplier_rules({
+        "sup_type": "经销商",
+        "busi_scope": "机械设备销售、批发、进出口",
+    }, aa.load_rules())
+
+    assert "C1_01" not in {rule["id"] for rule in rules}
+
+
+def test_capital_rule_and_report_show_explicit_500_wan_threshold():
+    rule = next(rule for rule in aa.load_rules()["part_2_by_type"]["domestic_manufacturer"]
+                if rule["id"] == "C1_01")
+    supplier = {"registered_capital": 500}
+    checklist, failed, _, _ = aa.build_checklist(supplier, [rule])
+
+    assert not failed
+    assert "符合不小于500万元要求" in checklist[0]["detail"]
+    html = gen_stage2_report.render_supplier(
+        "1", {"decision": "recommend", "checklist": checklist}, {},
+        {"1": {"supplier": supplier, "materials_detail": []}})
+    assert "注册资本不小于500万元" in html
+    assert "注册资本500万元，符合不小于500万元要求" in html
+
+
 @pytest.mark.parametrize("label", ["服务商", "代理商", "其他", ""])
 def test_freight_forwarder_scope_overrides_generic_label_to_carrier(label):
     supplier = {
