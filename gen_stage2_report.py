@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 r"""从 stage2_results.json + textin_results.json 生成供应商材料审查对照表 HTML
 用法: python gen_stage2_report.py [todoId1] [todoId2] ...   (默认全部)
-输出: D:\WorkBuddy\供应商材料审查_YYYYMMDD.html
+输出: output/<online|offline>/供应商材料审查_YYYYMMDD.html
 """
 import datetime
 import html

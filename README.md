@@ -147,7 +147,7 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
 
 **Windows 环境三个关键坑（务必注意）**：
 
-1. **venv 和模型目录建议放独立目录**（如 `D:\WorkBuddy`，本机当前即此位置）——若被部分开发环境的「批量删除守卫」拦截 pip 装包/模型解压，可 `unset CODEBUDDY_TOOL_CALL_ID CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR CODEBUDDY_SAFE_DELETE_BULK_GUARD` 绕过；
+1. **venv 和模型目录建议放独立目录**，避免项目清理或迁移时误删运行环境和模型缓存；
 2. 运行时加 `PROCESSOR_ARCHITECTURE=AMD64`——规避 `platform.machine()` 在部分运行环境下返回空值导致的误判；
 3. 模型首次下载走国内网络**直连**，不要走代理。
 

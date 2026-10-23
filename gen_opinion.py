@@ -7,7 +7,8 @@
     python gen_opinion.py [todoId1] [todoId2] ...      (默认全部)
     python gen_opinion.py --all                        (显式全量)
 输出:
-    D:\\WorkBuddy\\最终审批意见_<todoId>_<公司名>.txt   (每家一个文件，方便复制)
+    output/<online|offline>/最终审批意见_<todoId>_<公司名>.txt
+    （每家一个文件，方便复制）
     控制台同时打印
 """
 import json
