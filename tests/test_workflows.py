@@ -972,15 +972,16 @@ def test_unrelated_file_cannot_pass_as_after_sales_material():
 
 
 def test_clean_delete_reports_size(tmp_path, monkeypatch):
-    monkeypatch.setattr(tp, "FILES_DIR", tmp_path)
-    folder = tmp_path / "1"
-    folder.mkdir()
+    monkeypatch.setattr(tp, "BASE", tmp_path)
+    folder = tmp_path / "files_cache" / "1"
+    folder.mkdir(parents=True)
     file = folder / "synthetic.pdf"
     file.write_bytes(b"fixture")
     old = time.time() - 10 * 86400
     os.utime(file, (old, old))
+    os.utime(folder, (old, old))
     tp.clean_files_cache(days=7, do_delete=True)
-    assert not file.exists()
+    assert not folder.exists()
 
 
 def test_fetch_only_refreshes_existing(tmp_path, monkeypatch):

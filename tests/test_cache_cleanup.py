@@ -47,6 +47,17 @@ def test_expired_list_uses_latest_supplier_activity(tmp_path):
     assert list_expired_supplier_caches(tmp_path, now=now) == []
 
 
+def test_expired_list_reads_supplier_name_from_mode_specific_stage2(tmp_path):
+    now = _old_cache(tmp_path, name="")
+    _write_json(tmp_path / "stage2_results.offline.json", {
+        "old-1": {"name": "离线结果供应商"},
+    })
+
+    rows = list_expired_supplier_caches(tmp_path, now=now)
+
+    assert rows[0]["name"] == "离线结果供应商"
+
+
 def test_clean_supplier_removes_only_related_cache(tmp_path):
     now = _old_cache(tmp_path)
     desens = tmp_path / "files_cache_desens" / "old-1"
@@ -55,7 +66,15 @@ def test_clean_supplier_removes_only_related_cache(tmp_path):
     os.utime(desens / "material.pdf.md", (now - 20 * DAY, now - 20 * DAY))
     os.utime(desens, (now - 20 * DAY, now - 20 * DAY))
 
-    for filename in ("textin_results.json", "stage2_results.json", "qcc_results.json"):
+    for filename in (
+        "textin_results.json",
+        "textin_results.online.json",
+        "textin_results.offline.json",
+        "stage2_results.json",
+        "stage2_results.online.json",
+        "stage2_results.offline.json",
+        "qcc_results.json",
+    ):
         _write_json(tmp_path / filename, {"old-1": {"result": True}, "keep-2": {"result": True}})
     with (tmp_path / "cache_v4.json").open("r", encoding="utf-8") as stream:
         cache = json.load(stream)
@@ -75,7 +94,16 @@ def test_clean_supplier_removes_only_related_cache(tmp_path):
     assert result["name"] == "旧供应商"
     assert not (tmp_path / "files_cache" / "old-1").exists()
     assert not (tmp_path / "files_cache_desens" / "old-1").exists()
-    for filename in ("cache_v4.json", "textin_results.json", "stage2_results.json", "qcc_results.json"):
+    for filename in (
+        "cache_v4.json",
+        "textin_results.json",
+        "textin_results.online.json",
+        "textin_results.offline.json",
+        "stage2_results.json",
+        "stage2_results.online.json",
+        "stage2_results.offline.json",
+        "qcc_results.json",
+    ):
         assert "old-1" not in json.loads((tmp_path / filename).read_text(encoding="utf-8"))
         assert "keep-2" in json.loads((tmp_path / filename).read_text(encoding="utf-8"))
     progress = (tmp_path / "progress_v4.jsonl").read_text(encoding="utf-8")

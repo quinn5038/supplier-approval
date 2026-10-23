@@ -96,7 +96,16 @@ def list_expired_supplier_caches(base_dir: Path, *, days: int = RETENTION_DAYS,
     now = time.time() if now is None else now
     cutoff = now - days * 86400
     cache = _read_mapping(base_dir / "cache_v4.json")
-    stage2 = _read_mapping(base_dir / "stage2_results.json")
+    # The un-suffixed file is a legacy online result.  Unified deployments
+    # write one stage-two file per OCR backend, so cleanup inventory must not
+    # rely on the legacy file for the supplier display name.
+    stage2 = {}
+    for filename in (
+        "stage2_results.json",
+        "stage2_results.online.json",
+        "stage2_results.offline.json",
+    ):
+        stage2.update(_read_mapping(base_dir / filename))
     todo_ids = set(cache)
     for dirname in _CACHE_DIRS:
         root = base_dir / dirname

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""从 stage2_results.json + textin_results.json + cache_v4.json 生成
+"""从当前 OCR 模式的 stage2/textin 结果及 cache_v4.json 生成
 可直接粘贴进 ICCEC 审批框的最终意见文本。
 
 用法:

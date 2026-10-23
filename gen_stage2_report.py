@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""从 stage2_results.json + textin_results.json 生成供应商材料审查对照表 HTML
+r"""从当前 OCR 模式的 stage2/textin 结果生成供应商材料审查对照表 HTML
 用法: python gen_stage2_report.py [todoId1] [todoId2] ...   (默认全部)
 输出: output/<online|offline>/供应商材料审查_YYYYMMDD.html
 """

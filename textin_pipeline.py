@@ -78,7 +78,7 @@ DOC_TYPES = [
 
 # 文件名关键词 → 材料类型（files_cache 手动放置时分类用）
 # 2026-09-04 保密合规改造：
-# - legal_person_id / financial_report 的 extract_* 函数已废弃（直接返回空 dict）
+# - 身份证不调用在线 OCR；financial_report 提取器只返回无核验项的兼容占位结果
 # - 上传身份证/财报时走 desensitize_dir 脱敏（人像页打码+财报签字/银行账号打码）
 # - 合规边界：
 #   * "公开披露信息"（营业执照、ISO、税务、企查查可查的财报）可发给 AI 处理
@@ -888,7 +888,7 @@ def extract_financial_report(text):
       - 现金流量表 → 经营性现金流
     企查查无数据（非上市公司常见）→ 转人工要求供应商补交。
 
-    函数保留为兼容旧调用，实际被 extract() 调用时直接返回 None。
+    函数保留为兼容旧调用，实际被 extract() 调用时返回不含核验项的占位结果。
     详见 docs/保密合规改造方案.md
     """
     log.warning("[DEPRECATED] extract_financial_report 已废弃——按保密合规要求 "
@@ -1742,62 +1742,30 @@ def run_parse(only_todo=None, *, offline=False):
 
 
 # ============================================================
-# 清理 files_cache/（9/2 确认：审批一周后可清理原始文件）
+# 清理历史供应商缓存（兼容旧命令，统一复用 WebUI 清理实现）
 # ============================================================
-def clean_files_cache(days=7, do_delete=False):
-    """列出 files_cache/ 下超过 N 天的 todoId 目录，--go 才真删
-    策略：删除原始文件（jpg/png/pdf），保留 .md 缓存（重跑 extract 不耗 TextIn 页数）
-    和 textin_results.json（结构化结果）
-    绝不动个人/系统目录（遵守文件操作授权）"""
-    if not FILES_DIR.exists():
-        print("files_cache/ 还不存在，无内容可清。")
-        return
-    if days < 0:
-        raise ValueError("days 必须非负")
-    import time
-    threshold = time.time() - days * 86400
-    targets = []
-    for tid_dir in sorted(FILES_DIR.iterdir()):
-        if not tid_dir.is_dir():
-            continue
-        # 用目录 mtime（最近文件下载时间）判断年龄
-        mtime = max((f.stat().st_mtime for f in tid_dir.iterdir() if f.is_file()),
-                    default=tid_dir.stat().st_mtime)
-        age_days = (time.time() - mtime) / 86400
-        files = [f for f in tid_dir.iterdir() if f.is_file()]
-        raw = [f for f in files if not f.name.endswith(".md")]
-        cached = [f for f in files if f.name.endswith(".md")]
-        raw_size = sum(f.stat().st_size for f in raw) / 1024 / 1024
-        if mtime < threshold:
-            targets.append((tid_dir.name, age_days, raw_size, raw, cached))
+def clean_files_cache(days=14, do_delete=False):
+    """兼容旧 ``clean`` 命令，统一清理原件、脱敏件和双后端结果。"""
+    from storage_cleanup import clean_supplier_cache, list_expired_supplier_caches
+
+    targets = list_expired_supplier_caches(BASE, days=days)
     if not targets:
-        print(f"files_cache/ 下没有超过 {days} 天的待办，无需清理。")
+        print(f"没有超过 {days} 天的供应商缓存，无需清理。")
         return
-    print(f"files_cache/ 下超过 {days} 天的待办目录（{len(targets)} 个）:\n")
-    total_raw_size = 0
-    for name, age, size, raw, cached in targets:
-        total_raw_size += size
-        print(f"  {name}  龄{age:.0f}天  原始文件{len(raw)}个({size:.1f}MB)  "
-              f"缓存.md{len(cached)}个")
-    print(f"\n合计原始文件 {total_raw_size:.1f}MB（清理后释放，.md 缓存保留）")
+    print(f"超过 {days} 天的供应商缓存（{len(targets)} 个）：\n")
+    for row in targets:
+        size_mb = row["sizeBytes"] / 1024 / 1024
+        print(f"  {row['todoId']}  {row['name']}  {row['ageDays']}天  "
+              f"{row['fileCount']}个文件({size_mb:.1f}MB)")
     if not do_delete:
         print("\n→ 预演模式（未删）。确认要清理时执行：")
         print(f"   python textin_pipeline.py clean --go --days {days}")
         return
-    # 二次确认：列出每个待办 → 删除
     print("\n开始删除...")
-    deleted_files = deleted_bytes = 0
-    for name, age, size, raw, cached in targets:
-        for f in raw:
-            size_bytes = f.stat().st_size
-            if not f.resolve().is_relative_to(FILES_DIR.resolve()):
-                raise ValueError("清理路径越界")
-            f.unlink()
-            deleted_files += 1
-            deleted_bytes += size_bytes
-        print(f"  {name}: 删 {len(raw)} 个原始文件，保留 {len(cached)} 个 .md 缓存")
-    print(f"\n清理完成：删除 {deleted_files} 个原始文件，"
-          f"释放 {deleted_bytes/1024/1024:.1f}MB。")
+    for row in targets:
+        clean_supplier_cache(BASE, row["todoId"], days=days)
+        print(f"  {row['todoId']}: 已清理原件、脱敏件和在线/离线结构化结果")
+    print(f"\n清理完成：共清理 {len(targets)} 家供应商缓存。")
 
 
 # ============================================================
@@ -2012,9 +1980,9 @@ if __name__ == "__main__":
     elif cmd == "extract":
         run_parse(sys.argv[2] if len(sys.argv) > 2 else None, offline=True)
     elif cmd == "clean":
-        # 用 argparse 风格：--go 确认 / --days N 自定义天数（默认 7）
+        # 用 argparse 风格：--go 确认 / --days N 自定义天数（默认 14）
         do_delete = "--go" in sys.argv
-        days = 7
+        days = 14
         if "--days" in sys.argv:
             i = sys.argv.index("--days")
             if i + 1 < len(sys.argv):

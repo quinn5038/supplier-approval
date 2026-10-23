@@ -1587,8 +1587,8 @@ def run():
     except SessionExpiredError as e:
         log.error(f"[登录过期] {e}")
         log.error("修复步骤：浏览器打开 scpma.iccec.cn 并确认已登录 → F12 → Network → "
-                  "任选一个请求 → 复制请求头里的 Cookie 和 APP_TOKEN → 更新 .env 中的 "
-                  "SCPMA_COOKIE / APP_TOKEN → 重新运行")
+                  "任选一个请求 → 复制请求头里的 Cookie 和 Authorization → 在 WebUI 更新平台凭证，"
+                  "或更新 .env 中的 SCPMA_COOKIE / SCPMA_AUTH_TOKEN → 重新运行")
         sys.exit(3)   # 登录过期专用退出码，便于自动化任务识别并提醒更新 cookie
     todo_list = todo_result.get("data", {}).get("rows", [])
     if not isinstance(todo_list, list):
@@ -1925,7 +1925,8 @@ def run():
         except SessionExpiredError as e:
             log.error(f"[登录过期] {e}")
             log.error("处理中途登录态失效，本条未完成（异常不记进度，续跑会自动重试）。"
-                      "请更新 .env 中的 SCPMA_COOKIE / APP_TOKEN 后重新运行。")
+                      "请在 WebUI 更新 Cookie / Authorization，或更新 .env 中的 "
+                      "SCPMA_COOKIE / SCPMA_AUTH_TOKEN 后重新运行。")
             session_expired = True
             break
         except WafBlockedError:

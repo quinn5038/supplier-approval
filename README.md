@@ -2,7 +2,7 @@
 
 > 当前版本采用单主分支、双 OCR 后端：可在 WebUI 首页切换 TextIn 在线识别或 PaddleOCR 本地识别。下载材料缓存共用，OCR 中间缓存、结构化结果和审查报告按 `online/offline` 分开保存，互不覆盖；身份证始终只在本机脱敏和识别。
 
-> 离线后端的部署、模型和验证限制见 [离线OCR分支说明](docs/离线OCR分支说明.md)。切换后端时系统会阻止正在运行的审批任务，避免同一家供应商的结果错位。
+> 双后端的隔离方式、离线部署和验证限制见 [OCR 双后端说明](docs/OCR双后端说明.md)。切换后端时系统会阻止正在运行的审批任务，避免同一家供应商的结果错位。
 
 > **在线体验**：本系统支持通过链接直接在线体验（无需配置环境或下载代码），但因涉及敏感数据，体验链接未在公开仓库中发布。如需更快体验，可在交建通中联系我获取链接。
 
@@ -10,7 +10,7 @@
 
 本系统是面向集团招采平台的供应商智能辅助审批系统，把「拉取待办 → 下载资质材料 → 离线/在线 OCR 识别 → 规则引擎判定 → 生成审查报告」全流程自动化，将人工逐项核对收敛为「一键后台审批 + 人工复核结论」。
 
-本系统实时接入集团招采平台，已跑通所有待办审批。它针对供应商准入审批「效率低、合规风险高、标准难统一」三大痛点，通过「规则引擎自动判定 + 离线/在线 OCR 识别证件 + 人工复核结论」的方式，把单家审批从十几分钟压缩到 1 分钟以内，同时做到身份证敏感信息本地离线脱敏、凭证与业务数据不入库、判定标准可配置可审计。详细的问题分析、解决方案与价值说明见《竞赛提交说明.md》。
+本系统实时接入集团招采平台，已跑通所有待办审批。它针对供应商准入审批「效率低、合规风险高、标准难统一」三大痛点，通过「规则引擎自动判定 + 离线/在线 OCR 识别证件 + 人工复核结论」的方式，把单家审批从十几分钟压缩到 1 分钟以内，同时做到身份证敏感信息本地离线脱敏、凭证与业务数据不入库、判定标准可配置可审计。详细的问题分析、解决方案与价值说明见 [竞赛提交说明](竞赛提交说明.md)。
 
 ## 二、核心特性
 
@@ -36,7 +36,7 @@
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐    │
 │  │ auto_approve │→ │ textin_      │→ │ gen_opinion /     │   │
 │  │   .py        │  │ pipeline.py  │  │ gen_stage2_report │   │
-│  │ (拉取+审批)   │  │ (OCR 识别)    │  │   .py (意见生成)   │   │
+│  │ (拉取+审批)   │  │ (双后端调度)   │  │   .py (意见生成)   │   │
 │  └──────┬───────┘  └──────────────┘  └──────────────────┘    │
 │         │                                                    │
 │         │ 读取规则                                            │
@@ -48,16 +48,18 @@
               ┌────────────▼────────────┐
               │  外部服务                 │
               │  · scpma.iccec.cn (审批) │
-              │  · api.textin.com (OCR)  │
+              │  · api.textin.com (在线模式) │
               └─────────────────────────┘
 ```
 
 ## 四、文件结构
 
 ```
-supplier_approval_starter/
+supplier-approval/
 ├── auto_approve.py          # 主程序：拉取待办 → 下载材料 → 调用 OCR → 触发判定
-├── textin_pipeline.py       # OCR 处理：调用 TextIn 识别证件并抽取结构化字段
+├── textin_pipeline.py       # OCR 调度：按当前模式调用 TextIn/PaddleOCR 并抽取结构化字段
+├── local_ocr.py             # PaddleOCR 离线材料识别进程
+├── ocr_runtime.py           # OCR 模式选择与结果路径隔离
 ├── gen_opinion.py           # 生成最终审批意见纯文本（可直接粘贴进 ICCEC 审批框）
 ├── gen_stage2_report.py     # 生成结构化 HTML 审查报告（含审批意见表格）
 ├── rules.yaml               # 准入规则配置（核心可复用资产，改标准只改这里）
@@ -74,14 +76,14 @@ supplier_approval_starter/
 
 ### 5.1 环境准备
 
-- Windows 10/11 x64 首次使用可从仓库 `dist/SupplierApproval-Setup.exe` 下载并联网安装 Python、项目依赖及 PaddleOCR；安装后双击 `start_webui.bat`，无平台凭证时可用 `start_demo.bat` 查看合成演示。开发者也可通过 `python installer/build_installer.py` 重新构建 EXE
+- Windows 10/11 x64 可运行 `setup.ps1` 安装 Python、项目依赖及 PaddleOCR；安装后双击 `start_webui.bat`，无平台凭证时可用 `start_demo.bat` 查看合成演示。仓库中的 `dist/SupplierApproval-Setup.exe` 是合并双 OCR 后端前的历史安装器，不应作为当前源码的安装包；需要 EXE 时请运行 `python installer/build_installer.py` 重新构建
 - 手动安装需 Python 3.12；pip 依赖：`pip install -r requirements.txt`
 
 ### 5.2 配置凭证
 
 1. 复制 `.env.example` 为 `.env`，按需填写 TextIn OCR 的 APP_ID 和 SECRET_CODE（textin.com 工作台获取）
 2. 浏览器登录公司审批页 scpma.iccec.cn → F12 → Network，从请求头复制 Authorization 和 Cookie
-3. 在 Web UI 右上角点击"更新平台凭证"并粘贴上述两项；仅在当前服务进程内有效，关闭服务后需重新粘贴
+3. 在 Web UI 右上角点击"更新平台凭证"并粘贴上述两项；默认勾选“安全记住本机”，凭证经 Windows DPAPI 加密后保存在当前 Windows 用户目录，重启服务会自动读取；取消勾选时仅在当前进程内有效
 4. 待办或详情无法读取时，可在弹窗的"高级配置"中按需填写 APP_TOKEN、AGENT_ID；已有 `.env` 配置仍兼容，CODE 当前未参与请求
 
 ### 5.3 命令行运行（批量处理）
@@ -123,7 +125,7 @@ PaddleOCR 环境未就绪时：身份证转人工核验并写明失败原因。*
 **依赖环境（独立于主项目，需 Python 3.11 + PaddleOCR 2.x）**：
 
 ```bash
-# 1. 装 Python 3.11（PaddleOCR 2.9.1 不支持 Python 3.13，两者不可共存）
+# 1. 装 Python 3.11（PaddleOCR 2.9.1 不使用主项目环境，需独立 venv）
 winget install Python.Python.3.11
 
 # 2. 建独立 venv（与主项目 3.13 隔离）
@@ -139,9 +141,10 @@ idcard_env\Scripts\python.exe -m pip install opencv-python pymupdf pillow
 
 **首次运行自动下载中文模型**（det/rec/cls 三个 PP-OCRv4 模型，约 100MB），并直接对身份证目录批量打码：
 
-```bash
-PROCESSOR_ARCHITECTURE=AMD64 PYTHONIOENCODING=utf-8 \
-idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
+```powershell
+$env:PROCESSOR_ARCHITECTURE = "AMD64"
+$env:PYTHONIOENCODING = "utf-8"
+& ".\idcard_env\Scripts\python.exe" ".\offline_desens\idcard_masker.py" <输入目录> <输出目录> `
   --output-mode both --model-dir <模型缓存目录>
 ```
 
@@ -166,7 +169,7 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
       ↓
 2. 下载材料        对每家供应商下载营业执照/身份证/财报/资质证书等附件
       ↓
-3. OCR 识别        textin_pipeline.py 调用 TextIn 识别证件，抽取关键字段
+3. OCR 识别        textin_pipeline.py 按 WebUI 当前模式调用 TextIn 或本地 PaddleOCR
       ↓
 4. 规则判定        按 rules.yaml 中的准入标准逐项判定（通过/退回/转人工）
       ↓
@@ -190,7 +193,7 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
 ## 八、安全与合规
 
 - **DRY_RUN 安全开关**：默认 `true`；Web 流水线始终关闭真实回写，命令行真实提交还需额外开关及人工确认
-- **凭证隔离**：Web UI 粘贴的凭证只保留在当前进程内存中，不写 `.env`；已有 `.env` 仍兼容读取，且已被 `.gitignore` 排除
+- **凭证隔离**：Web UI 可将凭证经 Windows DPAPI 加密后保存到当前用户的 `%LOCALAPPDATA%`，不写项目目录或 `.env`，也可取消勾选仅存当前进程；已有 `.env` 仍兼容读取，且已被 `.gitignore` 排除
 - **敏感数据保护**：供应商缓存、OCR 结果、企查查数据均被 `.gitignore` 排除，不提交到仓库
 - **操作日志**：所有审批动作写日志 `approval_YYYYMMDD.log`，可追溯谁批的、依据哪条、几点几分
 - **保守决策**：OCR 判定的 fail 归入"转人工"而非直接 reject，避免 OCR 误判导致错杀
@@ -201,7 +204,7 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
 |----|------|
 | Web 框架 | FastAPI + Uvicorn |
 | 模板引擎 | Jinja2 |
-| OCR 服务 | TextIn（api.textin.com） |
+| OCR 后端 | TextIn 在线 OCR（api.textin.com）/ PaddleOCR 本地 OCR |
 | 规则引擎 | 自研沙箱求值器（eval.py） |
 | 配置 | YAML（rules.yaml） + .env |
 | HTTP 客户端 | requests |
@@ -222,7 +225,7 @@ idcard_env\Scripts\python.exe idcard_masker.py <输入目录> <输出目录> \
 ## 十一、已知限制与后续规划
 
 - 当前依赖浏览器抓包获取 Cookie，未来希望对接公司 IT 提供的官方 API（已提交申请，等待回复）
-- 财务报告抽取器目前覆盖年度与现金流，资产负债率/流动比率抽取待完善
-- 企查查数据通过外部连接器获取，未来考虑改为独立 API 调用避免依赖
+- 财务报告按保密合规不做 OCR 抽取；A08 优先使用企查查公开财务数据，无公开数据时转人工核验
+- 企查查自动核验依赖获授权的 API 凭证；未配置或接口无数据时保守转人工，不影响其他规则执行
 - 商业信誉专项核验（失信被执行人、被执行人、限制消费令、经营异常、严重违法等）目前因接入企查查免费版接口，尚无法实现自动化核验；该专项数据接口已向集团提交接入申请，当前处于审批阶段，审批通过后即可在程序中实现上述信息的自动化核验
-- Web UI 第一版仅生成审查报告，不自动回写 ICCEC；后续版本将加"一键回写"按钮
+- Web UI 当前只生成审查报告，不自动回写 ICCEC；如未来增加回写能力，仍须保留显式确认与审计记录
