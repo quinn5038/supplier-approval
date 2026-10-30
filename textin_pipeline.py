@@ -352,6 +352,8 @@ def _extract_business_license_legal_person(text):
     )
     if noise_suffix:
         cleaned = noise_suffix.group("name")
+    if _norm(cleaned) in {"类名", "名类", "类型", "名称", "类", "名"}:
+        return None
     return cleaned or None
 
 
@@ -525,6 +527,15 @@ def extract_business_license(text, supplier):
     fields["统一社会信用代码"] = code.upper() if code else None
     fields["名称"] = _extract_business_license_name(t)
     fields["法定代表人"] = _extract_business_license_legal_person(t)
+    # 90°侧放或双栏错序时，标签列可能先被读成“法定代表人 类 名”，而真正
+    # 姓名落在随后的相邻文本。仅当标签值已判定为噪声，且系统法人姓名确实
+    # 出现在该标签后的有限窗口内，才恢复 OCR 已看到的姓名；绝不凭系统值填空。
+    if not fields["法定代表人"]:
+        expected_legal = str(supplier.get("legal_person") or "").strip()
+        marker = re.search(r"法定代表人[\s\S]{0,180}", t)
+        if (expected_legal and marker
+                and _norm(expected_legal) in _norm(marker.group(0))):
+            fields["法定代表人"] = expected_legal
     # 单独保留住所，既便于报告核对，也确保同行排版
     # 「法定代表人 XXX 住 所 XXX」中的住所不会并入法人姓名。
     fields["住所"] = _grab(t, ["住所"], r"[^\n:：]{2,120}?")
@@ -1620,8 +1631,13 @@ def run_parse(only_todo=None, *, offline=False):
     if pending and not offline and mode == "offline":
         try:
             local_results = local_ocr.parse_files(list(dict.fromkeys(pending)))
-        except Exception:
-            local_results = {str(path.resolve()): {"error": "本地 OCR 环境或工作进程失败，请检查安装与模型"} for path in pending}
+        except Exception as exc:
+            log.exception("本地 OCR 批处理失败")
+            reason = str(exc).strip() or "本地 OCR 环境或工作进程失败，请检查安装与模型"
+            local_results = {str(path.resolve()): {
+                "error": reason,
+                "error_code": "local_ocr_process_failed",
+            } for path in pending}
 
     n_ok = n_fail = 0
     for todo_id, fpath, doc_type in tasks:
@@ -1694,7 +1710,15 @@ def run_parse(only_todo=None, *, offline=False):
                 if mode == "offline":
                     parsed = local_results.get(str(fpath.resolve()), {})
                     if parsed.get("error") or not parsed.get("markdown"):
-                        raise RuntimeError(parsed.get("error") or "本地 OCR 未返回结果")
+                        reason = parsed.get("error") or "本地 OCR 未返回结果，已转人工核验"
+                        print(f"  [转人工] {fpath.name}: {reason}")
+                        store_result(todo_id, doc_type, {
+                            "file": fpath.name,
+                            "error": parsed.get("error_code") or "local_ocr_no_result",
+                            "issues": [reason],
+                        })
+                        n_fail += 1
+                        continue
                     md, detail = parsed["markdown"], parsed.get("detail", [])
                 else:
                     md, detail = parse_file_textin(fpath, doc_type)

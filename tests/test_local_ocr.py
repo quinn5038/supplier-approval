@@ -1,6 +1,7 @@
 import json
 from unittest.mock import Mock
 
+import cv2
 import numpy as np
 import pymupdf
 import pytest
@@ -12,12 +13,21 @@ from offline_desens.material_ocr import (
     deny_network,
     ordered_lines,
     parse_document,
+    read_with_orientation_retry,
     read_with_red_seal_retry,
 )
 
 
 def item(text, x, y, confidence=.99):
     return OcrItem(np.array([[x, y], [x + 80, y], [x + 80, y + 20], [x, y + 20]], np.float32), text, confidence)
+
+
+def vertical_item(text, x, y, confidence=.99):
+    return OcrItem(
+        np.array([[x, y], [x + 20, y], [x + 20, y + 80], [x, y + 80]], np.float32),
+        text,
+        confidence,
+    )
 
 
 def test_reading_order_and_coordinates():
@@ -27,6 +37,36 @@ def test_reading_order_and_coordinates():
     assert all(row["page_id"] == 2 for row in detail)
     assert detail[0]["confidence"] == .99
     assert len(detail[0]["position"]) == 4
+
+
+def test_sideways_business_license_selects_upright_page_orientation():
+    image = np.full((240, 120, 3), 255, dtype=np.uint8)
+    original = [vertical_item("营业执照", 10, 20), vertical_item("统一社会信用代码", 40, 20)]
+    clockwise_upside_down = [item("营业执照", 10, 85), item("登记机关", 10, 5)]
+    counterclockwise_upright = [
+        item("营业执照", 10, 5), item("统一社会信用代码", 10, 30),
+        item("法定代表人", 10, 55), item("登记机关", 10, 85),
+    ]
+    ocr = Mock()
+    ocr.read.side_effect = [original, clockwise_upside_down, counterclockwise_upright]
+
+    oriented, result = read_with_orientation_retry(image, ocr)
+
+    assert result is counterclockwise_upright
+    assert np.array_equal(oriented, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE))
+    assert ocr.read.call_count == 3
+
+
+def test_non_license_portrait_does_not_trigger_page_rotation():
+    image = np.full((240, 120, 3), 255, dtype=np.uint8)
+    original = [vertical_item("普通说明文件", 10, 20)]
+    ocr = Mock(read=Mock(return_value=original))
+
+    oriented, result = read_with_orientation_retry(image, ocr)
+
+    assert oriented is image
+    assert result is original
+    ocr.read.assert_called_once_with(image)
 
 
 def test_red_seal_retry_is_used_only_when_it_recovers_more_complete_dates():
@@ -80,6 +120,19 @@ def test_empty_page_and_unsupported_format_are_manual(tmp_path):
         deny_network()
 
 
+def test_local_adapter_routes_unsupported_format_to_manual_without_worker(tmp_path, monkeypatch):
+    import desensitize
+    source = tmp_path / "说明.docx"
+    source.write_bytes(b"synthetic")
+    monkeypatch.setattr(desensitize, "_PADDLE_PYTHON", str(tmp_path / "missing-python.exe"))
+
+    result = local_ocr.parse_files([source])[str(source.resolve())]
+
+    assert result["error_code"] == "unsupported_format"
+    assert "DOCX" in result["error"]
+    assert "转人工" in result["error"]
+
+
 def test_model_change_invalidates_identity(tmp_path, monkeypatch):
     import desensitize
     monkeypatch.setattr(desensitize, "_PADDLE_MODEL_DIR", str(tmp_path))
@@ -127,3 +180,33 @@ def test_pipeline_local_batch_ignores_cloud_cache_and_low_confidence(tmp_path, m
     cloud.assert_not_called()
     with pytest.raises(PermissionError, match="禁用 TextIn"):
         tp.parse_file_textin(staged / "a.pdf", "iso9001")
+
+
+def test_pipeline_preserves_local_ocr_failure_reason_instead_of_runtimeerror(tmp_path, monkeypatch):
+    import desensitize
+    monkeypatch.setenv("OCR_MODE", "offline")
+    monkeypatch.setattr(tp, "BASE", tmp_path)
+    monkeypatch.setattr(tp, "FILES_DIR", tmp_path / "raw")
+    monkeypatch.setattr(tp, "FILES_DESENS_DIR", tmp_path / "staged")
+    monkeypatch.setattr(tp, "RESULTS_FILE", tmp_path / "results.json")
+    monkeypatch.setattr(desensitize, "__file__", str(tmp_path / "desensitize.py"))
+    monkeypatch.setattr(desensitize, "desensitize_id_cards_with_paddle", lambda *args: {})
+    raw = tp.FILES_DIR / "1"
+    raw.mkdir(parents=True)
+    (raw / "说明.docx").write_bytes(b"synthetic")
+    (tmp_path / "cache_v4.json").write_text(json.dumps({"1": {"materials_detail": [{
+        "fileName": "说明.docx", "types": ["production_license"],
+    }]}}), encoding="utf-8")
+    monkeypatch.setattr(local_ocr, "parse_files", lambda paths: {
+        str(path.resolve()): {
+            "error": "离线 OCR 暂不支持 DOCX 格式，已转人工核验",
+            "error_code": "unsupported_format",
+        } for path in paths
+    })
+
+    tp.run_parse("1")
+
+    result = json.loads(tp.RESULTS_FILE.read_text(encoding="utf-8"))["1"]["production_license"]
+    assert result["documents"][0]["error"] == "unsupported_format"
+    assert "DOCX" in result["documents"][0]["issues"][0]
+    assert "RuntimeError" not in json.dumps(result, ensure_ascii=False)

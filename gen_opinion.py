@@ -244,9 +244,10 @@ def build_opinion(tid, s2, textin, cache):
             other_fails.append((cid, cname, detail))
 
     # 财报是否缺失只看上传材料，不依赖企查查文案；公开数据不能替代必交财报。
-    from financial_data import financial_report_presence
-    submitted = financial_report_presence(supplier, cache_entry.get("materials_detail"))
-    a08_needs_financial = submitted is False and any(
+    from financial_data import financial_report_title_check
+    financial_title = financial_report_title_check(
+        supplier, cache_entry.get("materials_detail"))
+    a08_needs_financial = financial_title["status"] in ("missing", "mismatch") and any(
         c.get("id") == "A08" and c.get("status") != "skip" for c in checklist)
     financial_missing = ("缺少经审计的上年度财报（须为上一年度，"
                          "须含资产负债表、利润表、现金流量表及审计意见）")
@@ -307,6 +308,8 @@ def build_opinion(tid, s2, textin, cache):
         # Explicit failed qualifications belong to the return checklist, not a
         # clipped secondary note where expiry can disappear behind holder issues.
         for cid, cname, desc in other_fails:
+            if cid == "A08" and a08_needs_financial:
+                continue
             supplement_items.append(f"[{cid}]{cname}：{desc}；请整改并提交符合要求的材料")
         # 去重保序
         seen = set()

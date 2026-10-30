@@ -2,22 +2,73 @@
 import re
 from datetime import date
 
+_FINANCIAL_TITLE_PATTERN = re.compile(
+    r"财务报表|财务报告|财报|审[计记]报告|资产负债表|利润表|现金流量表")
+_TITLE_YEAR_PATTERN = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
+
+
+def _financial_material_metadata(item):
+    """Return ``(is_financial, title_text)`` using upload metadata only."""
+    if isinstance(item, dict):
+        name = item.get("fileName") or ""
+        position = item.get("typeName") or item.get("fileinfoTypeName") or ""
+        types = item.get("types") or []
+        if isinstance(types, str):
+            types = [types]
+        title_text = " ".join(str(item.get(key) or "") for key in (
+            "fileName", "title", "fileTitle", "fileDesc", "desc", "fileSumm", "remark"))
+    else:
+        name = item[0] if len(item) > 0 else ""
+        position = item[1] if len(item) > 1 else ""
+        types = item[3] if len(item) > 3 else []
+        title_text = str(name or "")
+    is_financial = ("financial_report" in types or bool(
+        _FINANCIAL_TITLE_PATTERN.search(str(name) + " " + str(position))))
+    return is_financial, title_text
+
+
+def financial_report_title_check(supplier, materials_detail=None, *, current_year=None):
+    """Check whether an uploaded financial-report title names the prior year.
+
+    ``matched`` means at least one financial-report title explicitly contains the
+    required prior year. ``mismatch`` means report material exists and its title
+    contains year numbers, but none is the required year. A title without any
+    four-digit year remains ``unknown`` and must be reviewed manually.
+    """
+    required_year = int(current_year or date.today().year) - 1
+    if materials_detail is None:
+        submitted = financial_report_presence(supplier)
+        status = "missing" if submitted is False else "unknown"
+        return {"status": status,
+                "submitted": submitted, "required_year": required_year, "title_years": []}
+
+    submitted = False
+    title_years = set()
+    for item in materials_detail:
+        is_financial, title_text = _financial_material_metadata(item)
+        if not is_financial:
+            continue
+        submitted = True
+        title_years.update(int(value) for value in _TITLE_YEAR_PATTERN.findall(title_text))
+
+    if not submitted:
+        status = "missing"
+    elif required_year in title_years:
+        status = "matched"
+    elif title_years:
+        status = "mismatch"
+    else:
+        status = "unknown"
+    return {"status": status, "submitted": submitted, "required_year": required_year,
+            "title_years": sorted(title_years)}
+
 
 def financial_report_presence(supplier, materials_detail=None):
     """Return whether a financial report was uploaded; ``None`` means unknown."""
     if materials_detail is not None:
         for item in materials_detail:
-            if isinstance(item, dict):
-                name = item.get("fileName") or ""
-                position = item.get("typeName") or ""
-                types = item.get("types") or []
-            else:
-                name, position, types = item[0], item[1], item[3]
-            if not name:
-                continue
-            if "financial_report" in types or re.search(
-                    r"财务报表|财务报告|财报|审[计记]报告|资产负债表|利润表|现金流量表",
-                    str(name) + " " + str(position)):
+            is_financial, _ = _financial_material_metadata(item)
+            if is_financial:
                 return True
         return False
     value = supplier.get("has_financial_report")

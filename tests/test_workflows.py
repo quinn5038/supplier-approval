@@ -12,7 +12,11 @@ import gen_opinion
 import gen_stage2_report
 import textin_pipeline as tp
 from eval import safe_eval_rule
-from financial_data import assess_financial, financial_report_presence
+from financial_data import (
+    assess_financial,
+    financial_report_presence,
+    financial_report_title_check,
+)
 from material_policy import file_types, hydrate_iso_cache, is_public_material
 
 
@@ -61,6 +65,61 @@ def test_a08_uploaded_can_remain_in_other_review_section():
         "1", {"decision": "reject", "checklist": checklist}, {}, cache)
     assert "缺少经审计的上年度财报" not in opinion.splitlines()[0]
     assert "另需整改/核实：[A08]资金财务状况" in opinion
+
+
+@pytest.mark.parametrize("name,status,years", [
+    ("2025年度审计报告.pdf", "matched", [2025]),
+    ("2024年财报.pdf", "mismatch", [2024]),
+    ("经审计财务报告.pdf", "unknown", []),
+])
+def test_a08_title_year_check(name, status, years):
+    result = financial_report_title_check({}, [{
+        "fileName": name, "types": ["financial_report"],
+    }], current_year=2026)
+    assert result == {"status": status, "submitted": True,
+                      "required_year": 2025, "title_years": years}
+
+
+def test_a08_old_title_year_is_returned_as_missing_prior_year_report():
+    rule = next(r for r in aa.load_rules()["part_1_basic"]["domestic"]
+                if r["id"] == "A08")
+    materials = [{"fileName": "2024年财报.pdf", "types": ["financial_report"]}]
+    supplier = {}
+    checklist, _, missing, _ = aa.build_checklist(supplier, [rule], materials)
+
+    assert checklist[0]["status"] == "fail"
+    assert "2024年" in checklist[0]["detail"]
+    assert "2025年" in checklist[0]["detail"]
+    assert missing == [rule]
+
+    cache = {"1": {"supplier": supplier, "materials_detail": materials}}
+    opinion = gen_opinion.build_opinion(
+        "1", {"decision": "reject", "checklist": checklist}, {}, cache)
+    first_line, *rest = opinion.splitlines()
+    assert "退回。1. 缺少经审计的上年度财报" in first_line
+    assert not any("[A08]" in line for line in rest)
+
+    stage2_opinion, decision = aa.generate_opinion_v4(
+        supplier, [], [rule], [], type_desc="境内")
+    assert decision == "reject"
+    assert stage2_opinion.count("缺少经审计的上年度财报") == 1
+
+
+def test_a08_any_prior_year_title_satisfies_title_check():
+    result = financial_report_title_check({}, [
+        {"fileName": "2024年比较财务数据.pdf", "types": ["financial_report"]},
+        {"fileName": "2025年度审计报告.pdf", "types": ["financial_report"]},
+    ], current_year=2026)
+    assert result["status"] == "matched"
+
+
+def test_a08_uses_display_title_year_when_filename_is_generic():
+    result = financial_report_title_check({}, [{
+        "fileName": "财务附件.pdf", "fileTitle": "2024年财报",
+        "types": ["financial_report"],
+    }], current_year=2026)
+    assert result["status"] == "mismatch"
+    assert result["title_years"] == [2024]
 
 
 def test_a08_unknown_upload_state_is_not_declared_missing():
@@ -118,6 +177,32 @@ def test_business_license_cross_column_labels_do_not_join_legal_person():
     assert result["fields"]["法定代表人"] == "陈太江"
     assert result["checks"]["法人一致"] is True
     assert not any("法人" in issue and "不一致" in issue for issue in result["issues"])
+
+
+def test_sideways_business_license_label_noise_recovers_seen_system_legal_person():
+    text = (
+        "法定代表人 类 名 91370214599038194P 统一社会信用代码\n"
+        "称 金属产品、机械设备及配件 研发、 韩巧玲 有限责任公司（自然人独资）\n"
+        "青岛海隆升智能装备有限公司\n"
+    )
+    result = tp.extract_business_license(text, {
+        "legal_person": "韩巧玲",
+        "social_credit_code": "91370214599038194P",
+    })
+
+    assert result["fields"]["法定代表人"] == "韩巧玲"
+    assert result["checks"]["法人一致"] is True
+    assert not any("执照法人类名" in issue for issue in result["issues"])
+
+
+def test_business_license_label_noise_without_seen_person_stays_missing():
+    result = tp.extract_business_license(
+        "法定代表人 类 名 91370214599038194P 统一社会信用代码",
+        {"legal_person": "韩巧玲"},
+    )
+
+    assert result["fields"]["法定代表人"] is None
+    assert "法人一致" not in result["checks"]
 
 
 def test_business_license_long_dash_ocr_noise_does_not_join_legal_person():
@@ -633,7 +718,7 @@ def test_service_supplier_scope_supplements_trader_rules_without_dropping_servic
     assert "服务商" in inferred
 
 
-def test_manufacturer_scope_with_sales_keeps_capital_and_trader_rules():
+def test_manufacturer_scope_with_sales_deduplicates_iso_rules():
     supplier = {
         "sup_type": "其他",
         "registered_capital": 800,
@@ -644,8 +729,26 @@ def test_manufacturer_scope_with_sales_keeps_capital_and_trader_rules():
     ids = [rule["id"] for rule in rules]
 
     assert "C1_01" in ids
-    assert "D1_03" in ids
+    assert {"C1_02", "C1_03", "C1_04"}.issubset(ids)
+    assert not {"D1_03", "D1_04", "D1_05"}.intersection(ids)
+    assert "D1_06" in ids
     assert ids.count("C1_01") == 1
+    assert "厂家" in type_desc
+
+
+def test_longi_manufacturing_and_sales_scope_has_only_one_iso_rule_set():
+    supplier = {
+        "name": "合成光伏科技有限公司",
+        "sup_type": "其他服务商",
+        "busi_scope": "光伏设备及元器件制造；电池制造；电子产品销售；货物进出口",
+    }
+
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = [rule["id"] for rule in rules]
+
+    assert {"C1_02", "C1_03", "C1_04"}.issubset(ids)
+    assert not {"D1_03", "D1_04", "D1_05"}.intersection(ids)
+    assert len(ids) == len(set(ids))
     assert "厂家" in type_desc
 
 
@@ -727,6 +830,38 @@ def test_logistics_service_label_uses_carrier_rules_despite_incidental_trade(nam
     assert gen_stage2_report._infer_supplier_type(supplier, type_desc) == "运输/承运商"
 
 
+def test_logistics_and_warehouse_labels_are_carrier_not_dealer_service():
+    supplier = {
+        "name": "江苏亚东朗升国际物流有限公司无锡分公司",
+        "sup_type": "仓储服务商、物流服务商",
+        "busi_scope": (
+            "承办海运、陆运、空运国际运输代理业务，包括：揽货、托运、订舱、"
+            "仓储、中转、集装箱拼装拆箱、结算运杂费、报验及运输咨询业务。"
+            "一般项目：无船承运业务"
+        ),
+    }
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+
+    assert aa._pure_carrier(supplier) is True
+    assert aa._scope_roles(supplier["busi_scope"]) == (True, False)
+    assert "运输/承运商" in type_desc
+    assert {"A01", "E1", "E2"}.issubset(ids)
+    assert "A07" not in ids
+    assert "D1_03" not in ids
+    assert gen_stage2_report._infer_supplier_type(supplier, type_desc) == "运输/承运商"
+
+
+def test_warehouse_label_alone_does_not_trigger_carrier_rules():
+    supplier = {"sup_type": "仓储服务商", "busi_scope": "仓储服务；装卸搬运"}
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    ids = {rule["id"] for rule in rules}
+
+    assert aa._pure_carrier(supplier) is False
+    assert "运输/承运商" not in type_desc
+    assert "E1" not in ids
+
+
 @pytest.mark.parametrize("label,scope", [
     ("服务商", "招标代理；软件开发；技术服务"),
     ("代理商", "产品销售代理；货物进出口"),
@@ -762,12 +897,49 @@ def test_carrier_scope_does_not_override_explicit_non_carrier_or_combined_label(
 ])
 def test_e1_ocr(text, status):
     rules, _ = aa.determine_supplier_rules({"sup_type": "承运商"}, aa.load_rules())
-    checklist, _, missing, _ = aa.build_checklist({}, [r for r in rules if r["id"] == "E1"])
+    materials = [{"fileName": "道路运输经营许可证.pdf", "types": ["transport_license"]}]
+    checklist, _, missing, _ = aa.build_checklist(
+        {}, [r for r in rules if r["id"] == "E1"], materials)
     assert not missing
     assert checklist[0]["status"] == "manual"
     result = tp.extract("transport_license", text)
     checklist, _ = aa.enhance_checklist_with_textin(checklist, {}, {"transport_license": result})
     assert checklist[0]["status"] == status
+
+
+def test_e1_missing_material_is_fail_and_report_says_not_uploaded():
+    supplier = {"sup_type": "仓储服务商、物流服务商"}
+    rules, type_desc = aa.determine_supplier_rules(supplier, aa.load_rules())
+    checklist, _, missing, _ = aa.build_checklist(
+        supplier, [r for r in rules if r["id"] == "E1"], [])
+
+    assert "运输/承运商" in type_desc
+    assert checklist == [{
+        "id": "E1", "name": "运输承运资质", "status": "fail",
+        "detail": "缺少道路运输许可证或无船承运证明", "files": [],
+    }]
+    assert [rule["id"] for rule in missing] == ["E1"]
+
+    stage2 = {"name": "合成物流公司", "decision": "reject", "checklist": checklist}
+    cache = {"1": {"supplier": supplier, "materials_detail": []}}
+    rendered = gen_stage2_report.render_supplier("1", stage2, {}, cache)
+    assert "材料未上传" in rendered
+    assert "上传异常" not in rendered
+    assert "缺少道路运输许可证或无船承运证明" in gen_opinion.build_opinion(
+        "1", stage2, {}, cache)
+
+
+def test_e1_stale_ocr_cannot_override_missing_material():
+    checklist = [{
+        "id": "E1", "name": "运输承运资质", "status": "fail",
+        "detail": "缺少道路运输许可证或无船承运证明", "files": [],
+    }]
+    result = tp.extract(
+        "transport_license", "道路运输经营许可证\n有效期至：2099年06月04日")
+    checklist, _ = aa.enhance_checklist_with_textin(
+        checklist, {}, {"transport_license": result})
+    assert checklist[0]["status"] == "fail"
+    assert checklist[0]["detail"] == "缺少道路运输许可证或无船承运证明"
 
 
 def test_e1_does_not_borrow_iso_expiry():
