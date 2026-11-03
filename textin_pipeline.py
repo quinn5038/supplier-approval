@@ -341,6 +341,21 @@ def _extract_business_license_legal_person(text):
         if match:
             end = min(end, match.start())
     cleaned = value[:end].strip(" \t　。，,；;、")
+    # Sideways/two-column licences can attach a glyph from the adjacent
+    # residence column to the label line, while the real name is emitted as a
+    # clean line immediately below it, for example ``法定代表人强 住`` followed
+    # by ``张三``. Recover only that short all-Han next line, and only when the
+    # label-line candidate contains an unmistakable residence-field fragment.
+    # The recovered value therefore comes from OCR evidence, not from the
+    # supplier record, so a genuine mismatch is still reported.
+    if re.search(r"(?:^|\s)(?:住|住所|所)(?:\s|$)", value):
+        wrapped = re.search(
+            r"法定代表人[^\n]{0,60}\n\s*([\u4e00-\u9fff·]{2,6}?)"
+            r"(?=\s*(?:经营范围|住所|注册资本|成立日期|营业期限|$))",
+            text,
+        )
+        if wrapped:
+            return wrapped.group(1)
     # OCR may flatten a nearby column glyph into the name, for example
     # ``法定代表人马卫东— 米``. Only remove this suffix for the tightly
     # constrained shape "plausible Chinese name + long dash + 1-3 Han glyphs".
@@ -1265,7 +1280,7 @@ def extract_self_statement(text):
 
 
 def extract_after_sales(text):
-    """A07：机构五星认证看有效期；厂家证明函/承诺书看落款三个月。"""
+    """A07：机构五星认证看有效期；厂家/供应商承诺函看落款三个月。"""
     normalised = _norm(_pre(text))
     cert_markers = (
         "售后服务认证证书", "商品售后服务评价体系认证", "五星级售后服务认证",
@@ -1281,7 +1296,7 @@ def extract_after_sales(text):
 
     if any(marker in normalised for marker in statement_markers):
         result = extract_self_statement(text)
-        result["fields"] = {"材料类型": "厂家售后服务证明函/承诺书",
+        result["fields"] = {"材料类型": "售后服务承诺函",
                             **result.get("fields", {})}
         result["checks"] = {"材料类型正确": True, **result.get("checks", {})}
         return result
@@ -1289,7 +1304,7 @@ def extract_after_sales(text):
     return {
         "fields": {"材料类型": None},
         "checks": {"材料类型正确": False},
-        "issues": ["上传材料未识别到售后服务认证、证明或承诺内容，应提交售后服务五星认证或厂家证明函"],
+        "issues": ["上传材料未识别到售后服务认证或承诺内容，应提交售后服务五星认证或售后服务承诺函"],
     }
 
 
@@ -1425,6 +1440,35 @@ def _safe_filename(name):
     return "".join("_" if c in bad else c for c in name).strip() or "unnamed"
 
 
+DOWNLOAD_RETRY_WAITS = (5, 15, 30)
+_TRANSIENT_DOWNLOAD_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _download_response_issue(response, expected_size=0):
+    """Classify a download response without exposing its URL or response body."""
+    content_type = str(response.headers.get("Content-Type") or "").lower()
+    payload = None
+    if "json" in content_type or "text" in content_type:
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            payload = None
+    if isinstance(payload, dict) and str(payload.get("code")) == "111":
+        return "auth", "招采平台下载登录态已过期", False
+    if response.status_code in (401, 403):
+        return "auth", f"招采平台下载接口返回 HTTP {response.status_code}", False
+    if response.status_code != 200:
+        retryable = response.status_code in _TRANSIENT_DOWNLOAD_STATUSES
+        return "http", f"下载接口返回 HTTP {response.status_code}", retryable
+    if isinstance(payload, dict) and str(payload.get("code")) not in ("0", "200", "None"):
+        return "business", f"下载接口返回业务码 {payload.get('code')}", False
+    actual_size = len(response.content)
+    if expected_size and actual_size != expected_size:
+        return ("size", f"文件大小不一致（预期{expected_size}字节，实际{actual_size}字节）",
+                True)
+    return None
+
+
 def download_supplier_files(todo_id=None, delay=25.0):
     """从 scpma 自动下载资质文件 → files_cache/<todoId>/
 
@@ -1438,8 +1482,6 @@ def download_supplier_files(todo_id=None, delay=25.0):
         _scpma_headers,
         query_qualification_files,
     )
-
-    WAF_WAITS = [600, 900]          # 与主程序同款：被拦后等10/15分钟再试
 
     cache = json.loads((BASE / "cache_v4.json").read_text(encoding="utf-8")) \
         if (BASE / "cache_v4.json").exists() else {}
@@ -1468,7 +1510,9 @@ def download_supplier_files(todo_id=None, delay=25.0):
             uid = str(f.get("uploadId") or "")
             out = dest / f"{_safe_filename(uid)}_{_safe_filename(fname)}"
             expect = int(float(f.get("fileSize") or 0))
-            for attempt in range(len(WAF_WAITS) + 1):
+            last_reason = "未知下载错误"
+            for attempt in range(len(DOWNLOAD_RETRY_WAITS) + 1):
+                retryable = True
                 try:
                     resp = requests.get(
                         "https://scpma.iccec.cn/apis/scpma/oss/downloadByUploadId",
@@ -1476,24 +1520,31 @@ def download_supplier_files(todo_id=None, delay=25.0):
                         params={"fileUrl": fu, "fileName": fname},
                         timeout=180,
                         proxies={"http": None, "https": None})  # 不走系统代理
-                except Exception as e:
-                    print(f"  [重试{attempt + 1}] {fname}: {e}")
-                    resp = None
-                if resp is not None and resp.status_code == 200 \
-                        and (not expect or len(resp.content) == expect):
-                    partial = out.with_suffix(out.suffix + ".download")
-                    partial.write_bytes(resp.content)
-                    os.replace(partial, out)
-                    print(f"  [下载] {fname} ({len(resp.content)} 字节)")
-                    break
-                # 超时 / 非200 / 字节不符 → 疑似 WAF 限流，长冷却后重试
-                if attempt < len(WAF_WAITS):
-                    wait = WAF_WAITS[attempt]
-                    print(f"  [等待{wait}秒] {fname} 疑似被限流，冷却后重试"
-                          f"（attempt {attempt + 1}/{len(WAF_WAITS)}）...")
+                except requests.RequestException as exc:
+                    last_reason = f"网络请求异常（{type(exc).__name__}）"
+                else:
+                    issue = _download_response_issue(resp, expect)
+                    if issue is None:
+                        partial = out.with_suffix(out.suffix + ".download")
+                        partial.write_bytes(resp.content)
+                        os.replace(partial, out)
+                        print(f"  [下载] {fname} ({len(resp.content)} 字节)")
+                        resp.close()
+                        break
+                    kind, last_reason, retryable = issue
+                    resp.close()
+                    if kind == "auth":
+                        raise SessionExpiredError(
+                            "招采平台下载登录态已过期，请重新登录并更新 Cookie 和 Authorization")
+                    if not retryable:
+                        raise RuntimeError(f"材料下载失败：{last_reason}")
+                if attempt < len(DOWNLOAD_RETRY_WAITS):
+                    wait = DOWNLOAD_RETRY_WAITS[attempt]
+                    print(f"  [等待{wait}秒] {fname} 下载暂时失败：{last_reason}；"
+                          f"稍后重试（attempt {attempt + 1}/{len(DOWNLOAD_RETRY_WAITS)}）...")
                     time.sleep(wait)
                 else:
-                    raise RuntimeError("材料下载失败，停止处理并转人工")
+                    raise RuntimeError(f"材料下载失败：{last_reason}；停止处理并转人工")
             time.sleep(delay)          # 防 WAF：文件间留足间隔
     print("\n下载完成。下一步: python textin_pipeline.py parse")
 

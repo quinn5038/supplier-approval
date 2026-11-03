@@ -195,6 +195,24 @@ def test_sideways_business_license_label_noise_recovers_seen_system_legal_person
     assert not any("执照法人类名" in issue for issue in result["issues"])
 
 
+def test_sideways_business_license_recovers_wrapped_name_after_residence_noise():
+    text = (
+        "名称 测试电气有限公司\n"
+        "法定代表人强 住\n"
+        "测试姓名\n"
+        "经营范围 电气设备制造\n"
+    )
+    result = tp.extract_business_license(text, {
+        "full_name": "测试电气有限公司",
+        "legal_person": "测试姓名",
+    })
+
+    assert result["fields"]["法定代表人"] == "测试姓名"
+    assert result["checks"]["法人一致"] is True
+    assert not any("法人" in issue and "不一致" in issue
+                   for issue in result["issues"])
+
+
 def test_business_license_label_noise_without_seen_person_stays_missing():
     result = tp.extract_business_license(
         "法定代表人 类 名 91370214599038194P 统一社会信用代码",
@@ -1070,7 +1088,7 @@ def test_missing_after_sales_opinion_uses_concise_requirement():
         for item in aa.load_rules()["part_1_basic"]["domestic"]
         if item.get("id") == "A07"
     )
-    assert rule["requirement"] == "售后服务五星认证或售后服务证明函"
+    assert rule["requirement"] == "售后服务五星认证或售后服务承诺函"
 
     stage2 = {
         "decision": "reject",
@@ -1085,7 +1103,8 @@ def test_missing_after_sales_opinion_uses_concise_requirement():
 
     opinion = gen_opinion.build_opinion("1", stage2, {}, cache)
 
-    assert "缺少售后服务五星认证或售后服务证明函" in opinion
+    assert "缺少售后服务五星认证或售后服务承诺函" in opinion
+    assert "售后服务证明函" not in opinion
     assert "厂家出具" not in opinion
     assert "贸易商/经销商也需提交" not in opinion
 
@@ -1174,6 +1193,7 @@ def test_after_sales_statement_uses_recent_signature_date():
     extracted = tp.extract(
         "after_sales_cert",
         f"售后服务证明函\n我公司提供售后服务保障。\n日期：{recent}")
+    assert extracted["fields"]["材料类型"] == "售后服务承诺函"
     assert extracted["checks"]["材料类型正确"] is True
     assert extracted["checks"]["落款时间在3个月内"] is True
 

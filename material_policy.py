@@ -5,7 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-# 售后认证/证明函不含身份证、财报、银行账号等受限信息，按 A07 规则允许
+# 售后认证/承诺函不含身份证、财报、银行账号等受限信息，按 A07 规则允许
 # TextIn 核验。文件名或元数据一旦命中 SENSITIVE_NAME，仍由下方否决。
 PUBLIC_TYPES = frozenset({"business_license", "iso9001", "iso14001", "iso45001",
                           "tax_credit", "tax_cert", "production_license",

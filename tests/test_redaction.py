@@ -37,6 +37,39 @@ def test_name_label_confusion_without_front_context_stays_fail_closed():
     assert masker.find_name_field(items, 1712, 1080) is None
 
 
+def test_retained_name_box_is_relocated_when_pixels_only_show_label():
+    image = np.full((120, 360, 3), 255, dtype=np.uint8)
+    field = masker.FieldMatch("name", "测试姓名", (20, 40, 80, 70))
+
+    class RelocatingOcr:
+        calls = 0
+
+        def read(self, crop):
+            self.calls += 1
+            if self.calls == 1:
+                return [_item("姓名", (2, 2, 45, 25))]
+            if self.calls == 2:
+                return [_item("测试姓名", (100, 28, 180, 58))]
+            return [_item("测试姓名", (2, 2, 75, 28))]
+
+    relocated = masker.verify_or_relocate_field(image, field, RelocatingOcr())
+
+    assert relocated is not None
+    assert relocated.value == "测试姓名"
+    assert relocated.box[0] > field.box[0]
+
+
+def test_retained_name_box_fails_closed_when_value_cannot_be_relocated():
+    image = np.full((120, 360, 3), 255, dtype=np.uint8)
+    field = masker.FieldMatch("name", "测试姓名", (20, 40, 80, 70))
+
+    class LabelOnlyOcr:
+        def read(self, crop):
+            return [_item("姓名", (2, 2, 45, 25))]
+
+    assert masker.verify_or_relocate_field(image, field, LabelOnlyOcr()) is None
+
+
 def test_low_contrast_front_recovers_name_when_label_becomes_hash():
     items = [
         _item("#测试姓名", (149, 151, 580, 237), 0.91),
