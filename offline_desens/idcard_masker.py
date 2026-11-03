@@ -269,6 +269,51 @@ def find_name_field(items: Iterable[OcrItem], width: int, height: int) -> FieldM
     return None
 
 
+def _box_text(image: np.ndarray, box: tuple[int, int, int, int], ocr: CardOcr) -> str:
+    """OCR a retained patch so metadata and visible pixels cannot diverge."""
+    x1, y1, x2, y2 = box
+    if x2 <= x1 or y2 <= y1:
+        return ""
+    return "".join(normalise_text(item.text) for item in ocr.read(image[y1:y2, x1:x2]))
+
+
+def verify_or_relocate_field(image: np.ndarray, field: FieldMatch | None,
+                             ocr: CardOcr) -> FieldMatch | None:
+    """Verify that retained pixels contain the value, or relocate on its row.
+
+    Paddle can recognise the correct name while attaching the polygon of the
+    neighbouring blue ``姓名`` label. Previously the report then contained the
+    name while the masked image exposed only the label. Verification is local;
+    on mismatch only a narrow same-row band is searched for the identical OCR
+    value. If it still cannot be found, fail closed and retain nothing.
+    """
+    if not field:
+        return None
+    expected = normalise_text(field.value)
+    if expected and expected in _box_text(image, field.box, ocr):
+        return field
+
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = field.box
+    box_width, box_height = max(1, x2 - x1), max(1, y2 - y1)
+    band_x1 = max(0, x1 - box_width // 2)
+    band_x2 = min(width, x2 + max(box_width * 6, int(width * 0.22)))
+    band_y1 = max(0, y1 - box_height)
+    band_y2 = min(height, y2 + box_height)
+    band = image[band_y1:band_y2, band_x1:band_x2]
+    for item in ocr.read(band):
+        raw = normalise_text(item.text)
+        if expected not in raw:
+            continue
+        ix1, iy1, ix2, iy2 = item.bounds
+        relocated = (band_x1 + ix1, band_y1 + iy1,
+                     band_x1 + ix2, band_y1 + iy2)
+        relocated = padded_box(relocated, width, height, min_x=relocated[0])
+        if expected in _box_text(image, relocated, ocr):
+            return FieldMatch(field.key, field.value, relocated)
+    return None
+
+
 def order_quad(points: np.ndarray) -> np.ndarray:
     points = points.astype(np.float32)
     sums, diffs = points.sum(axis=1), np.diff(points, axis=1).reshape(-1)
@@ -559,13 +604,15 @@ def recover_page_fields(source: np.ndarray, ocr: CardOcr) -> tuple[FieldMatch | 
             validity = find_fuzzy_validity_field(items, width, height)
         if not horizontal_field(validity):
             validity = None
-    return name, validity
+    return (verify_or_relocate_field(source, name, ocr),
+            verify_or_relocate_field(source, validity, ocr))
 
 
 def redact_card(source: np.ndarray, quad: np.ndarray, ocr: CardOcr, card_index: int) -> tuple[np.ndarray, np.ndarray, CardResult]:
     card = card_warp(source, quad)
     side, field, forward, backward = analyse_card(card, ocr)
     oriented = rotate(card, forward)
+    field = verify_or_relocate_field(oriented, field, ocr)
     redacted = np.zeros_like(oriented)
     if field:
         x1, y1, x2, y2 = field.box

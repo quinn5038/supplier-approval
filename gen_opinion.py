@@ -64,7 +64,7 @@ SUPPLEMENT_TEMPLATES = {
     "A01":  "营业执照副本（须含统一社会信用代码及完整经营范围明细）",
     "A02":  "法人有效身份证正反面（须在有效期内）",
     "A03":  "国家税务总局网站下载的上年度纳税信用等级证明（需C级及以上）",
-    "A07":  "售后服务五星认证或售后服务证明函",
+    "A07":  "售后服务五星认证或售后服务承诺函",
     "A08":  "上年度经审计的财报（须含资产负债表/利润表/现金流量表）",
     "A13":  "检验检测资质证明（CMA 资质认定证书 / CNAS 实验室认可证书等，须在有效期内）",
     "C1_02": "ISO 9001 认证证书（须为该公司认证且在有效期内）",
@@ -244,9 +244,10 @@ def build_opinion(tid, s2, textin, cache):
             other_fails.append((cid, cname, detail))
 
     # 财报是否缺失只看上传材料，不依赖企查查文案；公开数据不能替代必交财报。
-    from financial_data import financial_report_presence
-    submitted = financial_report_presence(supplier, cache_entry.get("materials_detail"))
-    a08_needs_financial = submitted is False and any(
+    from financial_data import financial_report_title_check
+    financial_title = financial_report_title_check(
+        supplier, cache_entry.get("materials_detail"))
+    a08_needs_financial = financial_title["status"] in ("missing", "mismatch") and any(
         c.get("id") == "A08" and c.get("status") != "skip" for c in checklist)
     financial_missing = ("缺少经审计的上年度财报（须为上一年度，"
                          "须含资产负债表、利润表、现金流量表及审计意见）")
@@ -307,6 +308,8 @@ def build_opinion(tid, s2, textin, cache):
         # Explicit failed qualifications belong to the return checklist, not a
         # clipped secondary note where expiry can disappear behind holder issues.
         for cid, cname, desc in other_fails:
+            if cid == "A08" and a08_needs_financial:
+                continue
             supplement_items.append(f"[{cid}]{cname}：{desc}；请整改并提交符合要求的材料")
         # 去重保序
         seen = set()

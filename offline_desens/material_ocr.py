@@ -15,6 +15,8 @@ from offline_desens.idcard_masker import CardOcr
 
 _COMPLETE_DATE = re.compile(
     r"(?:19|20)\d{2}\s*[年.\-/]\s*\d{1,2}\s*[月.\-/]\s*\d{1,2}(?!\d)")
+_LICENSE_ORIENTATION_MARKERS = (
+    "营业执照", "统一社会信用代码", "法定代表人", "注册资本", "经营范围", "登记机关")
 
 
 def _complete_date_count(items):
@@ -28,14 +30,58 @@ def _has_red_seal(image):
     return float(red.mean()) >= .001
 
 
-def read_with_red_seal_retry(image, ocr):
+def _orientation_score(image, items):
+    """Rank whole-page orientations using licence layout and box geometry."""
+    height = max(1, image.shape[0])
+    compact = "".join(str(item.text).replace(" ", "") for item in items)
+    marker_count = sum(marker in compact for marker in _LICENSE_ORIENTATION_MARKERS)
+    horizontal_chars = total_chars = confidence_chars = 0.0
+    layout_score = 0
+    for item in items:
+        polygon = np.asarray(item.polygon)
+        width = float(polygon[:, 0].max() - polygon[:, 0].min())
+        box_height = float(polygon[:, 1].max() - polygon[:, 1].min())
+        chars = max(1, len(str(item.text).replace(" ", "")))
+        total_chars += chars
+        confidence_chars += chars * float(item.confidence)
+        if width >= box_height:
+            horizontal_chars += chars
+        text = str(item.text).replace(" ", "")
+        center_y = float(polygon[:, 1].mean()) / height
+        if any(marker in text for marker in ("营业执照", "统一社会信用代码")):
+            layout_score += 1 if center_y < .55 else -1
+        if "登记机关" in text:
+            layout_score += 1 if center_y > .45 else -1
+    return (marker_count, layout_score,
+            horizontal_chars / max(1.0, total_chars),
+            confidence_chars / max(1.0, total_chars))
+
+
+def read_with_orientation_retry(image, ocr):
+    """Correct a landscape business licence stored as a 90-degree portrait image."""
+    original = ocr.read(image)
+    compact = "".join(str(item.text).replace(" ", "") for item in original)
+    looks_like_sideways_license = (
+        image.shape[0] > image.shape[1] * 1.15
+        and any(marker in compact for marker in ("营业执照", "统一社会信用代码"))
+    )
+    if not looks_like_sideways_license:
+        return image, original
+    candidates = [(image, original)]
+    for code in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+        rotated = cv2.rotate(image, code)
+        candidates.append((rotated, ocr.read(rotated)))
+    return max(candidates, key=lambda candidate: _orientation_score(*candidate))
+
+
+def read_with_red_seal_retry(image, ocr, original=None):
     """Retry seal-covered validity rows through the red channel.
 
     Red stamp pixels are bright in the red channel while black printed text stays
     dark. Use the retry only when normal OCR saw an effective-date label and the
     retry recovers more complete dates; otherwise preserve the original OCR.
     """
-    original = ocr.read(image)
+    original = ocr.read(image) if original is None else original
     original_text = "".join(str(item.text).replace(" ", "") for item in original)
     if (not _has_red_seal(image)
             or not re.search(r"有效(?:期|日期)", original_text)):
@@ -45,6 +91,11 @@ def read_with_red_seal_retry(image, ocr):
     if _complete_date_count(retried) > _complete_date_count(original):
         return retried
     return original
+
+
+def read_material_image(image, ocr):
+    oriented, original = read_with_orientation_retry(image, ocr)
+    return read_with_red_seal_retry(oriented, ocr, original)
 
 
 def deny_network(*args, **kwargs):
@@ -88,7 +139,7 @@ def parse_document(path, ocr, dpi=200):
                 pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
                 rgb = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
                 image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                text, detail = ordered_lines(read_with_red_seal_retry(image, ocr), number)
+                text, detail = ordered_lines(read_material_image(image, ocr), number)
                 if not detail:
                     raise ValueError(f"第{number}页未识别到文字，转人工")
                 pages.append(text)
@@ -97,7 +148,7 @@ def parse_document(path, ocr, dpi=200):
         image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("无法读取材料图片")
-        text, details = ordered_lines(read_with_red_seal_retry(image, ocr), 1)
+        text, details = ordered_lines(read_material_image(image, ocr), 1)
         pages.append(text)
     else:
         raise ValueError("第一阶段仅支持 PDF、PNG、JPEG、BMP；其他格式转人工")

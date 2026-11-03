@@ -40,6 +40,54 @@ def test_download_session_expiry_is_preserved(tmp_path, monkeypatch):
         tp.download_supplier_files("1")
 
 
+def _download_fixture(tmp_path, monkeypatch, response):
+    monkeypatch.setattr(tp, "BASE", tmp_path)
+    monkeypatch.setattr(tp, "FILES_DIR", tmp_path / "files")
+    (tmp_path / "cache_v4.json").write_text(json.dumps({
+        "1": {"supplier": {"supinfo_id": "synthetic", "bill_type": "P0702"}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(aa, "query_qualification_files", Mock(return_value={
+        "code": 0, "data": {"supFilesBOList": [{
+            "fileUrl": "synthetic-encrypted-value", "fileName": "营业执照.jpg",
+            "fileSize": 100, "uploadId": "synthetic-upload",
+        }]},
+    }))
+    monkeypatch.setattr(tp.requests, "get", Mock(return_value=response))
+    sleep = Mock()
+    monkeypatch.setattr(tp.time, "sleep", sleep)
+    return sleep
+
+
+def test_download_http_200_code_111_fails_fast_as_session_expired(tmp_path, monkeypatch):
+    response = Mock(status_code=200, content=b'{"code":"111"}',
+                    headers={"Content-Type": "text/plain;charset=UTF-8"})
+    response.json.return_value = {"code": "111", "message": "synthetic expired"}
+    sleep = _download_fixture(tmp_path, monkeypatch, response)
+
+    with pytest.raises(aa.SessionExpiredError, match="Cookie 和 Authorization"):
+        tp.download_supplier_files("1", delay=0)
+
+    tp.requests.get.assert_called_once()
+    sleep.assert_not_called()
+    response.close.assert_called_once()
+
+
+def test_download_transient_http_error_uses_short_retry(tmp_path, monkeypatch):
+    unavailable = Mock(status_code=503, content=b"temporary",
+                       headers={"Content-Type": "text/plain"})
+    unavailable.json.side_effect = ValueError
+    success = Mock(status_code=200, content=b"x" * 100,
+                   headers={"Content-Type": "image/jpeg"})
+    _download_fixture(tmp_path, monkeypatch, unavailable)
+    tp.requests.get.side_effect = [unavailable, success]
+
+    tp.download_supplier_files("1", delay=0)
+
+    assert tp.requests.get.call_count == 2
+    assert tp.time.sleep.call_args_list[0].args == (5,)
+    assert (tmp_path / "files/1/synthetic-upload_营业执照.jpg").read_bytes() == b"x" * 100
+
+
 def test_report_loader_keeps_online_and_offline_results_separate(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
     (tmp_path / "cache_v4.json").write_text("{}", encoding="utf-8")

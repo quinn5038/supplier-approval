@@ -970,6 +970,23 @@ def _performance_files(materials_detail):
     return found
 
 
+def _transport_license_files(materials_detail):
+    """识别 E1 是否实际提交运输资质，不读取文件内容。"""
+    found = []
+    for item in materials_detail or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("fileName") or "")
+        value = item.get("types") or []
+        types = set([value] if isinstance(value, str) else value)
+        metadata = " ".join(str(item.get(key) or "") for key in
+                            ("fileName", "typeName", "fileinfoTypeName", "desc", "fileDesc"))
+        explicit_hint = re.search(r"道路运输|无船承运", metadata)
+        if ("transport_license" in types or explicit_hint) and name and name not in found:
+            found.append(name)
+    return found
+
+
 def build_checklist(supplier, rules_list, materials_detail=None):
     """
     业务 8/31确认的统一检查流程：
@@ -997,15 +1014,35 @@ def build_checklist(supplier, rules_list, materials_detail=None):
         entry = {"id": rid, "name": name, "status": "pass", "detail": ""}
 
         if rid == "A08":
-            from financial_data import assess_financial, financial_report_presence
-            submitted = financial_report_presence(supplier, materials_detail)
+            from financial_data import assess_financial, financial_report_title_check
+            title_check = financial_report_title_check(supplier, materials_detail)
+            submitted = title_check["submitted"]
             if submitted is not None:
                 supplier["has_financial_report"] = submitted
+            supplier["financial_report_year_status"] = title_check["status"]
+            supplier["financial_report_title_years"] = title_check["title_years"]
             assessment = assess_financial({}, submitted=submitted)
-            entry.update(status="fail" if submitted is False else "manual",
-                         detail=assessment["detail"], evidence=assessment)
+            assessment["title_year_check"] = title_check
+            required_year = title_check["required_year"]
+            if title_check["status"] == "mismatch":
+                shown = "、".join(f"{year}年" for year in title_check["title_years"])
+                detail = (f"财报材料标题显示{shown}，非应提交的上年度{required_year}年；"
+                          "缺少经审计的上年度财报")
+                status = "fail"
+            elif title_check["status"] == "missing":
+                detail = assessment["detail"]
+                status = "fail"
+            elif title_check["status"] == "matched":
+                detail = (f"财报材料标题年度为上年度{required_year}年；"
+                          "仍需人工核验三表完整性及审计意见")
+                status = "manual"
+            else:
+                detail = (f"已提交财报材料，但标题未显示明确年度，无法确认是否为"
+                          f"上年度{required_year}年；转人工核验三表完整性及审计意见")
+                status = "manual"
+            entry.update(status=status, detail=detail, evidence=assessment)
             checklist.append(entry)
-            if submitted is False:
+            if status == "fail":
                 missing_rules.append(rule)
             else:
                 verify_items.append(entry["detail"])
@@ -1026,10 +1063,19 @@ def build_checklist(supplier, rules_list, materials_detail=None):
             continue
 
         if rid == "E1":
-            entry["status"] = "manual"
-            entry["detail"] = "道路运输许可证或无船承运证明需OCR核验证书类型和有效期；未提交或无法识别时转人工核查"
+            files = _transport_license_files(materials_detail)
+            entry["files"] = files
+            entry["status"] = "manual" if files else "fail"
+            entry["detail"] = (
+                "已提交疑似道路运输许可证或无船承运证明：" + "、".join(files) +
+                "；需OCR核验证书类型和有效期，无法识别时转人工核查"
+                if files else "缺少道路运输许可证或无船承运证明"
+            )
             checklist.append(entry)
-            verify_items.append(entry["detail"])
+            if files:
+                verify_items.append(entry["detail"])
+            else:
+                missing_rules.append(rule)
             continue
 
         if ct == "auto":
@@ -1167,7 +1213,7 @@ MATERIAL_REQUIREMENTS = {
     "A01 法律主体资格": "营业执照副本（须持有统一社会信用代码，且执照信息与基本信息栏的供应商名称、注册资本、法人一致）",
     "A02 法人身份证明": "法人身份证正反面（或护照首页，须在有效期内）",
     "A03 纳税信用等级": "国家税务总局网站或信用中国下载的纳税信用等级证明（须为C级及以上）",
-    "A07 售后服务": "正规机构出具的售后服务五星认证或售后服务证明函",
+    "A07 售后服务": "正规机构出具的售后服务五星认证或售后服务承诺函",
     "A08 资金财务状况": "上年度经审计的财务报表（2026年须提交2025年财报）",
     "C1_02 ISO 9001": "ISO 9001质量管理体系认证证书（须为该公司认证且在有效期内）",
     "C1_03 ISO 14001": "ISO 14001环境管理体系认证证书（须为该公司认证且在有效期内）",
@@ -1200,8 +1246,11 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
     supplier.get("name", "")
 
     # 9/11：A08 财报未传 + 企查查无数据 → 在意见中独立列出"经审计的上年度财报"
+    a08_in_missing_rules = any(
+        rule.get("id") == "A08" for rule in material_failed_rules)
     a08_needs_financial = (
         not supplier.get("has_financial_report")
+        and not a08_in_missing_rules
         and any("经审计" in v or "A08" in v for v in verify_items)
     )
 
@@ -1262,7 +1311,10 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
             for rule in other_missing:
                 rid_name = f"{rule.get('id','')} {rule.get('name','')}"
                 desc = rule.get("requirement") or MATERIAL_REQUIREMENTS.get(rid_name, rid_name)
-                if rule.get("id") == "C1_05":
+                if rule.get("id") == "A08":
+                    desc = ("缺少经审计的上年度财报（须为上一年度，须含资产负债表、"
+                            "利润表、现金流量表及审计意见）")
+                elif rule.get("id") == "C1_05":
                     why = supplier.get("production_license_reason", "")
                     if why:
                         desc = f"{desc}【{why}】"
@@ -1346,10 +1398,18 @@ _CARRIER_ONLY_LABELS = {
     "物流服务商", "货运代理商", "国际货运代理商", "货代服务商",
 }
 
+# 仓储本身不等同于承运，因此不能单独触发 E1/E2；但它经常与“物流服务商”
+# 作为同一家物流企业的并列系统标签出现。这类辅助标签不应把明确的物流标签
+# 反向降级为普通服务商。
+_CARRIER_AUXILIARY_LABELS = {"仓储服务商", "仓储商"}
+
 
 def _pure_carrier(supplier):
     labels = _supplier_type_labels(supplier)
-    return bool(labels) and all(s in _CARRIER_ONLY_LABELS for s in labels)
+    return (bool(labels)
+            and any(s in _CARRIER_ONLY_LABELS for s in labels)
+            and all(s in _CARRIER_ONLY_LABELS | _CARRIER_AUXILIARY_LABELS
+                    for s in labels))
 
 
 # 货运代理是运输组织业务，不是产品销售代理。先识别并剔除这些专属短语，
@@ -1357,6 +1417,7 @@ def _pure_carrier(supplier):
 _CARRIER_SCOPE_PATTERN = re.compile(
     r"(?:国际|国内|海上|航空|陆路|铁路|集装箱)?货(?:物)?运输代理(?:服务)?"
     r"|(?:国际|国内)?货运代理(?:服务)?"
+    r"|(?:国际|国内)?运输代理(?:业务|服务)?"
     r"|无船承运(?:业务)?"
     r"|道路货物运输(?:服务)?"
     r"|普通货运|网络货运"
@@ -1407,16 +1468,25 @@ def determine_supplier_rules(supplier, cfg):
     scope_has_carrier, scope_has_trade = _scope_roles(business_scope)
     scope_is_carrier = _scope_should_override_to_carrier(
         supplier, scope_has_carrier, scope_has_trade)
+    scope_has_manufacture = any(
+        keyword in business_scope for keyword in ("生产", "制造", "加工"))
+    type_has_manufacture = any(
+        keyword in sup_type_name for keyword in ("厂家", "生产商", "制造商", "生产"))
+    manufacturer_signal = bool(
+        supplier.get("is_manufacturer") or type_has_manufacture or scope_has_manufacture)
 
     type_rules = []
     type_label = ""
+    carrier_route = False
 
     # 9/5 改造：先用 ICCEC 系统 sup_type_name 匹配，匹配不上时按经营范围交叉验证
     if _pure_carrier(supplier):
+        carrier_route = True
         basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", []) if not is_foreign else []
         type_label = "运输/承运商"
     elif scope_is_carrier and not is_foreign:
+        carrier_route = True
         basic_rules = [rule for rule in basic_rules if rule.get("id") != "A07"]
         type_rules = part2.get("domestic_carrier", [])
         type_label = "运输/承运商（经营范围识别）"
@@ -1446,7 +1516,6 @@ def determine_supplier_rules(supplier, cfg):
             type_rules = []
             type_label = "服务商"
 
-    all_rules = basic_rules
     # 9/5 改造：sup_type_name="其他"时按经营范围交叉验证推断类目
     if not type_label and not is_foreign:
         busi = business_scope + " " + (supplier.get("supTypeName") or "")
@@ -1456,6 +1525,22 @@ def determine_supplier_rules(supplier, cfg):
         elif any(k in busi for k in ("生产", "制造", "加工")):
             type_rules = part2.get("domestic_manufacturer", [])
             type_label = "境内厂家（推断自经营范围）"
+    # 组合类别按“宁多勿缺”叠加规则；厂家和贸易商重叠的 ISO 三体系只展示
+    # 判定更严格的厂家 C1_02~04，避免同一证书在核验表出现两遍。
+    if manufacturer_signal and not is_foreign and not carrier_route:
+        existing_ids = {rule.get("id") for rule in type_rules}
+        manufacturer_rules = part2.get("domestic_manufacturer", [])
+        type_rules = type_rules + [
+            rule for rule in manufacturer_rules if rule.get("id") not in existing_ids]
+        if "厂家" not in type_label:
+            type_label = ((type_label + "/厂家（经营范围补充识别）")
+                          if type_label else "境内厂家（经营范围识别）")
+        if {"C1_02", "C1_03", "C1_04"}.issubset(
+                {rule.get("id") for rule in type_rules}):
+            duplicate_trader_iso_ids = {"D1_03", "D1_04", "D1_05"}
+            type_rules = [rule for rule in type_rules
+                          if rule.get("id") not in duplicate_trader_iso_ids]
+
     all_rules = basic_rules + type_rules
     return all_rules, f"{region_label}{'·' + type_label if type_label else ''}"
 
@@ -2197,6 +2282,10 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
         fields = r.get("fields") or {}
 
         if doc_type == "transport_license":
+            # E1 的材料存在性由当前 materials_detail 判定。旧 OCR 缓存不能把
+            # 本次未提交材料的 fail 状态覆盖成通过或转人工。
+            if c.get("status") == "fail" and not c.get("files"):
+                continue
             documents = r.get("documents") or [r]
             required = ("材料类型正确", "在有效期内")
             valid = all(all(d.get("checks", {}).get(k) is True for k in required)
