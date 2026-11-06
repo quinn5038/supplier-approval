@@ -140,6 +140,20 @@ def _suspect_domestic_tip(supplier):
     return ""
 
 
+def _is_cooperation_application(s2, cache_entry):
+    """Return whether the current workflow is a P0704 cooperation application."""
+    sources = [s2 or {}, cache_entry or {},
+               (cache_entry or {}).get("todo") or {},
+               (cache_entry or {}).get("supplier") or {}]
+    type_fields = ("billType", "bill_type", "businessBillType")
+    name_fields = ("billName", "bill_name", "businessBillName")
+    if any(str(source.get(field) or "").upper() == "P0704"
+           for source in sources for field in type_fields):
+        return True
+    return any("合作意向" in str(source.get(field) or "")
+               for source in sources for field in name_fields)
+
+
 def _strip_dup_prefix(cname, desc):
     """去掉 issue 描述里与项目名重复的前缀（如"纳税信用等级：纳税信用等级：..."）"""
     if not desc:
@@ -211,6 +225,7 @@ def build_opinion(tid, s2, textin, cache):
     s2.get("textin_issues", []) or []
     s2.get("qcc_issues", []) or []
     decision = s2.get("decision", "manual")
+    cooperation_application = _is_cooperation_application(s2, cache_entry)
 
     # 9/6：疑似国内供应商提示（isOverseas=1 但国家为中国），追加到意见末尾
     suspect_tip = _suspect_domestic_tip(supplier)
@@ -317,7 +332,13 @@ def build_opinion(tid, s2, textin, cache):
                  if not (x in seen or seen.add(x))]
         if dedup:
             items_str = "；".join(f"{i+1}. {x}" for i, x in enumerate(dedup))
-            lines.append(f"退回。{items_str}。补充后重新提交。")
+            prefix = ("退回。请提交变更申请至中国港湾工程有限责任公司（中港总部），并补充："
+                      if cooperation_application else "退回。")
+            lines.append(f"{prefix}{items_str}。补充后重新提交。")
+        elif cooperation_application:
+            lines.append(
+                "退回。请提交变更申请至中国港湾工程有限责任公司（中港总部），并补充："
+                "1. 按上方审查报告补充或整改相关材料。补充后重新提交。")
         else:
             lines.append("退回。具体见上方审查报告。")
         # 其他异常（非缺材料的 fail + 待人工项）→ 一并列出，让供应商知道所有问题

@@ -61,9 +61,9 @@ CHECK_GUIDES = {
         "目录下各 det/rec/cls 子目录均需有 inference.pdmodel 与 inference.pdiparams；这里只核对文件存在。",
     ),
     "企业信息凭证（可选；缺少时相关项转人工）": (
-        "向公司 IT 或获授权的企查查 API 服务渠道申请 AppKey、SecretKey 与接口访问权限。",
-        "取得后在 .env 中填写 QCC_APP_KEY=<值>、QCC_SECRET_KEY=<值>，并按获批通道配置 QCC_BASE_URL，重启服务。",
-        "当前接入仍需核对服务连通性与接口权限；无法连接或无授权时保持空白，相关证据转人工。",
+        "使用公司已授权的中交企业信息接口 AppId 与 SecretKey；不要把凭据粘贴到报告、日志或提交到 Git。",
+        "在 .env 中填写 QCC_APP_KEY=<AppId>、QCC_SECRET_KEY=<SecretKey>，QCC_BASE_URL 保持获批的生产域名，然后重启服务。",
+        "当前自动查询失信被执行人和严重违法；连接、鉴权、限流或返回格式异常时保守转人工，不会自动放行。",
     ),
     "真实回写关闭": (
         "日常双击 start_webui.bat 即保持真实回写关闭，无需另行配置。",

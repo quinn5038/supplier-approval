@@ -1,334 +1,317 @@
+"""中交企业信息接口客户端。
+
+当前生产接入仅启用 A10 的两个已授权类别：失信被执行人、严重违法。
+原始响应只保存在本机、被 ``.gitignore`` 排除的 SQLite 缓存中；审批结果
+仅保留类别状态和数量，不落案件编号、证件号码、人员姓名等明细。
 """
-企业信息接口 独立客户端（独立于集成环境，可脱离连接器插件运行）
-==================================================
-被 auto_approve.py 的 enhance_checklist_with_qcc 调用。
-当前为接入骨架（13个函数 stub），等获取 QCC_APP_KEY/QCC_SECRET_KEY 后填实。
+from __future__ import annotations
 
-接口实际归属（2026-09-04 接口文档扫描确认）：
-- 域名：https://ai-dataapi.ccccltd.cn  ← CCC=中国交建，港湾是中交子公司
-- 这不是企查查公开 API，是中交系内部接口
-- 鉴权方式：AppId + Timespan（Unix秒）+ Token=MD5(AppId+Timespan+secretKey).upper()
-- 响应码：200 成功 / 300000 无数据 / 300002 账号失效 / 300006 余额不足 / 300011 此IP无权限
-
-接入清单（共13个接口，按接入排期：先做第一档+第二档围标串标留后续版本）：
-- 第一档10个核心合规（A10 商业信誉硬拦截项）：
-    工商: ic/verify/2.0, ic/baseinfoV3/2.0
-    股东法人: ic/holder/2.0, ic/inverst/2.0, ic/staff/2.0
-    司法风险: jr/dishonest/2.0 (人员), jr/consumptionRestriction/2.0, jr/endCase, jr/bankruptcy/2.0
-    经营违法: hi/abnormal/2.0, mr/illegalinfo (税收违法 mr/taxContravention/2.0)
-- 第一档扩展（财务三表，对应保密改造后 A08 财报合规）：
-    cb/ic/balanceSheet/2.0, cb/ic/incomeStatement/2.0, cb/ic/cashFlow/2.0
-- 第二档3个围标串标（先不做）：rela/shortPath/2.0, v3/investtree/ten, ic/humanholding/2.0
-
-设计原则：
-1. 失败返回空 dict/list，不抛异常 → enhance_checklist_with_qcc 走"数据缺失→人工复核"路径，不误判
-2. 缓存机制：每次调用结果追加到 qcc_api_cache.json，避免重复请求耗配额
-3. 配额预警：每日调用量 >80% 阈值时 log.warning
-4. 签名机制：MD5(AppId + Timespan + secretKey).upper()，与接口文档一致
-"""
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 try:
     import requests
-except ImportError:
+except ImportError:  # pragma: no cover
     requests = None
 
 log = logging.getLogger(__name__)
-
-# ============================================================
-# 配置（从 .env 读取）
-# ============================================================
-QCC_APP_KEY  = os.getenv("QCC_APP_KEY", "")
-QCC_SECRET   = os.getenv("QCC_SECRET_KEY", "")
-# 接口实际域名（中国交建系接口，非企查查公开 API）
-QCC_BASE_URL = os.getenv("QCC_BASE_URL", "https://ai-dataapi.ccccltd.cn")
-QCC_TIMEOUT  = int(os.getenv("QCC_TIMEOUT", "15"))
-
-# 配额预警阈值（每日调用量百分比）
-QCC_DAILY_QUOTA_WARN = 0.8
-
-# 缓存文件路径（与 auto_approve.py 同目录）
-_CACHE_FILE = Path(__file__).parent / "qcc_api_cache.json"
-_CALL_COUNT_FILE = Path(__file__).parent / "qcc_call_count.json"
+BASE_DIR = Path(__file__).parent
 
 
-# ============================================================
-# 内部工具
-# ============================================================
+def _load_local_env() -> None:
+    """允许独立运行本模块；不覆盖进程显式设置的环境变量。"""
+    path = BASE_DIR / ".env"
+    if not path.exists():
+        return
+    explicit_env_keys = set(os.environ)
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if key and key not in explicit_env_keys:
+            os.environ[key] = value
+
+
+_load_local_env()
+
+QCC_APP_KEY = os.getenv("QCC_APP_KEY", "")
+QCC_SECRET = os.getenv("QCC_SECRET_KEY", "")
+QCC_BASE_URL = os.getenv("QCC_BASE_URL", "https://ai-dataapi.ccccltd.cn").rstrip("/")
+QCC_TIMEOUT = float(os.getenv("QCC_TIMEOUT", "15"))
+QCC_CACHE_TTL = int(os.getenv("QCC_CACHE_TTL", "86400"))
+QCC_REQUEST_INTERVAL = float(os.getenv("QCC_REQUEST_INTERVAL", "0.5"))
+QCC_MAX_PAGES = max(1, int(os.getenv("QCC_MAX_PAGES", "100")))
+
+_CACHE_DB = BASE_DIR / "qcc_api_cache.sqlite3"
+_CALL_COUNT_FILE = BASE_DIR / "qcc_call_count.json"
+_REQUEST_LOCK = threading.Lock()
+_LAST_REQUEST_AT = 0.0
+
+SUCCESS_STATUS = "200"
+NO_RESULT_STATUS = "200100001"
+
+A10_CATEGORY_REGISTRY = {
+    "dishonest": {
+        "label": "失信被执行人",
+        "path": "/webapi/jr/dishonest/2.0",
+    },
+    "serious_illegal": {
+        "label": "严重违法",
+        "path": "/webapi/mr/illegalinfo/2.0",
+    },
+}
+
+
 def _sign(timestamp: str) -> str:
-    """中交系接口签名：MD5(AppId + Timespan + secretKey).upper()
-
-    注意：与企查查公开 API 不同，是中交系内部约定。
-    secretKey 由系统提供，不参与 HTTP 传输（仅用于 token 计算）。
-    """
     raw = f"{QCC_APP_KEY}{timestamp}{QCC_SECRET}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest().upper()
 
 
-def _headers() -> dict:
-    """生成请求头（AppId + Timespan + Token）
-
-    按接口文档 9/4 扫描：三个 header 字段名是 AppId/Timespan/Token，
-    不是企查查公开 API 的 apicode/timestamp/sign。
-    """
-    ts = str(int(time.time()))
+def _headers() -> dict[str, str]:
+    timestamp = str(int(time.time()))
     return {
         "AppId": QCC_APP_KEY,
-        "Timespan": ts,
-        "Token": _sign(ts),
+        "Timespan": timestamp,
+        "Token": _sign(timestamp),
         "Content-Type": "application/json",
+        # 生产网关会拒绝 requests 默认 UA；这两个头已通过获授权的低频连通测试。
+        "Accept": "application/json,text/plain,*/*",
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/130.0.0.0 Safari/537.36"),
     }
 
 
 def _is_configured() -> bool:
-    """是否已配置 QCC 凭据"""
     return bool(QCC_APP_KEY and QCC_SECRET)
 
 
-def _increment_call_count(api_path: str):
-    """记录调用次数（用于配额预警）"""
+def _cache_get(identity: str, key: str) -> dict | None:
+    from state_store import get_state
+
+    entry = get_state(_CACHE_DB, "qcc").get(f"{identity}/{key}")
+    if not isinstance(entry, dict):
+        return None
+    if time.time() - float(entry.get("at", 0)) > QCC_CACHE_TTL:
+        return None
+    value = entry.get("value")
+    return value if isinstance(value, dict) else None
+
+
+def _cache_set(identity: str, key: str, value: dict) -> None:
+    from state_store import put_state
+
+    put_state(_CACHE_DB, "qcc", f"{identity}/{key}", {"at": time.time(), "value": value})
+
+
+def _increment_call_count(path: str) -> None:
     today = time.strftime("%Y-%m-%d")
     try:
-        data = json.loads(_CALL_COUNT_FILE.read_text(encoding="utf-8")) if _CALL_COUNT_FILE.exists() else {}
-    except Exception:
+        data = json.loads(_CALL_COUNT_FILE.read_text(encoding="utf-8")) \
+            if _CALL_COUNT_FILE.exists() else {}
+    except (OSError, ValueError, TypeError):
         data = {}
-    if today not in data:
-        data[today] = {"total": 0, "by_api": {}}
-    data[today]["total"] += 1
-    data[today]["by_api"][api_path] = data[today]["by_api"].get(api_path, 0) + 1
+    row = data.setdefault(today, {"total": 0, "by_api": {}})
+    row["total"] += 1
+    row["by_api"][path] = row["by_api"].get(path, 0) + 1
     try:
         _CALL_COUNT_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        log.warning(f"[QCC] 调用次数记录失败：{e}")
+    except OSError as exc:
+        log.warning("[企业信息] 调用计数写入失败：%s", exc)
 
 
-def _check_quota_warning():
-    """检查配额预警（占位，实际配额上限需申请后填入）"""
-    # TODO: 申请 AppKey 后填入每日配额上限（企业版通常 1000-10000次/天）
-    pass
-
-
-def _cache_get(supplier_name: str, key: str):
-    """旧无时间戳缓存不再信任；SQLite 缓存默认一天过期。"""
-    from state_store import get_state
-    cache = get_state(_CACHE_FILE.with_suffix(".sqlite3"), "qcc")
-    entry = cache.get(supplier_name + "/" + key)
-    if not entry or time.time() - entry["at"] > int(os.getenv("QCC_CACHE_TTL", "86400")):
-        return None
-    return entry["value"]
-
-
-def _cache_set(supplier_name: str, key: str, value):
-    from state_store import put_state
-    put_state(_CACHE_FILE.with_suffix(".sqlite3"), "qcc", supplier_name + "/" + key,
-              {"at": time.time(), "value": value})
-
-
-def _post(path: str, body: dict, supplier_name: str = "", cache_key: str = "") -> dict:
-    """
-    统一 POST 调用入口（接口文档全是 POST 方法）
-    - cache_key 非空则优先读缓存
-    - 失败返回空 dict，不抛异常
-    """
-    # 1. AppKey 未配置 → 直接返回空 dict（enhance_checklist_with_qcc 走人工复核路径）
-    if not _is_configured():
-        log.debug(f"[QCC] AppKey 未配置，跳过 {path}")
-        return {}
-
-    # 2. 优先读缓存
-    if cache_key and supplier_name:
-        cached = _cache_get(supplier_name, cache_key)
-        if cached is not None:
-            log.debug(f"[QCC] 命中缓存 {supplier_name}/{cache_key}")
-            return cached
-
-    # 3. 调用 API
+def _throttled_post(path: str, body: dict) -> dict:
+    """串行、低频请求；仅对超时/连接错误/5xx重试，最多两次。"""
+    global _LAST_REQUEST_AT
     if requests is None:
-        log.error("[QCC] requests 模块未安装")
-        return {}
-    try:
-        url = QCC_BASE_URL + path
-        log.info(f"[QCC] POST {path} supplier={supplier_name}")
-        r = requests.post(url, headers=_headers(), json=body, timeout=QCC_TIMEOUT)
-        _increment_call_count(path)
-        if not r.ok:
-            log.warning(f"[QCC] {path} HTTP {r.status_code}: {r.text[:200]}")
-            return {}
-        result = r.json()
-        # 中交系接口响应：status=200 成功，其他业务失败码（300000/300001/...）
-        if str(result.get("status", "")) != "200":
-            log.warning(f"[QCC] {path} 业务失败 status={result.get('status')} msg={result.get('msg', '')}")
-            return {}
-        # 写缓存
-        if cache_key and supplier_name:
-            _cache_set(supplier_name, cache_key, result)
-        return result
-    except Exception as e:
-        log.warning(f"[QCC] {path} 调用异常：{e}")
-        return {}
+        return {"_client_error": "requests_not_installed"}
+
+    url = QCC_BASE_URL + path
+    for attempt in range(3):
+        try:
+            with _REQUEST_LOCK:
+                delay = QCC_REQUEST_INTERVAL - (time.monotonic() - _LAST_REQUEST_AT)
+                if delay > 0:
+                    time.sleep(delay)
+                response = requests.post(url, headers=_headers(), json=body, timeout=QCC_TIMEOUT)
+                _LAST_REQUEST_AT = time.monotonic()
+                _increment_call_count(path)
+            if response.status_code >= 500 and attempt < 2:
+                continue
+            if not response.ok:
+                # 不记录响应正文，避免网关回显请求或敏感信息进入日志。
+                log.warning("[企业信息] %s HTTP %s", path, response.status_code)
+                return {"_client_error": f"http_{response.status_code}"}
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {"_client_error": "invalid_json_shape"}
+        except Exception as exc:
+            retryable = requests is not None and isinstance(
+                exc, (requests.Timeout, requests.ConnectionError))
+            if retryable and attempt < 2:
+                continue
+            log.warning("[企业信息] %s 调用失败：%s", path, type(exc).__name__)
+            return {"_client_error": type(exc).__name__}
+    return {"_client_error": "retry_exhausted"}
 
 
-# ============================================================
-# 第一档：10个核心合规接口（A10 商业信誉硬拦截项）
-# 按接口文档 9/4 扫描的真实路径调整
-# ============================================================
-def verify_ic(name: str, creditcode: str, legalrep: str) -> dict:
-    """1. 工商三要素核验（企业名/统一社会信用代码/法人）→ A01 工商执照核实"""
-    return _post("/webapi/ic/verify/2.0", {
-        "name": name, "creditCode": creditcode, "legalRep": legalrep
-    }, supplier_name=name, cache_key="verify_ic")
+def _post_page(path: str, body: dict, identity: str, cache_key: str) -> dict:
+    cached = _cache_get(identity, cache_key)
+    if cached is not None:
+        return cached
+    response = _throttled_post(path, body)
+    status = str(response.get("status", ""))
+    # 成功和“有效请求无结果”都缓存；鉴权、配额、限流失败不缓存。
+    if status in {SUCCESS_STATUS, NO_RESULT_STATUS}:
+        _cache_set(identity, cache_key, response)
+    elif not response.get("_client_error"):
+        log.warning("[企业信息] %s 业务状态=%s", path, status or "missing")
+    return response
 
 
-def baseinfo(keyword: str) -> dict:
-    """2. 工商基本信息（含主要人员、注册资本、成立日期）→ A01/A02"""
-    return _post("/webapi/cb/cb/ic/2.0", {
-        "keyword": keyword
-    }, supplier_name=keyword, cache_key="baseinfo")
+def _fetch_category(category: str, keyword: str, identity: str,
+                    query_variant: str = "primary") -> dict:
+    config = A10_CATEGORY_REGISTRY[category]
+    if not _is_configured():
+        return {"status": "not_configured", "items": [], "total": None, "complete": False}
+    if not keyword:
+        return {"status": "invalid_input", "items": [], "total": None, "complete": False}
+
+    items: list[dict] = []
+    total: int | None = None
+    for page in range(1, QCC_MAX_PAGES + 1):
+        response = _post_page(
+            config["path"],
+            {"keyword": keyword, "pageNum": page, "pageSize": 20},
+            identity,
+            f"a10:{category}:v1:{query_variant}:page:{page}",
+        )
+        if response.get("_client_error"):
+            return {"status": "error", "items": items, "total": total,
+                    "complete": False, "error": response["_client_error"]}
+        business_status = str(response.get("status", ""))
+        if business_status == NO_RESULT_STATUS:
+            return {"status": "ok", "items": items, "total": len(items), "complete": True}
+        if business_status != SUCCESS_STATUS:
+            return {"status": "error", "items": items, "total": total,
+                    "complete": False, "error": f"business_{business_status or 'missing'}"}
+        result = response.get("result")
+        if not isinstance(result, dict):
+            return {"status": "error", "items": items, "total": total,
+                    "complete": False, "error": "invalid_result_shape"}
+        page_items = result.get("items") or []
+        if not isinstance(page_items, list):
+            return {"status": "error", "items": items, "total": total,
+                    "complete": False, "error": "invalid_items_shape"}
+        items.extend(item for item in page_items if isinstance(item, dict))
+        try:
+            total = int(result.get("total", len(items)))
+        except (TypeError, ValueError):
+            total = len(items)
+        if len(items) >= total or not page_items:
+            return {"status": "ok", "items": items, "total": total, "complete": True}
+    return {"status": "ok", "items": items, "total": total, "complete": False,
+            "error": "page_limit"}
 
 
-def holders(keyword: str) -> dict:
-    """3. 股东信息（工商快照里拿）→ A03 股东核实"""
-    # 工商快照接口已含股东及出资信息（接口文档）
-    return _post("/webapi/ic/snapshot", {
-        "keyword": keyword
-    }, supplier_name=keyword, cache_key="holders")
+def _text(value: Any) -> str:
+    return "".join(str(value or "").split()).lower()
 
 
-def staff(keyword: str) -> dict:
-    """4. 主要人员（法人、董事、监事）→ A02 法人核实"""
-    # 主要人员通常在 baseinfo 返回里
-    return baseinfo(keyword)
+def _assess_dishonest(result: dict) -> dict:
+    if result.get("status") != "ok":
+        return {"status": "unavailable", "complete": False, "total": result.get("total")}
+    risk = resolved = unknown = 0
+    for item in result.get("items", []):
+        performance = _text(item.get("performance"))
+        unperformed = _text(item.get("unperformPart"))
+        if unperformed or "未履行" in performance or "部分履行" in performance:
+            risk += 1
+        elif "已履行" in performance or "履行完毕" in performance:
+            resolved += 1
+        else:
+            unknown += 1
+    status = "risk" if risk else ("unknown" if unknown or not result.get("complete") else "clear")
+    return {"status": status, "complete": bool(result.get("complete")),
+            "total": int(result.get("total") or 0), "risk_count": risk,
+            "resolved_count": resolved, "unknown_count": unknown}
 
 
-def dishonest_person(keyword: str, human_name: str = "") -> dict:
-    """5. 失信被执行人（人员）→ A10 硬拦截项"""
-    body = {"name": keyword, "pageNum": 1, "pageSize": 20}
-    if human_name:
-        body["humanName"] = human_name
-    return _post("/webapi/v4/human/dishonest", body,
-                 supplier_name=keyword, cache_key="dishonest")
+def _has_valid_removal_date(value: Any) -> bool:
+    if value in (None, "", 0, "0"):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    text = _text(value)
+    return text not in {"", "-", "--", "无", "null", "none"}
 
 
-def consumption_restriction(keyword: str) -> dict:
-    """6. 限制消费令 → A10 硬拦截项"""
-    return _post("/webapi/jr/consumptionRestriction/2.0", {
-        "keyword": keyword, "pageNum": 1, "pageSize": 20
-    }, supplier_name=keyword, cache_key="consumption_restriction")
+def _assess_serious_illegal(result: dict) -> dict:
+    if result.get("status") != "ok":
+        return {"status": "unavailable", "complete": False, "total": result.get("total")}
+    risk = removed = unknown = 0
+    for item in result.get("items", []):
+        if _has_valid_removal_date(item.get("removeDate")):
+            removed += 1
+        elif any(key in item for key in ("removeDate", "putDate", "putReason", "putDepartment")):
+            risk += 1
+        else:
+            unknown += 1
+    status = "risk" if risk else ("unknown" if unknown or not result.get("complete") else "clear")
+    return {"status": status, "complete": bool(result.get("complete")),
+            "total": int(result.get("total") or 0), "risk_count": risk,
+            "removed_count": removed, "unknown_count": unknown}
 
 
-def end_case(keyword: str) -> dict:
-    """7. 终本案件（执行案件终结本次程序）→ A10 扩展"""
-    # 终本案件在接口清单里，需单独查文档确认路径
-    return _post("/webapi/jr/endCase", {
-        "keyword": keyword, "pageNum": 1, "pageSize": 20
-    }, supplier_name=keyword, cache_key="end_case")
+def fetch_a10_checks(name: str, credit_code: str = "") -> dict:
+    """查询已授权 A10 类别，返回不含案件明细的结构化摘要。"""
+    keyword = credit_code.strip() or name.strip()
+    # 缓存继续按供应商名分组，以便现有“清理单家供应商缓存”同步删除。
+    identity = name.strip() or credit_code.strip()
+    def _fetch_with_name_fallback(category: str) -> dict:
+        primary = _fetch_category(
+            category, keyword, identity, "credit" if credit_code.strip() else "name")
+        # 企业名称是文档示例的标准入参。信用代码优先查询无记录时再用名称复查，
+        # 避免接口只按名称建索引而产生假阴性；两种查询各自缓存，不混用。
+        if (credit_code.strip() and name.strip() and primary.get("status") == "ok"
+                and int(primary.get("total") or 0) == 0):
+            fallback = _fetch_category(category, name.strip(), identity, "name")
+            if fallback.get("status") == "ok":
+                return fallback
+        return primary
 
-
-def bankruptcy(keyword: str) -> dict:
-    """8. 破产重整 → A10 严重违法"""
-    return _post("/webapi/jr/bankruptcy/2.0", {
-        "keyword": keyword, "pageNum": 1, "pageSize": 20
-    }, supplier_name=keyword, cache_key="bankruptcy")
-
-
-def operation_abnormal(keyword: str) -> dict:
-    """9. 经营异常名录 → A10 硬拦截项"""
-    return _post("/webapi/hi/abnormal/2.0", {
-        "keyword": keyword, "pageNum": 1, "pageSize": 20
-    }, supplier_name=keyword, cache_key="operation_abnormal")
-
-
-def tax_contravention(keyword: str) -> dict:
-    """10. 税收违法 → A10 严重违法"""
-    return _post("/webapi/mr/taxContravention/2.0", {
-        "keyword": keyword, "pageNum": 1, "pageSize": 20
-    }, supplier_name=keyword, cache_key="tax_contravention")
-
-
-# ============================================================
-# 第一档扩展（财务三表，对应保密改造后 A08 财报合规）
-# 9/4 保密改造：A08 财报改走企查查公查数据，无数据转人工
-# ============================================================
-def balance_sheet(keyword: str) -> dict:
-    """11. 资产负债表 → A08 财报（资产负债率计算）"""
-    return _post("/webapi/cb/cb/ic/balanceSheet/2.0", {
-        "keyword": keyword
-    }, supplier_name=keyword, cache_key="balance_sheet")
-
-
-def income_statement(keyword: str) -> dict:
-    """12. 利润表 → A08 财报（辅助判断经营情况）"""
-    return _post("/webapi/cb/cb/ic/incomeStatement/2.0", {
-        "keyword": keyword
-    }, supplier_name=keyword, cache_key="income_statement")
-
-
-def cash_flow(keyword: str) -> dict:
-    """13. 现金流量表 → A08 财报（经营性现金流判断）"""
-    return _post("/webapi/cb/cb/ic/cashFlow/2.0", {
-        "keyword": keyword
-    }, supplier_name=keyword, cache_key="cash_flow")
-
-
-# ============================================================
-# 批量入口（被 enhance_checklist_with_qcc 调用）
-# ============================================================
-def _payload(response):
-    """Unwrap the documented service envelope; unknown shapes stay unknown."""
-    if not isinstance(response, dict):
-        return {}
-    value = response.get("result", response.get("data", {}))
-    return value if isinstance(value, dict) else {}
-
-
-def fetch_first_tier(name: str) -> dict:
-    """
-    批量拉取第一档全部接口数据（单家供应商）
-    返回结构对齐 qcc_results.json 现有字段（向后兼容）：
-    {
-        "reg_info": {...},           # baseinfo 返回
-        "accuracy": {...},           # verify_ic 返回
-        "shareholders": [...],       # holders 返回
-        "actual_controller": {...},  # human_holding 返回（暂未对接）
-        "dishonest": [...],          # 新增 5 块（合规拦截）
-        "executed": [...],
-        "consumption_restriction": [...],
-        "operation_abnormal": [...],
-        "illegal_info": [...],       # 实际是 tax_contravention
-        "financial": {...}           # 财报三表（A08 财报合规）
-    }
-    """
+    dishonest = _assess_dishonest(_fetch_with_name_fallback("dishonest"))
+    serious = _assess_serious_illegal(_fetch_with_name_fallback("serious_illegal"))
     return {
-        "reg_info": _payload(baseinfo(name)),
-        "accuracy": _payload(verify_ic(name, "", "")),
-        "shareholders": holders(name).get("result", []),
-        "actual_controller": {},  # 围标串标接口，先不做
-        "dishonest": dishonest_person(name).get("result", []),
-        "executed": [],  # 历史被执行人，需单查
-        "consumption_restriction": consumption_restriction(name).get("result", []),
-        "operation_abnormal": operation_abnormal(name).get("result", []),
-        "illegal_info": tax_contravention(name).get("result", []),
-        "financial": {
-            "balance_sheet": balance_sheet(name),
-            "income_statement": income_statement(name),
-            "cash_flow": cash_flow(name),
-        },
+        "version": 1,
+        "queried_categories": list(A10_CATEGORY_REGISTRY),
+        "pending_categories": ["被执行人", "限制消费令", "经营异常"],
+        "categories": {"dishonest": dishonest, "serious_illegal": serious},
+        "complete_for_a10": False,
     }
+
+
+# 向后兼容旧调用方；新流程不会触发未获授权接口。
+def dishonest_person(keyword: str, human_name: str = "") -> dict:
+    del human_name
+    return _post_page(A10_CATEGORY_REGISTRY["dishonest"]["path"],
+                      {"keyword": keyword, "pageNum": 1, "pageSize": 20},
+                      keyword, "legacy:dishonest:page:1")
+
+
+def serious_illegal(keyword: str) -> dict:
+    return _post_page(A10_CATEGORY_REGISTRY["serious_illegal"]["path"],
+                      {"keyword": keyword, "pageNum": 1, "pageSize": 20},
+                      keyword, "legacy:serious_illegal:page:1")
 
 
 if __name__ == "__main__":
-    # 自检：AppKey 未配置时的行为
-    if not _is_configured():
-        print("[QCC] QCC_APP_KEY/QCC_SECRET_KEY 未配置")
-        print("[QCC] 调用任何接口都会返回空 dict，enhance_checklist_with_qcc 走人工复核路径")
-        print("[QCC] 不影响现有审批流程，零侵入")
-        print(f"[QCC] 接口域名: {QCC_BASE_URL}")
-        print("[QCC] 鉴权方式: MD5(AppId + Timespan + secretKey).upper()")
-    else:
-        print(f"[QCC] 已配置 AppKey={QCC_APP_KEY[:8]}...")
-        # TODO: 申请到 AppKey 后，这里加一个端到端自检
+    print("企业信息接口凭据：" + ("已配置" if _is_configured() else "未配置"))
+    print("已启用类别：失信被执行人、严重违法")

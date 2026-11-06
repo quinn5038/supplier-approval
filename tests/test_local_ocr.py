@@ -57,6 +57,28 @@ def test_sideways_business_license_selects_upright_page_orientation():
     assert ocr.read.call_count == 3
 
 
+def test_sideways_license_geometry_beats_more_vertical_field_markers():
+    image = np.full((240, 120, 3), 255, dtype=np.uint8)
+    # The real failure mode recognised many labels on the sideways original,
+    # causing marker count to outweigh the fact that every box was vertical.
+    original = [
+        vertical_item("营业执照", 5, 10), vertical_item("统一社会信用代码", 30, 10),
+        vertical_item("经营范围", 55, 10), vertical_item("法定代表人", 80, 10),
+        vertical_item("注册资本", 105, 10),
+    ]
+    clockwise_upside_down = [item("营业执照", 10, 85), item("登记机关", 10, 5)]
+    counterclockwise_upright = [
+        item("营业执照", 10, 5), item("经营范围", 10, 30), item("登记机关", 10, 85),
+    ]
+    ocr = Mock()
+    ocr.read.side_effect = [original, clockwise_upside_down, counterclockwise_upright]
+
+    oriented, result = read_with_orientation_retry(image, ocr)
+
+    assert result is counterclockwise_upright
+    assert np.array_equal(oriented, cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE))
+
+
 def test_non_license_portrait_does_not_trigger_page_rotation():
     image = np.full((240, 120, 3), 255, dtype=np.uint8)
     original = [vertical_item("普通说明文件", 10, 20)]
@@ -143,6 +165,67 @@ def test_model_change_invalidates_identity(tmp_path, monkeypatch):
     previous = local_ocr.cache_identity()
     (tmp_path / "rec/inference.pdiparams").write_bytes(b"new model")
     assert local_ocr.cache_identity() != previous
+
+
+def test_worker_environment_limits_native_cpu_threads(monkeypatch):
+    monkeypatch.setenv("LOCAL_OCR_THREADS", "3")
+    env = local_ocr._worker_environment()
+    assert env["OMP_NUM_THREADS"] == "3"
+    assert env["MKL_NUM_THREADS"] == "3"
+    assert env["OPENBLAS_NUM_THREADS"] == "3"
+    assert env["FLAGS_allocator_strategy"] == "auto_growth"
+
+
+def test_technical_error_summary_excludes_ocr_text_and_material_path(tmp_path):
+    material = tmp_path / "private-material.jpg"
+    stderr = (f"recognised synthetic OCR body\n"
+              f"RuntimeError: allocation failed while reading {material}\n")
+    summary = local_ocr._technical_error_summary(stderr, [material], tmp_path / "models")
+    assert "synthetic OCR body" not in summary
+    assert str(material) not in summary
+    assert "RuntimeError" in summary
+    assert "<material>" in summary
+
+
+def test_batch_worker_failure_restarts_and_isolates_documents(tmp_path, monkeypatch):
+    import desensitize
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"runtime")
+    monkeypatch.setattr(desensitize, "_PADDLE_PYTHON", str(python))
+    paths = [tmp_path / "a.pdf", tmp_path / "b.pdf"]
+    calls = []
+
+    def invoke(items):
+        calls.append(list(items))
+        if len(items) > 1:
+            raise local_ocr.LocalOcrWorkerError("crash", reason="exit_1")
+        return {items[0]: {"markdown": "ok", "detail": []}}
+
+    monkeypatch.setattr(local_ocr, "_invoke_worker", invoke)
+    result = local_ocr.parse_files(paths)
+    resolved = [str(path.resolve()) for path in paths]
+    assert calls == [resolved, [resolved[0]], [resolved[1]]]
+    assert all(result[path]["markdown"] == "ok" for path in resolved)
+
+
+def test_isolated_retry_failure_does_not_discard_other_documents(tmp_path, monkeypatch):
+    import desensitize
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"runtime")
+    monkeypatch.setattr(desensitize, "_PADDLE_PYTHON", str(python))
+    paths = [tmp_path / "good.pdf", tmp_path / "bad.pdf"]
+    resolved = [str(path.resolve()) for path in paths]
+
+    def invoke(items):
+        if len(items) > 1 or items[0] == resolved[1]:
+            raise local_ocr.LocalOcrWorkerError("crash", reason="exit_3221225477")
+        return {items[0]: {"markdown": "ok", "detail": []}}
+
+    monkeypatch.setattr(local_ocr, "_invoke_worker", invoke)
+    result = local_ocr.parse_files(paths)
+    assert result[resolved[0]]["markdown"] == "ok"
+    assert result[resolved[1]]["error"] == "本地 OCR 工作进程失败"
+    assert result[resolved[1]]["error_code"] == "exit_3221225477"
 
 
 def test_pipeline_local_batch_ignores_cloud_cache_and_low_confidence(tmp_path, monkeypatch):

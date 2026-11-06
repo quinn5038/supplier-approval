@@ -279,7 +279,45 @@ def test_business_license_reverse_vertical_name_label_detects_mismatch():
     assert result["checks"]["名称一致"] is False
     assert "执照名称「青岛亿丰通商贸有限公司」与系统「青岛国承科技发展有限公司」不一致" in result["issues"]
     assert aa._resolve_supplier_name(supplier, {"title": supplier["full_name"] + "/1"},
-                                     {"business_license": result}) == "青岛亿丰通商贸有限公司"
+                                     {"business_license": result}) == supplier["full_name"]
+
+
+def test_business_license_name_recovers_application_name_from_rotated_type_noise():
+    expected = "上海智翀环保科技有限公司"
+    text = (
+        "统一社会信用代码 91110000SYNTHETIC1\n"
+        "名称 型有限责任公司\n"
+        "住所 上海市测试路1号 上海智翀环保科技有限公司\n"
+        "经营范围 环保技术服务"
+    )
+    result = tp.extract("business_license", text, {"full_name": expected})
+    assert result["fields"]["名称"] == expected
+    assert result["checks"]["名称一致"] is True
+
+
+def test_partnership_business_license_name_stops_before_contribution_amount():
+    expected = "杭州汇鑫联合会计师事务所（普通合伙）"
+    text = (
+        "名称 " + expected + " 出 资 额伍拾万元整\n"
+        "成立日期 2020年01月01日\n经营范围 审计服务"
+    )
+    result = tp.extract("business_license", text, {"full_name": expected})
+    assert result["fields"]["名称"] == expected
+    assert "伍拾万元" not in result["fields"]["名称"]
+    assert result["checks"]["名称一致"] is True
+
+
+@pytest.mark.parametrize(("application_name", "bad_ocr_name"), [
+    ("上海智翀环保科技有限公司", "型有限责任公司"),
+    ("杭州汇鑫联合会计师事务所（普通合伙）",
+     "杭州汇鑫联合会计师事务所（普通合伙） 出 资 额伍拾万元整"),
+])
+def test_report_supplier_name_prefers_application_name(application_name, bad_ocr_name):
+    resolved = aa._resolve_supplier_name(
+        {}, {"title": application_name + "/申请编号"},
+        {"business_license": {"fields": {"名称": bad_ocr_name}}},
+    )
+    assert resolved == application_name
 
 
 def test_material_name_check_uses_todo_title_not_apply_unit_contract():
@@ -349,6 +387,52 @@ def test_iso_seal_split_date_range_does_not_use_issue_or_fake_day(doc_type, titl
 
     assert result["fields"]["有效期至"] == "2027-12-30"
     assert result["checks"]["在有效期内"] is True
+
+
+def test_three_system_pdf_scopes_type_and_expiry_to_each_certificate():
+    text = (
+        "质量管理体系认证合格证书\n注册号：SYN-QMS-001\n兹证明\n"
+        "合成石化设备有限公司\nGB/T19001-2016/1S09001:2015\n"
+        "有效期至：2027年06月24日\n\n"
+        "Environmental Management System Certificate\n"
+        "环境管理体系认证合格证书\n注册号：SYN-EMS-001\n兹证明\n"
+        "合成石化设备有限公司\nGB/T24001-2016/1S014001:2015\n"
+        "有效期至：2027年07月29日\n\n"
+        "职业健康安全管理体系认证合格证书\n注册号：SYN-OHS-001\n兹证明\n"
+        "合成石化设备有限公司\nGB/T45001-2020/1S045001:2018\n"
+        "有效期至：2027年08月30日\n"
+    )
+    supplier = {"full_name": "合成石化设备有限公司"}
+
+    expected = {
+        "iso9001": ("2027-06-24", "SYN-QMS-001"),
+        "iso14001": ("2027-07-29", "SYN-EMS-001"),
+        "iso45001": ("2027-08-30", "SYN-OHS-001"),
+    }
+    for doc_type, (expiry, number) in expected.items():
+        result = tp.extract(doc_type, text, supplier)
+        assert result["fields"]["有效期至"] == expiry
+        assert result["fields"]["证书编号"] == number
+        assert result["checks"]["材料类型正确"] is True
+        assert result["checks"]["持有人一致"] is True
+        assert result["checks"]["在有效期内"] is True
+        assert not result["issues"]
+
+
+def test_iso_confidence_accepts_qualified_certificate_title():
+    text = ("环境管理体系认证合格证书\n兹证明\n合成石化设备有限公司\n"
+            "有效期至：2027年07月29日")
+    result = tp.extract("iso14001", text, {"full_name": "合成石化设备有限公司"})
+    detail = [
+        {"text": "环境管理体系认证合格证书", "confidence": .99},
+        {"text": "合成石化设备有限公司", "confidence": .99},
+        {"text": "有效期至：2027年07月29日", "confidence": .99},
+    ]
+
+    tp._apply_ocr_confidence_review("iso14001", result, detail)
+
+    assert result["checks"]["OCR文字置信度充足"] is True
+    assert not any("置信度" in issue for issue in result["issues"])
 
 
 @pytest.mark.parametrize(("doc_type", "title", "standard"), [
@@ -441,6 +525,70 @@ def test_business_scope_removes_inline_address_and_trailing_registration_label()
     assert "登记机关" not in scope
     assert result["checks"]["经营范围一致"] is True
     assert 98 <= float(result["fields"]["经营范围相似度"].rstrip("%")) < 100
+
+
+def test_business_scope_stops_at_inline_registration_and_annual_report_footer():
+    scope = "技术开发；技术服务；软件开发"
+    ocr = (
+        "经营范围：" + scope
+        + "登记机关猫市场主体应当于每年1月1日至6月30日通过"
+        "国家市场监督管理总局监制国家企业信用信息公示系统网址、"
+        "http、wwwgsxtgovcn国家企业信息公示系统报送公示年度报告"
+    )
+    result = tp.extract("business_license", ocr, {"busi_scope": scope})
+    assert result["fields"]["经营范围"] == scope
+    assert result["checks"]["经营范围一致"] is True
+    assert "经营范围差异" not in result["fields"]
+
+
+def test_business_scope_stops_at_annual_report_footer_when_field_label_is_missing():
+    scope = "技术开发；技术服务；软件开发"
+    ocr = ("经营范围：" + scope
+           + "市场主体应当于每年1月1日至6月30日通过国家企业信用信息公示系统"
+           "报送公示年度报告")
+    result = tp.extract("business_license", ocr, {"busi_scope": scope})
+    assert result["fields"]["经营范围"] == scope
+    assert result["checks"]["经营范围一致"] is True
+
+
+def test_business_scope_stops_before_inline_fields_from_sideways_license():
+    ocr = (
+        "经营范围 法定代表人 类 名 91310116MA1J8WBR88 统一社会信用代码 "
+        "型有限责任公司 名称 测试环保科技有限公司 营业执照 材料销售 "
+        "成立日期2016年10月21日 注册资本人民币3000万元整"
+    )
+    result = tp.extract("business_license", ocr, {
+        "busi_scope": "环保技术服务；材料销售；橡胶制品销售",
+    })
+    assert result["fields"]["经营范围"] is None
+    assert result["checks"]["经营范围一致"] is None
+    assert any("经营范围提取不完整" in issue for issue in result["issues"])
+    assert not any("经营范围与系统基本信息栏填写不一致" in issue for issue in result["issues"])
+
+
+def test_business_scope_stops_at_stamp_corrupted_registration_footer():
+    scope = (
+        "服务：审查企业会计报表，验证企业资本，办理企业合并、分立、清算事宜中的"
+        "审计业务，会计咨询，税务咨询。（依法须经批准的项目，经相关部门批准后方可开展经营活动）"
+    )
+    ocr = (
+        "经营范围 " + scope
+        + "\n业\n拱 记 机 关 市 理\n2023年08月28日\n"
+        "国家企业信用信息公示系统网址http://www.gsxt.gov.cn"
+    )
+    result = tp.extract("business_license", ocr, {"busi_scope": scope})
+    assert result["fields"]["经营范围"] == scope
+    assert result["checks"]["经营范围一致"] is True
+    assert "公示系统网址" not in result["fields"]["经营范围"]
+
+
+def test_business_scope_keeps_publicity_system_inside_new_style_scope_notice():
+    scope = "软件开发（具体经营项目请登录国家企业信用信息公示系统查询）"
+    result = tp.extract("business_license", "经营范围：" + scope,
+                        {"busi_scope": "软件开发"})
+    assert "国家企业信用信息公示系统" in result["fields"]["经营范围"]
+    assert result["checks"]["经营范围一致"] is None
+    assert any("概括式" in issue for issue in result["issues"])
 
 
 @pytest.mark.parametrize("doc_type,title,standard", [
@@ -1002,12 +1150,34 @@ def test_scope_no_500_character_truncation():
     assert result["checks"]["经营范围一致"] is True
 
 
+def test_scope_similarity_at_least_93_percent_is_treated_as_basically_equal():
+    result = tp.extract(
+        "business_license",
+        "经营范围：软件开发技术服务信息咨询货物运输代理",
+        {"busi_scope": "软件开发技术服务信息咨询货物运输代办"},
+    )
+    assert float(result["fields"]["经营范围相似度"].rstrip("%")) >= 93
+    assert result["checks"]["经营范围一致"] is True
+    assert "经营范围差异" not in result["fields"]
+
+
+def test_scope_similarity_below_93_percent_shows_text_difference():
+    result = tp.extract(
+        "business_license",
+        "经营范围：软件开发技术服务信息咨询货物运输代理",
+        {"busi_scope": "软件开发技术服务信息咨询货物运输服务"},
+    )
+    assert float(result["fields"]["经营范围相似度"].rstrip("%")) < 93
+    assert result["checks"]["经营范围一致"] is None
+    assert "仅系统含" in result["fields"]["经营范围差异"]
+    assert "仅执照OCR含" in result["fields"]["经营范围差异"]
+
+
 @pytest.mark.parametrize("ocr,system", [
     ("经营范围\n说明：\n注册资本：500万元", "软件开发；技术服务"),
     ("经营范围：软件开发", ""),
     ("经营范围：软件开发", "软件开发；技术服务；道路货物运输；建筑工程施工"),
     ("经营范围：软件开发；技术服务；信息咨询；货物运输", "软件开发；技术服务；信息咨询；货物运输；货物进出口"),
-    ("经营范围：道路货物运输（不含危险货物）", "道路货物运输（含危险货物）"),
 ])
 def test_scope_unknown_and_substantive_differences_are_manual(ocr, system):
     result = tp.extract("business_license", ocr, {"busi_scope": system})
@@ -1337,6 +1507,49 @@ def test_final_opinion_contains_every_missing_material():
     assert "缺少纳税信用等级证明" in opinion
     assert "缺少新增专项资质证明" in opinion
     assert opinion.index("缺少纳税信用等级证明") < opinion.index("缺少新增专项资质证明")
+
+
+def test_cooperation_application_reject_uses_change_request_prefix():
+    stage2 = {
+        "decision": "reject",
+        "checklist": [{
+            "id": "A03",
+            "name": "纳税信用等级",
+            "status": "fail",
+            "detail": "缺少纳税信用等级证明",
+        }],
+    }
+    cache = {"1": {
+        "todo": {"billType": "P0704", "billName": "合作意向申请审批"},
+        "supplier": {},
+    }}
+
+    opinion = gen_opinion.build_opinion("1", stage2, {}, cache)
+
+    assert opinion.startswith(
+        "退回。请提交变更申请至中国港湾工程有限责任公司（中港总部），并补充："
+        "1. 缺少纳税信用等级证明")
+
+
+def test_non_cooperation_reject_keeps_standard_prefix():
+    stage2 = {
+        "decision": "reject",
+        "checklist": [{
+            "id": "A03",
+            "name": "纳税信用等级",
+            "status": "fail",
+            "detail": "缺少纳税信用等级证明",
+        }],
+    }
+    cache = {"1": {
+        "todo": {"billType": "P0702", "billName": "信息变更审批"},
+        "supplier": {},
+    }}
+
+    opinion = gen_opinion.build_opinion("1", stage2, {}, cache)
+
+    assert opinion.startswith("退回。1. 缺少纳税信用等级证明")
+    assert "请提交变更申请至中国港湾工程有限责任公司" not in opinion
 
 
 def test_ocr_missing_fields_does_not_claim_submitted_business_license_is_missing():

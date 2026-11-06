@@ -1,9 +1,11 @@
 """Local document OCR worker; communicates through JSON files, never a cloud API."""
 import argparse
+import gc
 import json
 import re
 import socket
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -52,9 +54,14 @@ def _orientation_score(image, items):
             layout_score += 1 if center_y < .55 else -1
         if "登记机关" in text:
             layout_score += 1 if center_y > .45 else -1
-    return (marker_count, layout_score,
-            horizontal_chars / max(1.0, total_chars),
-            confidence_chars / max(1.0, total_chars))
+    horizontal_ratio = horizontal_chars / max(1.0, total_chars)
+    # A sideways page can still recognise more field labels than either rotated
+    # retry.  Marker count used to win before geometry, so that vertical OCR was
+    # incorrectly selected and columns were flattened into one scope value.
+    # First require a predominantly horizontal candidate; marker/layout evidence
+    # then chooses between the two horizontal (upright/upside-down) rotations.
+    return (horizontal_ratio >= .65, marker_count, layout_score,
+            horizontal_ratio, confidence_chars / max(1.0, total_chars))
 
 
 def read_with_orientation_retry(image, ocr):
@@ -127,9 +134,12 @@ def ordered_lines(items, page_id):
     return "\n".join(text), detail
 
 
-def parse_document(path, ocr, dpi=200):
+def parse_document(path, ocr, dpi=200, metrics=None):
     path = Path(path)
     pages, details = [], []
+    metrics = metrics if metrics is not None else {}
+    metrics.setdefault("pages", 0)
+    metrics.setdefault("max_pixels", 0)
     if path.suffix.lower() == ".pdf":
         with pymupdf.open(path) as document:
             if document.page_count > 100:
@@ -139,6 +149,9 @@ def parse_document(path, ocr, dpi=200):
                 pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
                 rgb = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, 3)
                 image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                metrics["pages"] += 1
+                metrics["max_pixels"] = max(
+                    metrics["max_pixels"], image.shape[0] * image.shape[1])
                 text, detail = ordered_lines(read_material_image(image, ocr), number)
                 if not detail:
                     raise ValueError(f"第{number}页未识别到文字，转人工")
@@ -148,6 +161,8 @@ def parse_document(path, ocr, dpi=200):
         image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("无法读取材料图片")
+        metrics["pages"] += 1
+        metrics["max_pixels"] = image.shape[0] * image.shape[1]
         text, details = ordered_lines(read_material_image(image, ocr), 1)
         pages.append(text)
     else:
@@ -166,14 +181,32 @@ def main():
     socket.socket.connect = deny_network
     socket.socket.connect_ex = deny_network
     socket.create_connection = deny_network
+    model_started = time.perf_counter()
     ocr = CardOcr(args.model_dir)
+    model_load_ms = round((time.perf_counter() - model_started) * 1000)
     results = {}
+    total_pages = total_ocr_ms = max_pixels = 0
     for path in json.loads(args.request.read_text(encoding="utf-8")):
+        started = time.perf_counter()
+        metrics = {}
         try:
-            text, detail = parse_document(path, ocr)
+            text, detail = parse_document(path, ocr, metrics=metrics)
             results[path] = {"markdown": text, "detail": detail}
         except Exception as exc:
             results[path] = {"error": str(exc)}
+        finally:
+            total_ocr_ms += round((time.perf_counter() - started) * 1000)
+            total_pages += metrics.get("pages", 0)
+            max_pixels = max(max_pixels, metrics.get("max_pixels", 0))
+            # Paddle/OpenCV may retain large page arrays until cyclic GC runs.
+            # A collection boundary per document lowers peak usage in long batches.
+            gc.collect()
+    results["__worker_meta__"] = {
+        "model_load_ms": model_load_ms,
+        "ocr_ms": total_ocr_ms,
+        "pages": total_pages,
+        "max_page_pixels": max_pixels,
+    }
     args.response.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
 
 

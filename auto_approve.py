@@ -47,12 +47,15 @@ from ocr_runtime import get_ocr_mode, mode_result_path, readable_result_path
 # ============================================================
 _env_file = Path(__file__).parent / ".env"
 if _env_file.exists():
+    # 显式进程环境优先；同一 .env 内若键重复则采用最后一项，符合常见
+    # dotenv 语义，也避免模板中的前置空值遮蔽文件末尾填写的真实配置。
+    _explicit_env_keys = set(os.environ)
     for _line in _env_file.read_text(encoding="utf-8").splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
             _k, _v = _k.strip(), _v.strip()
-            if _k and _k not in os.environ:
+            if _k and _k not in _explicit_env_keys:
                 os.environ[_k] = _v
 
 try:
@@ -860,11 +863,13 @@ def _is_department_name(name):
 def _resolve_supplier_name(supplier, todo, textin_for_todo=None):
     """供应商名称统一取值（2026-09-08）。
 
-    优先级（与首页列表展示完全一致）：
-      1. A01 核验结果（营业执照 OCR 的「名称」）——最权威，来自执照原件
-      2. 待办标题 title（title.split("/")[0]）——首页同款，供应商姓名
+    报告标题/页尾必须展示供应商申请名称，不能由营业执照 OCR 覆盖。
+    优先级：
+      1. 待办标题 title（title.split("/")[0]）——申请名称、首页同款
+      2. supplier.full_name——系统基本信息中的完整名称
       3. applyUnitName（排除「其他部门」「项目经理部」等申请部门/主体名）
-      4. 兜底：supplier.name 简称
+      4. supplier.name 简称
+      5. A01 OCR 名称（仅在系统名称全部缺失时兜底）
 
     边界处理：
       - 核验结果为空/缺失 → 落到 title
@@ -872,18 +877,17 @@ def _resolve_supplier_name(supplier, todo, textin_for_todo=None):
       - applyUnitName 为空或是部门/项目部名 → 落到 supplier.name
       - supplier.name 也为空 → 返回空串（由调用方兜底 todo_id）
     """
-    # 1. A01 核验结果名称（营业执照 OCR）
-    bl = (textin_for_todo or {}).get("business_license") or {}
-    ocr_name = (bl.get("fields") or {}).get("名称")
-    if ocr_name:
-        return str(ocr_name).strip()
-
-    # 2. 待办标题 title（首页同款：取 "/" 前的供应商姓名）
+    # 1. 待办标题 title（首页同款：取 "/" 前的供应商申请名称）
     title = str((todo or {}).get("title") or "").strip()
     if title:
         first = title.split("/")[0].strip()
         if first:
             return first
+
+    # 2. 系统基本信息中的完整名称
+    full_name = str((supplier or {}).get("full_name") or "").strip()
+    if full_name:
+        return full_name
 
     # 3. 系统填入的完整名称（排除申请部门/主体名）
     apply_unit = str((todo or {}).get("applyUnitName") or "").strip()
@@ -891,7 +895,14 @@ def _resolve_supplier_name(supplier, todo, textin_for_todo=None):
         return apply_unit
 
     # 4. 兜底：简称
-    return str((supplier or {}).get("name") or "").strip()
+    short_name = str((supplier or {}).get("name") or "").strip()
+    if short_name:
+        return short_name
+
+    # 5. 系统名称全部缺失时才使用 OCR 名称。
+    bl = (textin_for_todo or {}).get("business_license") or {}
+    ocr_name = (bl.get("fields") or {}).get("名称")
+    return str(ocr_name or "").strip()
 
 
 def _build_skip_result(tid, entry, decision_reason, textin_for_todo=None):
@@ -2215,8 +2226,62 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
             c["evidence"] = assessment
             qcc_issues.append("A08 财报：" + assessment["detail"])
 
-        # ---- A10 商业信誉：企查查数据核验（9/7 优化：明确有/无数据）----
+        # ---- A10 商业信誉：企业信息专项接口核验 ----
         elif cid == "A10":
+            a10 = qcc.get("a10_checks") or {}
+            categories = a10.get("categories") or {}
+            if categories:
+                dishonest = categories.get("dishonest") or {}
+                illegal = categories.get("serious_illegal") or {}
+
+                def _dishonest_text():
+                    state = dishonest.get("status")
+                    if state == "risk":
+                        return f"失信被执行人：发现{dishonest.get('risk_count', 0)}条当前未履行风险"
+                    if state == "clear":
+                        resolved = dishonest.get("resolved_count", 0)
+                        return (f"失信被执行人：{resolved}条历史记录均已履行"
+                                if resolved else "失信被执行人：未查到记录")
+                    if state == "unknown":
+                        return "失信被执行人：存在履行状态不明确的记录"
+                    return "失信被执行人：接口查询未完成"
+
+                def _illegal_text():
+                    state = illegal.get("status")
+                    if state == "risk":
+                        return f"严重违法：发现{illegal.get('risk_count', 0)}条尚未移出记录"
+                    if state == "clear":
+                        removed = illegal.get("removed_count", 0)
+                        return (f"严重违法：{removed}条历史记录均已移出"
+                                if removed else "严重违法：未查到记录")
+                    if state == "unknown":
+                        return "严重违法：存在移出状态不明确的记录"
+                    return "严重违法：接口查询未完成"
+
+                findings = [_dishonest_text(), _illegal_text()]
+                pending = a10.get("pending_categories") or []
+                pending_text = "、".join(str(item) for item in pending)
+                # 目前只接入两类，无论阴性或发现风险，A10 总项均保守转人工，
+                # 防止把“已查两类”误显示成“商业信誉全部通过”。
+                c["status"] = "manual"
+                c["detail"] = "；".join(findings)
+                if pending_text:
+                    c["detail"] += f"；{pending_text}尚未接入，A10整体转人工核验"
+
+                risk_findings = []
+                if dishonest.get("status") == "risk":
+                    risk_findings.append(findings[0])
+                elif dishonest.get("status") in {"unknown", "unavailable"}:
+                    risk_findings.append("失信被执行人查询结果不完整")
+                if illegal.get("status") == "risk":
+                    risk_findings.append(findings[1])
+                elif illegal.get("status") in {"unknown", "unavailable"}:
+                    risk_findings.append("严重违法查询结果不完整")
+                if pending_text:
+                    risk_findings.append(f"{pending_text}尚未接入")
+                qcc_issues.append("A10 商业信誉：" + "；".join(risk_findings))
+                continue
+
             status = reg.get("登记状态", "") if reg else ""
             if not reg:
                 # 企查查无该企业工商数据 → 人工核验
@@ -2467,6 +2532,22 @@ def run_stage2():
             q = {}
             log.info(f"[阶段2] {todo.get('applyUnitName') or supplier.get('name')}"
                      f" 无企查查数据，仅按材料+规则出结果（企查查项转人工）")
+        elif not isinstance(q, dict):
+            q = {}
+
+        # A10 生产接口实时查询：仅调用已获授权的“失信被执行人、严重违法”。
+        # 客户端自带 24 小时本机缓存；这里只合并脱敏摘要，不将案件明细写入报告。
+        try:
+            from qcc_api_client import fetch_a10_checks
+            supplier_name = (_resolve_supplier_name(supplier, todo, textin.get(tid))
+                             or supplier.get("name", ""))
+            q = dict(q)
+            q["a10_checks"] = fetch_a10_checks(
+                supplier_name,
+                supplier.get("social_credit_code", "") or supplier.get("credit_code", ""),
+            )
+        except Exception as exc:
+            log.warning("[阶段2] A10 企业信息接口查询异常：%s", type(exc).__name__)
 
         applicable_rules, type_desc = determine_supplier_rules(supplier, cfg)
         checklist, auto_failed, missing, verify_items = build_checklist(

@@ -54,11 +54,12 @@ TEXTIN_API = "https://api.textin.com/ai/service/v1/pdf_to_markdown"
 # ---------- .env 加载 ----------
 _env_file = BASE / ".env"
 if _env_file.exists():
+    _explicit_env_keys = set(os.environ)
     for _line in _env_file.read_text(encoding="utf-8").splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
-            if _k.strip() and _k.strip() not in os.environ:
+            if _k.strip() and _k.strip() not in _explicit_env_keys:
                 os.environ[_k.strip()] = _v.strip()
 
 TEXTIN_APP_ID = os.getenv("TEXTIN_APP_ID", "")
@@ -242,7 +243,7 @@ def _pre(text):
 
 
 # 已知字段标签（值遇到这些词就停，防止把下一字段吞进来）
-_FIELD_STOP = (r"统一社会信用代码|名称|类型|住所|法定代表人|注册资本|成立日期|"
+_FIELD_STOP = (r"统一社会信用代码|名称|类型|住所|法定代表人|注册资本|出资额|成立日期|"
                r"营业期限|经营范围|证书编号|获证组织|认证状态|有效期至|有效期限|"
                r"授权方|被授权方|授权期限|纳税人名称|纳税人识别号")
 
@@ -372,10 +373,27 @@ def _extract_business_license_legal_person(text):
     return cleaned or None
 
 
-_COMPANY_SUFFIX = ("有限责任公司", "股份有限公司", "有限公司", "集团公司", "公司")
+_COMPANY_SUFFIX = (
+    "会计师事务所（普通合伙）", "会计师事务所(普通合伙)",
+    "普通合伙企业", "有限合伙企业", "股份有限公司", "有限责任公司",
+    "合伙企业", "有限公司", "集团公司", "事务所", "公司",
+)
 
 
-def _extract_business_license_name(text):
+def _plausible_business_license_name(value):
+    """Reject field/type debris that has no distinctive organisation name."""
+    compact = _norm(value)
+    if len(compact) < 5:
+        return False
+    type_only = (
+        "有限责任公司", "股份有限公司", "有限公司", "集团公司", "公司",
+        "普通合伙企业", "有限合伙企业", "合伙企业", "事务所",
+    )
+    return not any(compact in {suffix, "型" + suffix, "类型" + suffix}
+                   for suffix in type_only)
+
+
+def _extract_business_license_name(text, expected_name=None):
     """Extract the registered name from conventional and column-reversed licences.
 
     PaddleOCR may flatten the two-column/vertical-label licence layout as
@@ -386,9 +404,14 @@ def _extract_business_license_name(text):
     mistaking the registration authority or another company in body text for
     the licence holder.
     """
-    value = _grab(text, ["名称"], r"[^\n:：]{2,60}?")
-    if value:
+    value = _grab(text, ["名称"], r"[^\n:：]{2,80}?")
+    if value and _plausible_business_license_name(value):
         return value
+
+    expected_name = str(expected_name or "").strip()
+    if (expected_name and len(_norm(expected_name)) > 4
+            and _norm(expected_name) in _norm(text)):
+        return expected_name
 
     suffix = "(?:" + "|".join(map(re.escape, _COMPANY_SUFFIX)) + ")"
     for raw_line in text.splitlines():
@@ -403,14 +426,14 @@ def _extract_business_license_name(text):
             matches = re.findall(rf"[\u4e00-\u9fa5A-Za-z0-9（）()·&]+?{suffix}", token)
             if matches:
                 candidate = matches[-1].strip("()（） ")
-                if len(candidate) >= 6 and candidate not in _COMPANY_SUFFIX:
+                if len(candidate) >= 6 and _plausible_business_license_name(candidate):
                     return candidate
     return None
 
 
 def _normalise_field_labels(text):
     """Join whitespace inside known OCR labels while preserving value spacing."""
-    labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本",
+    labels = ("统一社会信用代码", "名称", "类型", "住所", "法定代表人", "注册资本", "出资额",
               "成立日期", "营业期限", "经营范围", "登记机关", "核准日期")
     for label in labels:
         spaced = r"\s*".join(map(re.escape, label))
@@ -478,6 +501,21 @@ def _extract_business_scope(text):
     boundary = re.search(
         r"(?:\n\s*(?:注册资本|成立日期|营业期限|住所|登记机关|核准日期|统一社会信用代码))"
         r"|(?:(?:注册资本|成立日期|营业期限|住所|登记机关|核准日期)\s*[:：])"
+        # Sideways/two-column OCR may concatenate the next licence field on the
+        # same line without a colon.  Treat distinctive label/value pairs as a
+        # hard boundary instead of comparing the entire licence as scope text.
+        r"|(?:法\s*定\s*代\s*表\s*人)"
+        r"|(?:统\s*一\s*社\s*会\s*信\s*用\s*代\s*码)"
+        r"|(?:成\s*立\s*日\s*期\s*(?=\d))"
+        r"|(?:注\s*册\s*资\s*本\s*(?=人民币|[\d壹贰叁肆伍陆柒捌玖拾佰仟万]))"
+        r"|(?:登\s*记\s*机\s*关)"
+        # A stamp commonly changes 登 into 拱 and splits the remaining label
+        # into separate OCR boxes (拱/记/机/关).
+        r"|(?:拱\s*记\s*机\s*关)"
+        r"|(?:(?:市场主体|企业)\s*应当\s*于?\s*每年\s*1\s*月\s*1\s*日?\s*至\s*6\s*月\s*30\s*日?)"
+        r"|(?:国家\s*市场监督管理总局\s*监制)"
+        r"|(?:国家\s*企业\s*信用\s*信息\s*公示\s*系统\s*网址)"
+        r"|(?:报送\s*公示\s*年度报告)"
         r"|(?:\n\s*\d+[、.．]\s*本营业执照)|<!--|数字签名", tail)
     if boundary:
         tail = tail[:boundary.start()]
@@ -492,6 +530,9 @@ def _extract_business_scope(text):
     # 扫描件常只识别出右下角“登记机关”标签而没有机关名称。同行标签没有
     # 冒号，旧边界规则不会截断，需在字段尾部清除，避免参与经营范围相似度。
     tail = re.sub(r"\s*(?:登记机关|核准日期)\s*(?:-->)?\s*$", "", tail)
+    # A vertically displaced single box from the registration seal can land
+    # immediately before the fuzzy 登记机关 boundary (for example a lone “业”).
+    tail = re.sub(r"\n\s*[营业]\s*$", "", tail)
     tail = re.sub(r"(?m)^\s*(?:说明|经营范围说明)\s*[:：]?\s*$", "", tail).strip()
     return tail or None
 
@@ -540,7 +581,8 @@ def extract_business_license(text, supplier):
         m2 = re.search(r"(?<![0-9A-Za-z])([0-9A-Z]{18})(?![0-9A-Za-z])", t)
         code = m2.group(1) if m2 else None
     fields["统一社会信用代码"] = code.upper() if code else None
-    fields["名称"] = _extract_business_license_name(t)
+    expected_name = supplier.get("full_name") or supplier.get("name")
+    fields["名称"] = _extract_business_license_name(t, expected_name)
     fields["法定代表人"] = _extract_business_license_legal_person(t)
     # 90°侧放或双栏错序时，标签列可能先被读成“法定代表人 类 名”，而真正
     # 姓名落在随后的相邻文本。仅当标签值已判定为噪声，且系统法人姓名确实
@@ -633,30 +675,36 @@ def extract_business_license(text, supplier):
             system_only = [v for v in system_items if v not in license_items]
             if license_items and system_items and not license_only and not system_only:
                 checks["经营范围一致"] = True
-            elif ratio >= 0.98:
+            elif ratio >= 0.93:
                 # 清除双栏错位字段后，少量 OCR 形近字（如“件”→“侏”）不应让
-                # 实质相同的长经营范围转人工。98% 阈值只容忍极少字符误差，
-                # 不改变存在项目增删或较大文本差异时的原有判定。
+                # 实质相同的经营范围转人工。相似度达到 93% 即按文字基本一致
+                # 处理，不生成差异字段或提示；低于 93% 才展示具体文字差异。
                 checks["经营范围一致"] = True
-            elif min(len(license_norm), len(system_norm)) < max(len(license_norm), len(system_norm)) * 0.65:
-                issues.append(f"经营范围文本长度差异较大，可能提取不完整（相似度{ratio:.0%}），需人工核验")
-            elif ratio >= 0.7:
-                # 9/8 降级：高度相似但有差异（0.7~0.9，常见是系统多/少了
-                # 「依法须经批准的项目…」这类标准结尾提示语）不再判 fail（退回），
-                # 改为 checks=None → enhance_checklist_with_textin 走 manual（转人工复核）。
-                checks["经营范围一致"] = None
+            else:
                 differences = []
                 if system_only:
                     differences.append("仅系统含：" + "、".join(system_only))
                 if license_only:
                     differences.append("仅执照OCR含：" + "、".join(license_only))
-                fields["经营范围差异"] = "；".join(differences)
+                fields["经营范围差异"] = "；".join(differences) or "存在文字差异"
+
+            if (checks["经营范围一致"] is not True and ratio < 0.93
+                    and min(len(license_norm), len(system_norm))
+                    < max(len(license_norm), len(system_norm)) * 0.65):
+                issues.append(
+                    f"经营范围文本长度差异较大，可能提取不完整（相似度{ratio:.0%}），"
+                    f"需人工核验：{fields['经营范围差异']}")
+            elif checks["经营范围一致"] is not True and 0.7 <= ratio < 0.93:
+                # 9/8 降级：高度相似但有差异（0.7~0.9，常见是系统多/少了
+                # 「依法须经批准的项目…」这类标准结尾提示语）不再判 fail（退回），
+                # 改为 checks=None → enhance_checklist_with_textin 走 manual（转人工复核）。
+                checks["经营范围一致"] = None
                 issues.append(f"执照经营范围与系统填写高度相似但有差异"
                               f"（相似度{ratio:.0%}），需人工确认：{fields['经营范围差异']}")
-            else:
+            elif checks["经营范围一致"] is not True and ratio < 0.7:
                 checks["经营范围一致"] = False
                 issues.append(f"执照经营范围与系统基本信息栏填写不一致"
-                              f"（相似度{ratio:.0%}）")
+                              f"（相似度{ratio:.0%}）：{fields['经营范围差异']}")
     # 9/7 修复：关键字段（名称/法定代表人/注册资本/经营范围）任一缺失 → 识别不完整，转人工。
     # 此前只在「全部字段都空」时报 issue，导致「只识别到信用代码」这种部分识别
     # 被 enhance_checklist_with_textin 误判为 pass（A01 要求名称/注册资本/法人/经营范围全一致，
@@ -1002,29 +1050,88 @@ def _extract_iso_certification_body(text, holder=None):
     return None
 
 
+_ISO_SECTION_PATTERNS = {
+    "9001": (
+        r"质量管理体系\s*认证(?:合格)?证书",
+        r"Quality\s+Management\s+System\s+Certificate",
+    ),
+    "14001": (
+        r"环境管理体系\s*认证(?:合格)?证书",
+        r"Environmental\s+Management\s+System\s+Certificate",
+    ),
+    "45001": (
+        r"职业健康安全管理体系\s*认证(?:合格)?证书",
+        r"Occupational\s+Health\s+and\s+Safety\s+Management\s*"
+        r"System\s+Certificate",
+    ),
+}
+
+
+def _iso_type_matches(text, iso_code):
+    """Recognise an ISO type despite common local-OCR title/ISO confusions."""
+    normalised = _norm(text)
+    if any(re.search(pattern, text, re.I)
+           for pattern in _ISO_SECTION_PATTERNS.get(iso_code, ())):
+        return True
+    gb_code = {"9001": "19001", "14001": "24001", "45001": "45001"}.get(iso_code)
+    if gb_code and re.search(r"GB/T" + gb_code + r"(?!\d)", normalised, re.I):
+        return True
+    # Paddle commonly reads the capital I/O in ISO as the digits 1/0.
+    return bool(re.search(r"(?:ISO|IS0|1SO|1S0)" + re.escape(iso_code)
+                          + r"(?!\d)", normalised, re.I))
+
+
+def _iso_certificate_section(text, iso_code):
+    """Return only the requested certificate section from a three-system PDF.
+
+    Suppliers often upload one multi-page PDF containing QMS, EMS and OHSMS.
+    Extracting the whole document for every rule makes all three rules take the
+    first QMS expiry. Chinese/English certificate titles provide reliable
+    section boundaries; if the requested title is absent, retain the historical
+    whole-document fallback instead of guessing a page.
+    """
+    starts = []
+    expected = []
+    for code, patterns in _ISO_SECTION_PATTERNS.items():
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.I):
+                starts.append((match.start(), code))
+                if code == iso_code:
+                    expected.append(match.start())
+    if not expected:
+        return text
+    start = min(expected)
+    following_other = [position for position, code in starts
+                       if position > start and code != iso_code]
+    end = min(following_other) if following_other else len(text)
+    return text[start:end]
+
+
 def extract_iso_cert(text, supplier, iso_code):
     """ISO证书 → 持有人比对+效期（按行结构抽取，兼容md表格/加粗排版）"""
     supplier = supplier or {}
     t = _pre(text)
+    section = _iso_certificate_section(t, iso_code)
     fields = {}
-    fields["获证组织"], holder_source = _extract_iso_holder(t)
+    fields["获证组织"], holder_source = _extract_iso_holder(section)
     if holder_source:
         fields["获证组织_来源"] = holder_source
+    # The certification body is commonly printed as a header immediately
+    # before the certificate title, so it may sit just outside the scoped
+    # section. It is safe to read from the full document because this field is
+    # not used to select an expiry and multi-system booklets share one issuer.
     certification_body = _extract_iso_certification_body(t, fields["获证组织"])
     if certification_body:
         fields["认证机构"] = certification_body
-    m = re.search(r"证书编号\s*[:：]?\s*([A-Za-z0-9\-]{6,30})", t)
+    m = re.search(r"(?:证书编号|注册号)\s*[:：]?\s*([A-Za-z0-9\-]{6,30})", section)
     fields["证书编号"] = m.group(1) if m else None
-    exp, longterm = _valid_until(t)
+    exp, longterm = _valid_until(section)
     fields["有效期至"] = str(exp) if exp else ("长期" if longterm else None)
-    m = re.search(r"认证?状态\s*[:：]?\s*(有效|暂停|撤销|失效)", t)
+    m = re.search(r"认证?状态\s*[:：]?\s*(有效|暂停|撤销|失效)", section)
     fields["证书状态"] = m.group(1) if m else None
 
     checks, issues = {}, []
-    marker = {"9001": "质量管理体系认证证书", "14001": "环境管理体系认证证书",
-              "45001": "职业健康安全管理体系认证证书"}.get(iso_code)
-    normalised = _norm(t)
-    if re.search(r"ISO" + re.escape(iso_code) + r"(?!\d)", normalised, re.I) or (marker and marker in normalised):
+    if _iso_type_matches(section, iso_code):
         checks["材料类型正确"] = True
     else:
         checks["材料类型正确"] = None
@@ -1393,9 +1500,8 @@ def _apply_ocr_confidence_review(doc_type, result, detail):
     fields = result.get("fields") or {}
     evidence = []
     if checks.get("材料类型正确") is True:
-        marker = _norm(_ISO_TYPE_MARKERS[doc_type])
-        evidence.append(("证书类型", lambda text, code=iso_code, marker=marker:
-                         "ISO" + code in text.upper() or marker in text))
+        evidence.append(("证书类型", lambda text, code=iso_code:
+                         _iso_type_matches(text, code)))
     holder = _norm(fields.get("获证组织") or "")
     if checks.get("持有人一致") is True and holder:
         evidence.append(("获证组织", lambda text, holder=holder: holder in text))
