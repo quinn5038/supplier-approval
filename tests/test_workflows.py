@@ -10,6 +10,7 @@ import pytest
 import auto_approve as aa
 import gen_opinion
 import gen_stage2_report
+import qcc_api_client
 import textin_pipeline as tp
 from eval import safe_eval_rule
 from financial_data import (
@@ -65,6 +66,133 @@ def test_a08_uploaded_can_remain_in_other_review_section():
         "1", {"decision": "reject", "checklist": checklist}, {}, cache)
     assert "缺少经审计的上年度财报" not in opinion.splitlines()[0]
     assert "另需整改/核实：[A08]资金财务状况" in opinion
+
+
+def test_c1_iso_api_requires_exact_number_and_expiry_after_normalisation():
+    checklist = [
+        {"id": "C1_02", "name": "ISO 9001", "status": "pass", "detail": "OCR通过"},
+        {"id": "C1_03", "name": "ISO 14001", "status": "pass", "detail": "OCR通过"},
+        {"id": "C1_04", "name": "ISO 45001", "status": "pass", "detail": "OCR通过"},
+    ]
+    textin = {
+        "iso9001": {"fields": {"证书编号": " qms－ 001 ", "有效期至": "2028年1月2日"}},
+        "iso14001": {"fields": {"证书编号": "ems-002", "有效期至": "2028/02/03"}},
+        "iso45001": {"fields": {"证书编号": "OHS-003", "有效期至": "2028.3.4"}},
+    }
+    api = {"status": "ok", "complete": True, "records": [
+        {"iso_type": "iso9001", "cert_no": "QMS-001", "end_date": "2028-01-02"},
+        {"iso_type": "iso14001", "cert_no": "EMS-002", "end_date": "2028-02-03"},
+        {"iso_type": "iso45001", "cert_no": "OHS-003", "end_date": "20280304"},
+    ]}
+
+    result, issues = aa.enhance_c1_iso_with_certificate_api(checklist, textin, api)
+
+    assert [row["status"] for row in result] == ["pass", "pass", "pass"]
+    assert all("OCR与资质证书接口核验一致" in row["detail"] for row in result)
+    assert issues == []
+
+
+def test_c1_iso_api_guangdong_xuntong_counterexample_fails_all_three():
+    checklist = [
+        {"id": cid, "name": label, "status": "pass", "detail": "OCR通过"}
+        for cid, label in (
+            ("C1_02", "ISO 9001"),
+            ("C1_03", "ISO 14001"),
+            ("C1_04", "ISO 45001"),
+        )
+    ]
+    # 脱敏后的既有结果特征：三份材料识别出有效期，但均未识别出证书编号；
+    # 生产接口仅有其他资质，没有任何 ISO 证书记录。
+    textin = {
+        kind: {"fields": {"证书编号": None, "有效期至": "2028-08-28"}}
+        for kind in ("iso9001", "iso14001", "iso45001")
+    }
+    api = {"status": "ok", "complete": True, "records": [], "total": 1}
+
+    result, issues = aa.enhance_c1_iso_with_certificate_api(checklist, textin, api)
+
+    assert [row["status"] for row in result] == ["fail", "fail", "fail"]
+    assert all("资质证书接口未查询到" in row["detail"] for row in result)
+    assert len(issues) == 3
+
+
+def test_c1_iso_api_reports_expiry_mismatch_for_same_number():
+    checklist = [{"id": "C1_02", "name": "ISO 9001",
+                  "status": "pass", "detail": "OCR通过"}]
+    textin = {"iso9001": {"fields": {
+        "证书编号": "QMS-001", "有效期至": "2028-01-02"}}}
+    api = {"status": "ok", "complete": True, "records": [{
+        "iso_type": "iso9001", "cert_no": "QMS-001", "end_date": "2029-01-02"}]}
+
+    result, issues = aa.enhance_c1_iso_with_certificate_api(checklist, textin, api)
+
+    assert result[0]["status"] == "fail"
+    assert "证书编号一致但有效期不一致" in result[0]["detail"]
+    assert issues and "OCR「2028-01-02」，接口「2029-01-02」" in issues[0]
+
+
+@pytest.mark.parametrize("certifications", [[], ["ISO9001"], ["ISO14001"]])
+def test_stage2_queries_certificate_api_only_for_uploaded_iso(tmp_path, monkeypatch,
+                                                            certifications):
+    rules = aa.load_rules()["part_2_by_type"]["domestic_manufacturer"]
+    iso_rules = [rule for rule in rules if rule["id"] in ("C1_02", "C1_03", "C1_04")]
+    supplier = {"name": "合成制造有限公司", "certifications": certifications}
+    cache = {"1": {"supplier": supplier}}
+    ocr = {"1": {"iso9001": {
+        "fields": {"证书编号": "QMS-001", "有效期至": "2099-01-02"},
+        "checks": {"材料类型正确": True, "持有人一致": True, "在有效期内": True},
+    }}}
+    api = Mock(return_value={"status": "ok", "complete": True, "records": [{
+        "iso_type": "iso9001", "cert_no": "QMS-001", "end_date": "2099-01-02",
+    }]})
+    stage2_path = tmp_path / "stage2_results.offline.json"
+    (tmp_path / "textin_results.offline.json").write_text(json.dumps(ocr), encoding="utf-8")
+    monkeypatch.setenv("OCR_MODE", "offline")
+    monkeypatch.setattr(aa, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(aa, "QCC_FILE", tmp_path / "qcc_results.json")
+    monkeypatch.setattr(aa, "STAGE2_FILE", stage2_path)
+    monkeypatch.setattr(aa, "FETCH_IDS", {"1"})
+    monkeypatch.setattr(aa, "_load_cache", lambda: cache)
+    monkeypatch.setattr(aa, "determine_supplier_rules", lambda *_: (iso_rules, "境内厂家"))
+    monkeypatch.setattr(qcc_api_client, "fetch_a10_checks", Mock(return_value={}))
+    monkeypatch.setattr(qcc_api_client, "fetch_tax_credit", Mock(return_value={}))
+    monkeypatch.setattr(qcc_api_client, "fetch_qualification_certificates", api)
+
+    aa.run_stage2()
+
+    result = json.loads(stage2_path.read_text(encoding="utf-8"))["1"]
+    opinion = gen_opinion.build_opinion("1", result, ocr, cache)
+    rows = {row["id"]: row for row in result["checklist"]}
+    assert result["decision"] == "reject"
+    if certifications == ["ISO9001"]:
+        api.assert_called_once_with(supplier["name"])
+        assert rows["C1_02"]["status"] == "pass"
+        assert "缺少ISO14001、ISO45001" in opinion
+        assert "未取得OCR识别结果" not in opinion
+    elif certifications == ["ISO14001"]:
+        api.assert_called_once_with(supplier["name"])
+        assert "未取得OCR识别结果" in rows["C1_03"]["detail"]
+        assert "缺少ISO9001、ISO45001" in opinion
+    else:
+        api.assert_not_called()
+        assert all(row["detail"].startswith("缺少") for row in rows.values())
+        assert "缺少ISO9001、ISO14001、ISO45001" in opinion
+        assert "未取得OCR识别结果" not in opinion
+
+
+@pytest.mark.parametrize("label", [
+    "证书注册号：QMS-2028-001",
+    "证书号：QMS-2028-001",
+    "Certificate No.: QMS-2028-001",
+    "Registration Number: QMS-2028-001",
+])
+def test_iso_ocr_extracts_common_certificate_number_labels(label):
+    text = ("质量管理体系认证证书\n兹证明\n合成制造有限公司\n"
+            f"{label}\n有效期至：2028年12月31日")
+
+    result = tp.extract("iso9001", text, {"full_name": "合成制造有限公司"})
+
+    assert result["fields"]["证书编号"] == "QMS-2028-001"
 
 
 @pytest.mark.parametrize("name,status,years", [

@@ -1107,6 +1107,22 @@ def _iso_certificate_section(text, iso_code):
     return text[start:end]
 
 
+def _extract_iso_certificate_number(text):
+    """Extract common Chinese/English ISO certificate-number labels."""
+    pattern = re.compile(
+        r"(?:证书(?:注册)?(?:编号|号)|注册号|"
+        r"(?:CERTIFICATE|REGISTRATION)\s*(?:NO\.?|NUMBER))"
+        r"\s*[:：#]?\s*([A-Z0-9][A-Z0-9\s./()（）\-]{4,50})",
+        re.I,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    value = re.sub(r"[*_`]", "", match.group(1)).strip()
+    value = value.strip(":：,，;；.")
+    return value or None
+
+
 def extract_iso_cert(text, supplier, iso_code):
     """ISO证书 → 持有人比对+效期（按行结构抽取，兼容md表格/加粗排版）"""
     supplier = supplier or {}
@@ -1123,8 +1139,7 @@ def extract_iso_cert(text, supplier, iso_code):
     certification_body = _extract_iso_certification_body(t, fields["获证组织"])
     if certification_body:
         fields["认证机构"] = certification_body
-    m = re.search(r"(?:证书编号|注册号)\s*[:：]?\s*([A-Za-z0-9\-]{6,30})", section)
-    fields["证书编号"] = m.group(1) if m else None
+    fields["证书编号"] = _extract_iso_certificate_number(section)
     exp, longterm = _valid_until(section)
     fields["有效期至"] = str(exp) if exp else ("长期" if longterm else None)
     m = re.search(r"认证?状态\s*[:：]?\s*(有效|暂停|撤销|失效)", section)

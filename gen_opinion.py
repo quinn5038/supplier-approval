@@ -44,6 +44,7 @@ CL_NAME_FALLBACK = {
     "A11": "法律纠纷",
     "A12": "系统内入库",
     "A13": "检验检测资质",
+    "A14": "中交集团关联关系",
     "B01": "境外判断",
     "C1_01": "资质要求",
     "C1_02": "ISO9001",
@@ -287,8 +288,8 @@ def build_opinion(tid, s2, textin, cache):
         supplement_items = []
         # ISO 三认证：只列实际失败的项（C1_02=9001 / C1_03=14001 / C1_04=45001；D1_03/04/05 同理）
         iso_fail_map = {
-            "C1_02": "ISO 9001", "C1_03": "ISO 14001", "C1_04": "ISO 45001",
-            "D1_03": "ISO 9001", "D1_04": "ISO 14001", "D1_05": "ISO 45001",
+            "C1_02": "ISO9001", "C1_03": "ISO14001", "C1_04": "ISO45001",
+            "D1_03": "ISO9001", "D1_04": "ISO14001", "D1_05": "ISO45001",
         }
         failed_iso = []
         for cid, cname, desc in supplement_fails:
@@ -297,7 +298,7 @@ def build_opinion(tid, s2, textin, cache):
                 failed_iso.append(iso_name)
         if failed_iso:
             supplement_items.append(
-                "、".join(failed_iso) + " 体系认证证书（须为你公司认证且在有效期内）")
+                "缺少" + "、".join(failed_iso) + " 体系认证证书（须为你公司认证且在有效期内）")
         for cid, cname, desc in supplement_fails:
             if cid in iso_fail_map:
                 continue

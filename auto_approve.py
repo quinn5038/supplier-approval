@@ -36,6 +36,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -1311,9 +1312,9 @@ def generate_opinion_v4(supplier, auto_failed_rules, material_failed_rules, veri
                     n = r.get("name", "")
                     for code in ("9001", "14001", "45001"):
                         if code in n:
-                            iso_names.append(f"ISO {code}")
+                            iso_names.append(f"ISO{code}")
                 if iso_names:
-                    desc = "、".join(dict.fromkeys(iso_names)) + " 认证证书"
+                    desc = "缺少" + "、".join(dict.fromkeys(iso_names)) + " 认证证书"
                     if type_desc and "贸易" in type_desc:
                         desc += "（ISO 9001可上传代理厂家的认证，14001/45001须为贵司自己的认证；均须在有效期内）"
                     else:
@@ -2143,7 +2144,8 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
       actual_controller: {"实际控制人信息": [{"实际控制人名称","直接持股比例",...}]}
       financial: 财务数据dict 或 {"搜索结果": "未发现任何记录"}
 
-    更新 A01(执照核验)/A02(股权穿透)/A10(商业信誉) 三项，
+    更新 A01(执照核验)/A02(股权穿透)/A03(税务评级)/A10(商业信誉)。
+    A14 关联关系客户端已预留但当前未启用，不进入清单和决策。
     A08 财务指标不用企查查（年报数据过期，业务 9/1确认），由 TextIn 解析上传财报（阶段3）。
     返回 (checklist, qcc_issues) — qcc_issues 为需人工核实的问题列表
     """
@@ -2215,6 +2217,37 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                                f"（股东：{sh_desc}{ctrl_desc}）；"
                                f"身份证有效期仍需人工核验")
 
+        # ---- A03 纳税信用等级：企业信息接口辅助核验 ----
+        elif cid == "A03":
+            tax = qcc.get("tax_credit") or {}
+            if tax:
+                state = tax.get("status")
+                year = tax.get("latest_year")
+                grade = tax.get("latest_grade")
+                if state == "clear":
+                    api_detail = f"企业信息接口：{year}年度纳税信用{grade}级，达到C级及以上"
+                elif state == "risk":
+                    api_detail = f"企业信息接口：{year}年度纳税信用{grade}级，低于C级要求"
+                elif state == "unknown" and year:
+                    api_detail = (f"企业信息接口最新数据为{year}年度{grade or '未知'}级，"
+                                  f"未取得要求的{tax.get('required_year')}年度有效评级")
+                elif state == "no_data":
+                    api_detail = "企业信息接口未查到纳税信用评级"
+                else:
+                    api_detail = "企业信息接口查询未完成"
+
+                if c.get("status") == "fail":
+                    # 公开接口不能替代规则明确要求供应商提交的正规证明材料。
+                    c["detail"] = f"{c.get('detail', '')}；{api_detail}"
+                elif state == "clear":
+                    c["status"] = "pass"
+                    c["detail"] = api_detail
+                else:
+                    c["status"] = "manual"
+                    c["detail"] = api_detail + "，需结合供应商提交证明人工核验"
+                if state in {"risk", "unknown", "no_data", "unavailable"}:
+                    qcc_issues.append("A03 纳税信用等级：" + api_detail)
+
         # ---- A08 资金财务状况（2026-09-04 保密合规改造）----
         # 改走企查查财务数据（公开披露），不再依赖 TextIn 解析供应商上传的财报（敏感数据）
         elif cid == "A08":
@@ -2233,6 +2266,8 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
             if categories:
                 dishonest = categories.get("dishonest") or {}
                 illegal = categories.get("serious_illegal") or {}
+                abnormal = categories.get("operation_abnormal") or {}
+                bad_conduct = categories.get("bad_conduct") or {}
 
                 def _dishonest_text():
                     state = dishonest.get("status")
@@ -2258,15 +2293,39 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                         return "严重违法：存在移出状态不明确的记录"
                     return "严重违法：接口查询未完成"
 
-                findings = [_dishonest_text(), _illegal_text()]
-                pending = a10.get("pending_categories") or []
-                pending_text = "、".join(str(item) for item in pending)
-                # 目前只接入两类，无论阴性或发现风险，A10 总项均保守转人工，
-                # 防止把“已查两类”误显示成“商业信誉全部通过”。
+                def _abnormal_text():
+                    state = abnormal.get("status")
+                    if state == "risk":
+                        return f"经营异常：发现{abnormal.get('risk_count', 0)}条尚未移出记录"
+                    if state == "clear":
+                        removed = abnormal.get("removed_count", 0)
+                        return (f"经营异常：{removed}条历史记录均已移出"
+                                if removed else "经营异常：未查到记录")
+                    if state == "unknown":
+                        return "经营异常：存在移出状态不明确的记录"
+                    return "经营异常：接口查询未完成"
+
+                def _bad_conduct_text():
+                    state = bad_conduct.get("status")
+                    if state == "risk":
+                        return (f"建筑资质不良行为：发现"
+                                f"{bad_conduct.get('risk_count', 0)}条有效期内记录")
+                    if state == "clear":
+                        historical = bad_conduct.get("historical_count", 0)
+                        return (f"建筑资质不良行为：{historical}条历史记录均已过有效期"
+                                if historical else "建筑资质不良行为：未查到记录")
+                    if state == "unknown":
+                        return "建筑资质不良行为：存在有效期不明确的记录"
+                    return "建筑资质不良行为：接口查询未完成"
+
+                findings = [
+                    _dishonest_text(), _illegal_text(), _abnormal_text(),
+                    _bad_conduct_text(),
+                ]
+                # 未覆盖类别不写入报告文案，但 A10 总项仍保守转人工，
+                # 避免把当前四类接口均无风险误显示为商业信誉全面通过。
                 c["status"] = "manual"
                 c["detail"] = "；".join(findings)
-                if pending_text:
-                    c["detail"] += f"；{pending_text}尚未接入，A10整体转人工核验"
 
                 risk_findings = []
                 if dishonest.get("status") == "risk":
@@ -2277,9 +2336,16 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                     risk_findings.append(findings[1])
                 elif illegal.get("status") in {"unknown", "unavailable"}:
                     risk_findings.append("严重违法查询结果不完整")
-                if pending_text:
-                    risk_findings.append(f"{pending_text}尚未接入")
-                qcc_issues.append("A10 商业信誉：" + "；".join(risk_findings))
+                if abnormal.get("status") == "risk":
+                    risk_findings.append(findings[2])
+                elif abnormal.get("status") in {"unknown", "unavailable"}:
+                    risk_findings.append("经营异常查询结果不完整")
+                if bad_conduct.get("status") == "risk":
+                    risk_findings.append(findings[3])
+                elif bad_conduct.get("status") in {"unknown", "unavailable"}:
+                    risk_findings.append("建筑资质不良行为查询结果不完整")
+                if risk_findings:
+                    qcc_issues.append("A10 商业信誉：" + "；".join(risk_findings))
                 continue
 
             status = reg.get("登记状态", "") if reg else ""
@@ -2302,12 +2368,38 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
                                f"企查查无对应数据，需人工核验")
                 qcc_issues.append("A10 商业信誉：失信/被执行等专项数据企查查无数据，需人工核验")
 
+        # ---- A14 申请供应商与中国交通建设集团有限公司关联关系 ----
+        elif cid == "A14":
+            relationship = qcc.get("relationship_check") or {}
+            state = relationship.get("status")
+            if state == "clear":
+                c["status"] = "pass"
+                c["detail"] = ("企业信息接口未发现申请供应商与中国交通建设集团有限公司的"
+                               "法人、董监高、投资/股东、实际控制人、历史任职/投资或分支机构关联")
+            elif state == "risk":
+                count = relationship.get("relation_count", 0)
+                c["status"] = "manual"
+                c["detail"] = (f"发现申请供应商与中国交通建设集团有限公司存在{count}条关联路径，"
+                               "需人工核验是否构成回避或利益冲突情形")
+                qcc_issues.append("A14 中交集团关联关系：" + c["detail"])
+            else:
+                c["status"] = "manual"
+                c["detail"] = ("关联关系接口查询未完成，无法确认申请供应商与"
+                               "中国交通建设集团有限公司是否存在关联，需人工核验")
+                qcc_issues.append("A14 中交集团关联关系：接口查询未完成")
+
     return checklist, qcc_issues
 
 
 # ============================================================
 # TextIn OCR 解析结果 → 核查清单增强（业务 9/2 接入）
 # ============================================================
+_C1_ISO_API_TYPES = {
+    "C1_02": ("iso9001", "ISO 9001"),
+    "C1_03": ("iso14001", "ISO 14001"),
+    "C1_04": ("iso45001", "ISO 45001"),
+}
+
 # doc_type → checklist 项名关键词（按 name 含任意关键词匹配）
 _TEXTIN_DOC_TYPE_KEYWORDS = {
     "business_license":      ["营业执照", "法律主体资格"],
@@ -2348,6 +2440,9 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
             continue
         c = _find_checklist_item(checklist, kws)
         if not c:
+            continue
+        if c.get("id") in _C1_ISO_API_TYPES and c.get("status") in ("fail", "manual"):
+            # OCR 缓存不得覆盖本次 ISO 缺件或上传位置冲突的判定。
             continue
 
         original = dict(c)
@@ -2443,6 +2538,84 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
     return checklist, textin_issues
 
 
+def _normalise_certificate_number(value):
+    text = unicodedata.normalize("NFKC", str(value or "")).upper()
+    text = text.translate(str.maketrans({"–": "-", "—": "-", "−": "-"}))
+    return re.sub(r"\s+", "", text)
+
+
+def _normalise_certificate_date(value):
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    match = re.search(r"(\d{4})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?", text)
+    if not match:
+        match = re.search(r"(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)", text)
+    if not match:
+        return None
+    try:
+        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date()
+    except ValueError:
+        return None
+
+
+def enhance_c1_iso_with_certificate_api(checklist, textin_for_todo, api_result):
+    """Require exact OCR/API certificate-number and expiry matches for C1 ISO rules."""
+    issues = []
+    records = api_result.get("records") or []
+    api_available = api_result.get("status") == "ok" and api_result.get("complete") is True
+
+    for cid, (doc_type, label) in _C1_ISO_API_TYPES.items():
+        item = next((row for row in checklist if row.get("id") == cid), None)
+        if not item:
+            continue
+        ocr = textin_for_todo.get(doc_type) or {}
+        fields = ocr.get("fields") or {}
+        raw_number = fields.get("证书编号")
+        raw_expiry = fields.get("有效期至")
+        number = _normalise_certificate_number(raw_number)
+        expiry = _normalise_certificate_date(raw_expiry)
+
+        reason = ""
+        if not ocr:
+            reason = f"{label}未取得OCR识别结果，无法核验证书编号与有效期"
+        elif not api_available:
+            reason = f"{label}资质证书接口查询未完成，无法核验证书编号与有效期"
+        else:
+            typed = [record for record in records if record.get("iso_type") == doc_type]
+            if not typed:
+                reason = f"资质证书接口未查询到{label}证书记录"
+            elif not number:
+                reason = f"{label} OCR未识别到证书编号，无法与资质证书接口逐项比对"
+            elif expiry is None:
+                reason = f"{label} OCR未识别到可比较的有效期，无法与资质证书接口逐项比对"
+            else:
+                same_number = [record for record in typed
+                               if _normalise_certificate_number(record.get("cert_no")) == number]
+                if not same_number:
+                    reason = (f"{label}证书编号不一致：接口未找到与OCR编号"
+                              f"「{raw_number}」完全一致的记录")
+                else:
+                    api_dates = [_normalise_certificate_date(record.get("end_date"))
+                                 for record in same_number]
+                    if expiry not in api_dates:
+                        shown = next((str(record.get("end_date")) for record in same_number
+                                      if record.get("end_date")), "未提供")
+                        reason = (f"{label}证书编号一致但有效期不一致："
+                                  f"OCR「{raw_expiry}」，接口「{shown}」")
+
+        if not reason and item.get("status") == "pass":
+            item["status"] = "pass"
+            item["detail"] = (f"OCR与资质证书接口核验一致：证书编号={raw_number}，"
+                              f"有效期至={expiry.isoformat()}")
+            continue
+        if not reason:
+            reason = f"{label} OCR基础核验未通过，不能仅凭接口字段一致判定通过"
+        item["status"] = "fail"
+        item["detail"] = "OCR与资质证书接口核验未通过：" + reason
+        issues.append(f"{item.get('name', label)}：{reason}")
+
+    return checklist, issues
+
+
 def run_stage2():
     """阶段2：读缓存+企查查结果+TextIn OCR → 离线重决策（不碰scpma，无WAF风险）"""
     cfg = load_rules()
@@ -2535,23 +2708,34 @@ def run_stage2():
         elif not isinstance(q, dict):
             q = {}
 
-        # A10 生产接口实时查询：仅调用已获授权的“失信被执行人、严重违法”。
-        # 客户端自带 24 小时本机缓存；这里只合并脱敏摘要，不将案件明细写入报告。
-        try:
-            from qcc_api_client import fetch_a10_checks
-            supplier_name = (_resolve_supplier_name(supplier, todo, textin.get(tid))
-                             or supplier.get("name", ""))
-            q = dict(q)
-            q["a10_checks"] = fetch_a10_checks(
-                supplier_name,
-                supplier.get("social_credit_code", "") or supplier.get("credit_code", ""),
-            )
-        except Exception as exc:
-            log.warning("[阶段2] A10 企业信息接口查询异常：%s", type(exc).__name__)
-
         applicable_rules, type_desc = determine_supplier_rules(supplier, cfg)
         checklist, auto_failed, missing, verify_items = build_checklist(
             supplier, applicable_rules, entry.get("materials_detail", []))
+        # 先确认本次上传，再对已上传的证书做交叉核验。缺件保留在补件清单。
+        certificate_items = [row for row in checklist
+                             if row["id"] in _C1_ISO_API_TYPES
+                             and row["status"] in ("pending", "pass")]
+
+        # 企业信息生产接口实时查询。客户端自带 24 小时本机缓存；这里只合并
+        # 脱敏摘要，不将案件、纳税人识别号或关联路径明细写入报告。
+        try:
+            from qcc_api_client import (
+                fetch_a10_checks,
+                fetch_qualification_certificates,
+                fetch_tax_credit,
+            )
+            supplier_name = (_resolve_supplier_name(supplier, todo, textin.get(tid))
+                             or supplier.get("name", ""))
+            credit_code = (supplier.get("social_credit_code", "")
+                           or supplier.get("credit_code", ""))
+            q = dict(q)
+            q["a10_checks"] = fetch_a10_checks(supplier_name, credit_code)
+            q["tax_credit"] = fetch_tax_credit(supplier_name, credit_code)
+            if certificate_items:
+                q["qualification_certificates"] = fetch_qualification_certificates(
+                    supplier_name)
+        except Exception as exc:
+            log.warning("[阶段2] 企业信息接口查询异常：%s", type(exc).__name__)
 
         # 企查查增强（材料缺失规则不受影响，只增强核验项）
         checklist, qcc_issues = enhance_checklist_with_qcc(checklist, supplier, q)
@@ -2561,6 +2745,10 @@ def run_stage2():
         if tid in textin:
             checklist, textin_issues = enhance_checklist_with_textin(
                 checklist, supplier, textin[tid])
+        if certificate_items:
+            _, certificate_issues = enhance_c1_iso_with_certificate_api(
+                certificate_items, textin.get(tid) or {}, q.get("qualification_certificates") or {})
+            textin_issues.extend(certificate_issues)
 
         # 9/10 修复：OCR 增强可能把「缺材料 fail」降级为「转人工 manual」
         # （材料其实已上传、只是识别不出）。此时应从 missing 移除，否则
@@ -2602,7 +2790,7 @@ def run_stage2():
             extra_parts.append("另经企查查核验发现（请一并核实）：\n" + "\n".join(
                 f"  {i}. {x}" for i, x in enumerate(qcc_issues, 1)))
         if textin_issues:
-            extra_parts.append("另经资质文件OCR核验发现：\n" + "\n".join(
+            extra_parts.append("另经资质文件OCR及公开接口核验发现：\n" + "\n".join(
                 f"  {i}. {x}" for i, x in enumerate(textin_issues, 1)))
         if extra_parts:
             opinion += "\n\n" + "\n\n".join(extra_parts)

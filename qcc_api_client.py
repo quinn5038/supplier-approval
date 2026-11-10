@@ -1,6 +1,8 @@
 """中交企业信息接口客户端。
 
-当前生产接入仅启用 A10 的两个已授权类别：失信被执行人、严重违法。
+当前生产流程接入税务评级、失信被执行人、严重违法、经营异常、建筑资质不良行为
+和资质证书查询。资质证书结果用于 C1_02-C1_04 的证书编号、有效期严格交叉核验。
+关联关系查询客户端已预留，但 A14 当前未启用，也不会由审批流水线调用。
 原始响应只保存在本机、被 ``.gitignore`` 排除的 SQLite 缓存中；审批结果
 仅保留类别状态和数量，不落案件编号、证件号码、人员姓名等明细。
 """
@@ -10,8 +12,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
+import unicodedata
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +72,25 @@ A10_CATEGORY_REGISTRY = {
         "label": "严重违法",
         "path": "/webapi/mr/illegalinfo/2.0",
     },
+    "operation_abnormal": {
+        "label": "经营异常",
+        "path": "/webapi/mr/baseinfo/normal",
+    },
+    "bad_conduct": {
+        "label": "建筑资质不良行为",
+        "path": "/webapi/bq/badConduct",
+    },
 }
+
+TAX_CREDIT_PATH = "/webapi/tax/information/taxCredit"
+QUALIFICATION_CERTIFICATE_PATH = "/webapi/m/certificate/2.0"
+RELATIONSHIP_PATH = "/webapi/relationship/warning/character"
+CCCC_GROUP_NAME = "中国交通建设集团有限公司"
+CCCC_GROUP_CREDIT_CODE = "91110000710933809D"
+RELATIONSHIP_TYPES = (
+    "LEGAL", "EMPLOY", "INVEST", "AC", "HISLEGAL", "HISEMPLOY",
+    "HISINVEST", "BRANCH",
+)
 
 
 def _sign(timestamp: str) -> str:
@@ -162,6 +185,40 @@ def _throttled_post(path: str, body: dict) -> dict:
     return {"_client_error": "retry_exhausted"}
 
 
+def _throttled_get(path: str, params: dict) -> dict:
+    """GET 版串行低频请求，重试和日志策略与 POST 一致。"""
+    global _LAST_REQUEST_AT
+    if requests is None:
+        return {"_client_error": "requests_not_installed"}
+
+    url = QCC_BASE_URL + path
+    for attempt in range(3):
+        try:
+            with _REQUEST_LOCK:
+                delay = QCC_REQUEST_INTERVAL - (time.monotonic() - _LAST_REQUEST_AT)
+                if delay > 0:
+                    time.sleep(delay)
+                response = requests.get(
+                    url, headers=_headers(), params=params, timeout=QCC_TIMEOUT)
+                _LAST_REQUEST_AT = time.monotonic()
+                _increment_call_count(path)
+            if response.status_code >= 500 and attempt < 2:
+                continue
+            if not response.ok:
+                log.warning("[企业信息] %s HTTP %s", path, response.status_code)
+                return {"_client_error": f"http_{response.status_code}"}
+            payload = response.json()
+            return payload if isinstance(payload, dict) else {"_client_error": "invalid_json_shape"}
+        except Exception as exc:
+            retryable = requests is not None and isinstance(
+                exc, (requests.Timeout, requests.ConnectionError))
+            if retryable and attempt < 2:
+                continue
+            log.warning("[企业信息] %s 调用失败：%s", path, type(exc).__name__)
+            return {"_client_error": type(exc).__name__}
+    return {"_client_error": "retry_exhausted"}
+
+
 def _post_page(path: str, body: dict, identity: str, cache_key: str) -> dict:
     cached = _cache_get(identity, cache_key)
     if cached is not None:
@@ -176,9 +233,8 @@ def _post_page(path: str, body: dict, identity: str, cache_key: str) -> dict:
     return response
 
 
-def _fetch_category(category: str, keyword: str, identity: str,
-                    query_variant: str = "primary") -> dict:
-    config = A10_CATEGORY_REGISTRY[category]
+def _fetch_paged(path: str, cache_scope: str, keyword: str, identity: str,
+                 query_variant: str = "primary") -> dict:
     if not _is_configured():
         return {"status": "not_configured", "items": [], "total": None, "complete": False}
     if not keyword:
@@ -188,10 +244,10 @@ def _fetch_category(category: str, keyword: str, identity: str,
     total: int | None = None
     for page in range(1, QCC_MAX_PAGES + 1):
         response = _post_page(
-            config["path"],
+            path,
             {"keyword": keyword, "pageNum": page, "pageSize": 20},
             identity,
-            f"a10:{category}:v1:{query_variant}:page:{page}",
+            f"{cache_scope}:v2:{query_variant}:page:{page}",
         )
         if response.get("_client_error"):
             return {"status": "error", "items": items, "total": total,
@@ -203,22 +259,39 @@ def _fetch_category(category: str, keyword: str, identity: str,
             return {"status": "error", "items": items, "total": total,
                     "complete": False, "error": f"business_{business_status or 'missing'}"}
         result = response.get("result")
-        if not isinstance(result, dict):
+        # 部分生产接口用 status=200/result=null 表示查询成功但没有记录，
+        # 不能把这种合法空结果误判为接口查询失败。
+        if result is None:
+            return {"status": "ok", "items": items, "total": len(items),
+                    "complete": True}
+        if isinstance(result, list):
+            page_items = result
+            raw_total = response.get("total", len(items) + len(page_items))
+        elif isinstance(result, dict):
+            page_items = result.get("items") or []
+            raw_total = result.get("total", len(items) + len(page_items))
+        else:
             return {"status": "error", "items": items, "total": total,
                     "complete": False, "error": "invalid_result_shape"}
-        page_items = result.get("items") or []
         if not isinstance(page_items, list):
             return {"status": "error", "items": items, "total": total,
                     "complete": False, "error": "invalid_items_shape"}
         items.extend(item for item in page_items if isinstance(item, dict))
         try:
-            total = int(result.get("total", len(items)))
+            total = int(raw_total)
         except (TypeError, ValueError):
             total = len(items)
         if len(items) >= total or not page_items:
             return {"status": "ok", "items": items, "total": total, "complete": True}
     return {"status": "ok", "items": items, "total": total, "complete": False,
             "error": "page_limit"}
+
+
+def _fetch_category(category: str, keyword: str, identity: str,
+                    query_variant: str = "primary") -> dict:
+    config = A10_CATEGORY_REGISTRY[category]
+    return _fetch_paged(
+        config["path"], f"a10:{category}", keyword, identity, query_variant)
 
 
 def _text(value: Any) -> str:
@@ -270,32 +343,231 @@ def _assess_serious_illegal(result: dict) -> dict:
             "removed_count": removed, "unknown_count": unknown}
 
 
+def _parse_public_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _assess_bad_conduct(result: dict) -> dict:
+    if result.get("status") != "ok":
+        return {"status": "unavailable", "complete": False, "total": result.get("total")}
+    current = historical = unknown = 0
+    today = date.today()
+    for item in result.get("items", []):
+        valid_until = _parse_public_date(item.get("publishValidityPeriod"))
+        if valid_until is None:
+            unknown += 1
+        elif valid_until >= today:
+            current += 1
+        else:
+            historical += 1
+    status = "risk" if current else (
+        "unknown" if unknown or not result.get("complete") else "clear")
+    return {"status": status, "complete": bool(result.get("complete")),
+            "total": int(result.get("total") or 0), "risk_count": current,
+            "historical_count": historical, "unknown_count": unknown}
+
+
+def _fetch_with_name_fallback(category: str, name: str, credit_code: str,
+                              identity: str) -> dict:
+    keyword = credit_code.strip() or name.strip()
+    primary = _fetch_category(
+        category, keyword, identity, "credit" if credit_code.strip() else "name")
+    if (credit_code.strip() and name.strip() and primary.get("status") == "ok"
+            and int(primary.get("total") or 0) == 0):
+        fallback = _fetch_category(category, name.strip(), identity, "name")
+        if fallback.get("status") == "ok":
+            return fallback
+    return primary
+
+
 def fetch_a10_checks(name: str, credit_code: str = "") -> dict:
     """查询已授权 A10 类别，返回不含案件明细的结构化摘要。"""
-    keyword = credit_code.strip() or name.strip()
     # 缓存继续按供应商名分组，以便现有“清理单家供应商缓存”同步删除。
     identity = name.strip() or credit_code.strip()
-    def _fetch_with_name_fallback(category: str) -> dict:
-        primary = _fetch_category(
-            category, keyword, identity, "credit" if credit_code.strip() else "name")
-        # 企业名称是文档示例的标准入参。信用代码优先查询无记录时再用名称复查，
-        # 避免接口只按名称建索引而产生假阴性；两种查询各自缓存，不混用。
-        if (credit_code.strip() and name.strip() and primary.get("status") == "ok"
-                and int(primary.get("total") or 0) == 0):
-            fallback = _fetch_category(category, name.strip(), identity, "name")
-            if fallback.get("status") == "ok":
-                return fallback
-        return primary
-
-    dishonest = _assess_dishonest(_fetch_with_name_fallback("dishonest"))
-    serious = _assess_serious_illegal(_fetch_with_name_fallback("serious_illegal"))
+    dishonest = _assess_dishonest(
+        _fetch_with_name_fallback("dishonest", name, credit_code, identity))
+    serious = _assess_serious_illegal(
+        _fetch_with_name_fallback("serious_illegal", name, credit_code, identity))
+    abnormal = _assess_serious_illegal(
+        _fetch_with_name_fallback("operation_abnormal", name, credit_code, identity))
+    bad_conduct = _assess_bad_conduct(
+        _fetch_with_name_fallback("bad_conduct", name, credit_code, identity))
     return {
-        "version": 1,
+        "version": 2,
         "queried_categories": list(A10_CATEGORY_REGISTRY),
-        "pending_categories": ["被执行人", "限制消费令", "经营异常"],
-        "categories": {"dishonest": dishonest, "serious_illegal": serious},
+        "pending_categories": ["被执行人", "限制消费令"],
+        "categories": {
+            "dishonest": dishonest,
+            "serious_illegal": serious,
+            "operation_abnormal": abnormal,
+            "bad_conduct": bad_conduct,
+        },
         "complete_for_a10": False,
     }
+
+
+def fetch_tax_credit(name: str, credit_code: str = "") -> dict:
+    """查询税务评级，只返回最新年度/等级摘要，不保存纳税人识别号到报告。"""
+    identity = name.strip() or credit_code.strip()
+
+    def fetch(keyword: str, variant: str) -> dict:
+        return _fetch_paged(
+            TAX_CREDIT_PATH, "tax_credit", keyword, identity, variant)
+
+    keyword = credit_code.strip() or name.strip()
+    raw = fetch(keyword, "credit" if credit_code.strip() else "name")
+    if (credit_code.strip() and name.strip() and raw.get("status") == "ok"
+            and int(raw.get("total") or 0) == 0):
+        fallback = fetch(name.strip(), "name")
+        if fallback.get("status") == "ok":
+            raw = fallback
+    if raw.get("status") != "ok":
+        return {"status": "unavailable", "complete": False}
+
+    records = []
+    for item in raw.get("items", []):
+        try:
+            year = int(str(item.get("year", "")).strip())
+        except ValueError:
+            continue
+        grade = str(item.get("grade", "")).strip().upper().replace("级", "")
+        records.append((year, grade))
+    if not records:
+        return {"status": "no_data", "complete": bool(raw.get("complete")), "total": 0}
+    latest_year, latest_grade = max(records, key=lambda row: row[0])
+    required_year = date.today().year - 1
+    if latest_year < required_year:
+        status = "unknown"
+    elif latest_grade == "D":
+        status = "risk"
+    elif latest_grade not in {"A", "B", "C"}:
+        status = "unknown"
+    else:
+        status = "clear"
+    return {"status": status, "complete": bool(raw.get("complete")),
+            "latest_year": latest_year, "latest_grade": latest_grade,
+            "required_year": required_year, "total": int(raw.get("total") or len(records))}
+
+
+def _certificate_iso_type(item: dict) -> str | None:
+    """Map a certificate record to an ISO type without scanning issuer scope text."""
+    evidence = [item.get("certificateName"), item.get("certificateType")]
+    for detail in item.get("detail") or []:
+        if not isinstance(detail, dict):
+            continue
+        title = "".join(str(detail.get("title") or "").split())
+        if any(marker in title for marker in ("认证标准", "认证项目", "证书名称", "证书类型")):
+            evidence.append(detail.get("content"))
+    text = unicodedata.normalize("NFKC", " ".join(str(v or "") for v in evidence))
+    compact = re.sub(r"\s+", "", text).upper()
+    if "ISO9001" in compact or "质量管理体系" in compact or "GB/T19001" in compact:
+        return "iso9001"
+    if "ISO14001" in compact or "环境管理体系" in compact or "GB/T24001" in compact:
+        return "iso14001"
+    if ("ISO45001" in compact or "职业健康安全管理体系" in compact
+            or "GB/T45001" in compact):
+        return "iso45001"
+    return None
+
+
+def fetch_qualification_certificates(name: str) -> dict:
+    """Fetch public certificate summaries used for C1_02-C1_04 cross-checks."""
+    identity = name.strip()
+    if not _is_configured():
+        return {"status": "unavailable", "complete": False, "records": []}
+    if not identity:
+        return {"status": "unavailable", "complete": False, "records": []}
+
+    items: list[dict] = []
+    total: int | None = None
+    for page in range(1, QCC_MAX_PAGES + 1):
+        response = _post_page(
+            QUALIFICATION_CERTIFICATE_PATH,
+            {"name": identity, "certificateName": "", "pageNum": page, "pageSize": 20},
+            identity,
+            f"qualification_certificates:v1:page:{page}",
+        )
+        if response.get("_client_error"):
+            return {"status": "unavailable", "complete": False, "records": []}
+        business_status = str(response.get("status", ""))
+        if business_status == NO_RESULT_STATUS:
+            total = len(items)
+            break
+        if business_status != SUCCESS_STATUS:
+            return {"status": "unavailable", "complete": False, "records": []}
+        result = response.get("result")
+        if result is None:
+            total = len(items)
+            break
+        if not isinstance(result, list):
+            return {"status": "unavailable", "complete": False, "records": []}
+        page_items = [item for item in result if isinstance(item, dict)]
+        items.extend(page_items)
+        try:
+            total = int(response.get("total", len(items)))
+        except (TypeError, ValueError):
+            total = len(items)
+        if len(items) >= total or not page_items:
+            break
+    else:
+        return {"status": "unavailable", "complete": False, "records": []}
+
+    # Only fields needed for deterministic matching leave the client. Full raw
+    # responses remain in the local ignored cache and are never written to reports.
+    records = []
+    for item in items:
+        iso_type = _certificate_iso_type(item)
+        if iso_type:
+            records.append({
+                "iso_type": iso_type,
+                "cert_no": str(item.get("certNo") or ""),
+                "end_date": str(item.get("endDate") or ""),
+            })
+    return {"status": "ok", "complete": True, "records": records,
+            "total": int(total or 0)}
+
+
+def fetch_relationship_check(name: str, credit_code: str = "") -> dict:
+    """查询供应商与中国交通建设集团有限公司的全部文档支持关联类型。"""
+    identity = name.strip() or credit_code.strip()
+    supplier_key = credit_code.strip() or name.strip()
+    if not _is_configured():
+        return {"status": "unavailable", "complete": False, "relation_count": None}
+    if not supplier_key:
+        return {"status": "unavailable", "complete": False, "relation_count": None}
+    params = {
+        "companyNames": f"{supplier_key},{CCCC_GROUP_CREDIT_CODE}",
+        "rels": ",".join(RELATIONSHIP_TYPES),
+        "delInvalid": "0",
+    }
+    cache_key = "relationship:cccc:v1"
+    response = _cache_get(identity, cache_key)
+    if response is None:
+        response = _throttled_get(RELATIONSHIP_PATH, params)
+        if str(response.get("status", "")) in {SUCCESS_STATUS, NO_RESULT_STATUS}:
+            _cache_set(identity, cache_key, response)
+    if response.get("_client_error"):
+        return {"status": "unavailable", "complete": False, "relation_count": None}
+    business_status = str(response.get("status", ""))
+    if business_status == NO_RESULT_STATUS:
+        return {"status": "clear", "complete": True, "relation_count": 0}
+    if business_status != SUCCESS_STATUS:
+        return {"status": "unavailable", "complete": False, "relation_count": None}
+    result = response.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("correlationships", []), list):
+        return {"status": "unavailable", "complete": False, "relation_count": None}
+    relation_count = len([row for row in result.get("correlationships", [])
+                          if isinstance(row, dict)])
+    return {"status": "risk" if relation_count else "clear", "complete": True,
+            "relation_count": relation_count, "target": CCCC_GROUP_NAME}
 
 
 # 向后兼容旧调用方；新流程不会触发未获授权接口。
@@ -314,4 +586,5 @@ def serious_illegal(keyword: str) -> dict:
 
 if __name__ == "__main__":
     print("企业信息接口凭据：" + ("已配置" if _is_configured() else "未配置"))
-    print("已启用类别：失信被执行人、严重违法")
+    print("已启用类别：税务评级、失信被执行人、严重违法、经营异常、建筑资质不良行为、资质证书")
+    print("预留未启用：关联关系（A14）")
