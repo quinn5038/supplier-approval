@@ -147,19 +147,23 @@ window.fetch = (url, options = {}) => {
                 <div class="credential-icon" aria-hidden="true">存</div>
                 <div>
                     <h2 id="cache-title">供应商缓存清理</h2>
-                    <p id="cache-help">仅展示缓存时间超过 14 天的供应商。清理后如需查看报告或附件，须重新审批。</p>
+                    <p id="cache-help">可清理全部或所选供应商的本地缓存，包含近期缓存。清理后如需查看报告或附件，须重新审批。</p>
                 </div>
             </div>
             <div class="credential-body cache-body">
                 <div id="cache-feedback" aria-live="polite"></div>
-                <div class="cache-list-head" aria-hidden="true">
+                <div class="cache-list-head">
+                    <input type="checkbox" id="cache-select-all" aria-label="全选供应商缓存" onchange="selectAllCaches(this.checked)" disabled>
                     <span>供应商</span><span>操作</span>
                 </div>
                 <div id="cache-list" class="cache-list" aria-live="polite">
                     <div class="cache-empty">正在读取缓存列表...</div>
                 </div>
             </div>
-            <div class="credential-actions">
+            <div class="credential-actions cache-actions">
+                <span id="cache-selection-count" aria-live="polite">已选 0 项</span>
+                <button type="button" id="cache-delete-selected" class="btn btn-danger-outline" onclick="cleanSelectedCaches()" disabled>删除所选</button>
+                <button type="button" id="cache-delete-all" class="btn btn-danger-outline" onclick="cleanAllCaches()" disabled>一键清理全部</button>
                 <button type="button" class="btn btn-outline" onclick="document.getElementById('cache-dialog').close()">关闭</button>
             </div>
         </div>
@@ -171,7 +175,9 @@ window.fetch = (url, options = {}) => {
         const nameById = {};         // todoId → 供应商名称
         const errorById = {};        // todoId → 失败原因（点失败按钮时展示）
         const taskById = {};         // 任务状态独立于搜索结果和 DOM 保存
-        let expiredCacheItems = [];  // 超过 14 天、可逐家清理的缓存
+        let cacheItems = [];
+        let cacheListLoaded = false;
+        let cacheCleanupBusy = false;
         const activeOcrMode = '{{ ocr_mode }}';
 
         async function switchOcrMode(mode) {
@@ -471,70 +477,119 @@ window.fetch = (url, options = {}) => {
         // ===== 供应商缓存清理 =====
         async function openCacheCleanup() {
             const dialog = document.getElementById('cache-dialog');
-            document.getElementById('cache-feedback').innerHTML = '';
             if (!dialog.open) dialog.showModal();
-            await loadExpiredCaches();
+            if (cacheCleanupBusy) return;
+            document.getElementById('cache-feedback').innerHTML = '';
+            await loadSupplierCaches();
         }
 
-        async function loadExpiredCaches() {
+        function cacheCheckboxes() {
+            return Array.from(document.querySelectorAll('#cache-list .cache-select'));
+        }
+
+        function updateCacheSelection() {
+            const boxes = cacheCheckboxes();
+            const selected = boxes.filter(box => box.checked).length;
+            const disabled = cacheCleanupBusy || !cacheListLoaded;
+            const selectAll = document.getElementById('cache-select-all');
+            selectAll.checked = selected > 0 && selected === boxes.length;
+            selectAll.indeterminate = selected > 0 && selected < boxes.length;
+            selectAll.disabled = disabled || boxes.length === 0;
+            document.getElementById('cache-selection-count').textContent = `已选 ${selected} 项`;
+            document.getElementById('cache-delete-selected').disabled = disabled || selected === 0;
+            document.getElementById('cache-delete-all').disabled = disabled;
+            document.querySelectorAll('#cache-list input, #cache-list button').forEach(control => {
+                control.disabled = disabled;
+            });
+        }
+
+        function selectAllCaches(checked) {
+            cacheCheckboxes().forEach(box => { box.checked = checked; });
+            updateCacheSelection();
+        }
+
+        async function loadSupplierCaches() {
             const list = document.getElementById('cache-list');
+            cacheListLoaded = false;
             list.innerHTML = '<div class="cache-empty">正在读取缓存列表...</div>';
+            updateCacheSelection();
             try {
-                const response = await fetch('/api/cache-cleanup');
+                const response = await fetch('/api/cache-cleanup?include_recent=true');
                 const data = await response.json();
                 if (response.status === 404) {
                     throw new Error('WebUI 后端尚未加载缓存清理功能，请重启程序后重试。');
                 }
                 if (!response.ok) throw new Error(data.msg || data.detail || '缓存列表读取失败');
-                expiredCacheItems = (data.items || []).map(item => ({
+                cacheItems = (data.items || []).map(item => ({
                     ...item,
                     // 老下载目录可能早于 cache_v4 元数据；仍显示该行，并优先用当前待办名称补全。
                     name: nameById[item.todoId] || item.name,
                 }));
-                if (expiredCacheItems.length === 0) {
-                    list.innerHTML = '<div class="cache-empty"><strong>暂无可清理缓存</strong><span>没有缓存时间超过 14 天的供应商。</span></div>';
-                    return;
-                }
-                list.innerHTML = expiredCacheItems.map(item => `
+                cacheListLoaded = true;
+                list.innerHTML = cacheItems.length ? cacheItems.map(item => `
                     <div class="cache-row" id="cache-row-${esc(item.todoId)}">
-                        <div class="cache-supplier">
-                            <div class="supplier-name">${esc(item.name)}</div>
-                            <div class="sub-text">缓存 ${esc(item.ageDays)} 天 · ${esc(formatBytes(item.sizeBytes))} · ${esc(item.fileCount)} 个文件</div>
-                        </div>
-                        <button class="btn btn-danger-outline" id="cache-btn-${esc(item.todoId)}"
+                        <input type="checkbox" class="cache-select" id="cache-select-${esc(item.todoId)}"
+                               value="${esc(item.todoId)}" onchange="updateCacheSelection()">
+                        <label class="cache-supplier" for="cache-select-${esc(item.todoId)}">
+                            <span class="supplier-name">${esc(item.name)}</span>
+                            <span class="sub-text">${item.ageDays == null ? '缓存时间未知' : `缓存 ${esc(String(item.ageDays))} 天`} · ${esc(formatBytes(item.sizeBytes))} · ${esc(String(item.fileCount))} 个文件</span>
+                        </label>
+                        <button type="button" class="btn btn-danger-outline"
                                 onclick="cleanSupplierCache('${esc(item.todoId)}')">清理</button>
-                    </div>`).join('');
+                    </div>`).join('') : '<div class="cache-empty"><strong>暂无供应商缓存记录</strong></div>';
             } catch (error) {
-                expiredCacheItems = [];
+                cacheItems = [];
                 list.innerHTML = '<div class="cache-empty cache-error"><strong>列表加载失败</strong><span>' + esc(error.message) + '</span></div>';
+            } finally {
+                updateCacheSelection();
             }
         }
 
-        async function cleanSupplierCache(todoId) {
-            const item = expiredCacheItems.find(row => row.todoId === todoId);
-            if (!item) return;
-            if (!confirm(`确认清理“${item.name}”的全部相关缓存和下载文件？\n\n清理后历史报告和脱敏附件将无法查看；如需恢复，必须重新审批。此操作不可撤销。`)) return;
-            const button = document.getElementById('cache-btn-' + todoId);
+        function cleanSupplierCache(todoId) {
+            const item = cacheItems.find(row => row.todoId === todoId);
+            if (item) return submitCacheCleanup('selected', [todoId], `“${item.name}”的缓存`);
+        }
+
+        function cleanSelectedCaches() {
+            const selected = cacheCheckboxes().filter(box => box.checked).map(box => box.value);
+            if (selected.length) return submitCacheCleanup('selected', selected, `所选 ${selected.length} 家供应商的缓存`);
+        }
+
+        function cleanAllCaches() {
+            return submitCacheCleanup('all', [], '所有供应商的缓存（含近期缓存）');
+        }
+
+        async function submitCacheCleanup(mode, todoIds, target) {
+            if (cacheCleanupBusy || !cacheListLoaded) return;
+            if (!confirm(`确认清理${target}？\n\n在线和离线 OCR 的历史报告、下载文件和脱敏附件将一并清理。如需再次查看，须重新审批。此操作不可撤销。`)) return;
             const feedback = document.getElementById('cache-feedback');
-            button.disabled = true;
-            button.textContent = '清理中...';
+            cacheCleanupBusy = true;
+            feedback.textContent = '正在清理缓存…';
+            updateCacheSelection();
             try {
-                const response = await fetch('/api/cache-cleanup/' + encodeURIComponent(todoId), {method: 'DELETE'});
+                const response = await fetch('/api/cache-cleanup', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mode, todoIds}),
+                });
                 const data = await response.json();
-                if (!response.ok) throw new Error(data.msg || '清理失败');
-                const todo = todoItems.find(row => String(row.todoId) === String(todoId));
-                if (todo) { todo.hasResult = false; todo.decision = ''; }
-                delete taskById[todoId];
-                feedback.innerHTML = '<div class="alert alert-success cache-alert">' +
-                    esc(data.msg) + '，释放 ' + esc(formatBytes(data.freedBytes)) + '。</div>';
-                await loadExpiredCaches();
+                if (!response.ok) throw new Error(data.msg || data.error || '清理失败');
+                const deletedIds = new Set(data.deleted.map(row => String(row.todoId)));
+                for (const todo of todoItems) {
+                    if (deletedIds.has(String(todo.todoId))) { todo.hasResult = false; todo.decision = ''; }
+                }
+                deletedIds.forEach(todoId => { delete taskById[todoId]; delete errorById[todoId]; });
+                const success = `成功清理 ${deletedIds.size} 家供应商缓存，释放约 ${formatBytes(data.freedBytes)}。`;
+                const failures = data.failed.map(row =>
+                    `<li>${esc(row.name || nameById[row.todoId] || row.todoId)}：${esc(row.msg)}</li>`).join('');
+                feedback.innerHTML = `<div class="alert ${failures ? 'alert-danger' : 'alert-success'} cache-alert">` +
+                    `${esc(success)}${failures ? ` ${data.failed.length} 项失败。<ul>${failures}</ul>` : ''}</div>`;
                 filterTodos();
             } catch (error) {
                 feedback.innerHTML = '<div class="alert alert-danger cache-alert">' + esc(error.message) + '</div>';
-                if (button.isConnected) {
-                    button.disabled = false;
-                    button.textContent = '清理';
-                }
+            } finally {
+                await loadSupplierCaches();
+                cacheCleanupBusy = false;
+                updateCacheSelection();
             }
         }
 

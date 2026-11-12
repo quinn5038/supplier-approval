@@ -133,9 +133,18 @@ def canonicalise_validity(value: str) -> str:
     return normalised
 
 
+_NON_NAME_ID_MARKERS = (
+    "性别", "民族", "出生", "住址", "公民身份", "身份号码",
+    "签发机关", "有效期限", "居民身份证",
+)
+
+
 def is_name_value(value: str) -> bool:
     value = normalise_text(value)
-    return 1 < len(value) <= 12 and all("\u3400" <= char <= "\u9fff" or char == "·" for char in value)
+    return (1 < len(value) <= 12
+            and not any(marker in value for marker in _NON_NAME_ID_MARKERS)
+            and value not in {"男", "女"}
+            and all("\u3400" <= char <= "\u9fff" or char == "·" for char in value))
 
 
 def is_validity_value(value: str) -> bool:
@@ -269,6 +278,56 @@ def find_name_field(items: Iterable[OcrItem], width: int, height: int) -> FieldM
     return None
 
 
+def _enhanced_text_images(image: np.ndarray) -> list[tuple[np.ndarray, float]]:
+    """Return focused OCR variants and their coordinate scale factors."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    enlarged = cv2.resize(
+        cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR), None,
+        fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    return [(image, 1.0), (enlarged, 2.0)]
+
+
+def recover_name_from_front_region(image: np.ndarray, ocr: CardOcr) -> FieldMatch | None:
+    """Retry only the canonical front-side name row.
+
+    The crop ends above the gender/nation row.  This makes a bare 2–6 character
+    fallback safe enough to use after full-card OCR already proved that the card
+    is a front side, while still failing closed when the actual name is absent.
+    """
+    height, width = image.shape[:2]
+    left, right = int(width * .05), int(width * .66)
+    top, bottom = int(height * .06), int(height * .29)
+    crop = image[top:bottom, left:right]
+    if crop.size == 0:
+        return None
+
+    for variant, scale in _enhanced_text_images(crop):
+        items = ocr.read(variant)
+        vheight, vwidth = variant.shape[:2]
+        field = find_field(
+            items, "name", ("姓名", "城名", "性名", "姓各", "姓多"),
+            is_name_value, vwidth, vheight)
+        if not field:
+            for item in sorted(items, key=lambda value: (value.bounds[1], value.bounds[0])):
+                value = re.sub(r"^[^\u3400-\u9fff·]+", "", normalise_text(item.text))
+                x1, _, x2, _ = item.bounds
+                if ((x1 + x2) / 2 < vwidth * .20
+                        or not 2 <= len(value) <= 6
+                        or not is_name_value(value)):
+                    continue
+                field = FieldMatch(
+                    "name", value, padded_box(item.bounds, vwidth, vheight))
+                break
+        if field:
+            x1, y1, x2, y2 = field.box
+            return FieldMatch(
+                "name", field.value,
+                (left + int(x1 / scale), top + int(y1 / scale),
+                 left + int(x2 / scale), top + int(y2 / scale)))
+    return None
+
+
 def _box_text(image: np.ndarray, box: tuple[int, int, int, int], ocr: CardOcr) -> str:
     """OCR a retained patch so metadata and visible pixels cannot diverge."""
     x1, y1, x2, y2 = box
@@ -293,8 +352,8 @@ def verify_or_relocate_field(image: np.ndarray, field: FieldMatch | None,
     if expected and expected in _box_text(image, field.box, ocr):
         return field
 
-    height, width = image.shape[:2]
     x1, y1, x2, y2 = field.box
+    height, width = image.shape[:2]
     box_width, box_height = max(1, x2 - x1), max(1, y2 - y1)
     band_x1 = max(0, x1 - box_width // 2)
     band_x2 = min(width, x2 + max(box_width * 6, int(width * 0.22)))
@@ -311,6 +370,17 @@ def verify_or_relocate_field(image: np.ndarray, field: FieldMatch | None,
         relocated = padded_box(relocated, width, height, min_x=relocated[0])
         if expected in _box_text(image, relocated, ocr):
             return FieldMatch(field.key, field.value, relocated)
+
+    # A focused contrast-enhanced retry may recover black name strokes that the
+    # blue security-pattern background hides during full-card OCR.  Try this only
+    # after same-row relocation, so a field whose polygon points at the blue label
+    # is still moved to the actual value rather than accepted in the wrong place.
+    patch = image[y1:y2, x1:x2]
+    if patch.size:
+        for variant, _ in _enhanced_text_images(patch)[1:]:
+            visible = "".join(normalise_text(item.text) for item in ocr.read(variant))
+            if expected and expected in visible:
+                return field
     return None
 
 
@@ -562,6 +632,8 @@ def analyse_card(card: np.ndarray, ocr: CardOcr) -> tuple[str, FieldMatch | None
         name = find_name_field(items, width, height)
         validity = find_field(items, "valid_until", ("有效期限", "有效期"), is_validity_value, width, height)
         front_score, back_score = side_scores(items)
+        if not name and front_score >= 2 and front_score > back_score:
+            name = recover_name_from_front_region(oriented, ocr)
         if name and horizontal_field(name):
             candidates.append((100 + front_score, "front", name, forward, backward))
         elif validity and horizontal_field(validity):

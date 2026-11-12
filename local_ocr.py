@@ -128,7 +128,7 @@ def cache_identity():
     import desensitize
     model_dir = Path(desensitize._PADDLE_MODEL_DIR)
     # Bump whenever preprocessing/reading changes so stale OCR cache is rebuilt.
-    parts = ["paddleocr-2.9.1/material-v4-horizontal-orientation/dpi200"]
+    parts = ["paddleocr-2.9.1/material-v5-iso-orientation/dpi200"]
     for part in ("det", "rec", "cls"):
         for name in ("inference.pdmodel", "inference.pdiparams"):
             path = model_dir / part / name

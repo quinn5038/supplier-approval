@@ -220,14 +220,16 @@ def test_tax_credit_does_not_replace_missing_required_document():
     checklist = [{"id": "A03", "name": "纳税信用等级", "status": "fail",
                   "detail": "缺少纳税信用等级证明"}]
     tax = {"status": "clear", "latest_year": 2025, "latest_grade": "A"}
-    result, _ = aa.enhance_checklist_with_qcc(checklist, {}, {"tax_credit": tax})
+    result, issues = aa.enhance_checklist_with_qcc(checklist, {}, {"tax_credit": tax})
     assert result[0]["status"] == "fail"
-    assert "缺少纳税信用等级证明" in result[0]["detail"]
-    assert "企业信息接口" in result[0]["detail"]
+    assert result[0]["detail"] == "缺少纳税信用等级证明"
+    assert "企业信息接口" not in result[0]["detail"]
+    assert issues == []
 
 
 def test_qualification_certificate_client_maps_iso_records(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
+    certificate_status = " 有 效 "
 
     def fake_post(url, headers, json, timeout):
         del headers, timeout
@@ -239,13 +241,17 @@ def test_qualification_certificate_client_maps_iso_records(monkeypatch, tmp_path
             "pageSize": 20,
         }
         return _response({"status": 200, "result": [
-            {"certNo": "QMS-001", "endDate": "2028-01-02",
-             "certificateName": "质量管理体系认证证书"},
+            {"certNo": "QMS-001", "startDate": "2025-01-03", "endDate": "2028-01-02",
+             "certificateName": "质量管理体系认证证书",
+             "detail": [{"title": "证书状态", "content": certificate_status},
+                        {"title": "认证机构状态", "content": "有效"}]},
             {"certNo": "EMS-002", "endDate": "2028-02-03",
              "certificateType": "环境管理体系认证"},
             {"certNo": "OHS-003", "endDate": "2028-03-04",
              "certificateName": "管理体系认证", "detail": [
                  {"title": "认证标准", "content": "ISO 45001:2018"},
+                 {"title": "证书状态", "content": "有效"},
+                 {"title": "认证状态", "content": "暂停"},
              ]},
             {"certNo": "OTHER-1", "endDate": "2029-01-01",
              "certificateName": "食品经营许可证"},
@@ -258,10 +264,15 @@ def test_qualification_certificate_client_maps_iso_records(monkeypatch, tmp_path
     assert result["complete"] is True
     assert result["total"] == 4
     assert result["records"] == [
-        {"iso_type": "iso9001", "cert_no": "QMS-001", "end_date": "2028-01-02"},
-        {"iso_type": "iso14001", "cert_no": "EMS-002", "end_date": "2028-02-03"},
-        {"iso_type": "iso45001", "cert_no": "OHS-003", "end_date": "2028-03-04"},
+        {"iso_type": "iso9001", "cert_no": "QMS-001", "start_date": "2025-01-03",
+         "end_date": "2028-01-02", "certificate_status": "有效"},
+        {"iso_type": "iso14001", "cert_no": "EMS-002", "start_date": "",
+         "end_date": "2028-02-03", "certificate_status": None},
+        {"iso_type": "iso45001", "cert_no": "OHS-003", "start_date": "",
+         "end_date": "2028-03-04", "certificate_status": "状态冲突"},
     ]
+    certificate_status = "撤销"
+    assert qcc.fetch_qualification_certificates("测试制造有限公司")["records"][0]["certificate_status"] == "撤销"
 
 
 def test_relationship_uses_supplier_and_cccc_credit_codes(monkeypatch, tmp_path):

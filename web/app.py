@@ -11,12 +11,14 @@ FastAPI 主入口，复用 auto_approve.py / textin_pipeline.py / gen_opinion.py
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 # 9/6 修复：/api/todos 重试路径用了 log.warning 但模块没定义 log（NameError）
 
@@ -27,6 +29,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
 from ocr_runtime import (
     MODE_LABELS,
@@ -38,8 +41,11 @@ from state_store import delete_state, get_state, put_state, record_event
 from storage_cleanup import (
     CacheCleanupError,
     CacheNotExpired,
+    InvalidTodoId,
     clean_supplier_cache,
+    clean_supplier_caches,
     list_expired_supplier_caches,
+    list_supplier_caches,
 )
 from web.credential_store import (
     CredentialStoreUnavailable,
@@ -487,14 +493,63 @@ async def api_set_ocr_mode(mode: str = Form(...)):
 
 
 @app.get("/api/cache-cleanup")
-async def api_cache_cleanup_list():
-    """List per-supplier caches older than the fixed 14-day retention period."""
+async def api_cache_cleanup_list(include_recent: bool = False):
+    """List per-supplier caches, optionally including recent and report-only records."""
     try:
-        items = list_expired_supplier_caches(BASE_DIR)
+        items = (list_supplier_caches(BASE_DIR) if include_recent else
+                 list_expired_supplier_caches(BASE_DIR))
     except (OSError, ValueError, json.JSONDecodeError, CacheCleanupError) as exc:
         log.exception("缓存清理列表读取失败: %s", type(exc).__name__)
         return JSONResponse({"error": "cache_list_failed", "msg": "缓存列表读取失败，请检查缓存文件。"}, 500)
     return {"retentionDays": 14, "count": len(items), "items": items}
+
+
+class CacheCleanupRequest(BaseModel):
+    mode: Literal["all", "selected"]
+    todoIds: list[str] = Field(default_factory=list)
+
+
+def _record_supplier_cleanup(result):
+    todo_id = result["todoId"]
+    try:
+        delete_state(STATE_DB, "tasks", todo_id)
+    except (OSError, sqlite3.Error) as exc:
+        log.warning("缓存已清理，但任务状态清除失败: %s", type(exc).__name__)
+    _task_status.pop(todo_id, None)
+    try:
+        record_event(BASE_DIR / "audit.sqlite3", "supplier_cache_cleanup", {
+            "todo_id": todo_id,
+            "supplier": result["name"],
+            "deleted_files": result["fileCount"],
+            "freed_bytes": result["sizeBytes"],
+        })
+    except Exception as exc:
+        log.warning("缓存已清理，但审计记录写入失败: %s", type(exc).__name__)
+
+
+@app.post("/api/cache-cleanup")
+def api_clean_supplier_caches(request: CacheCleanupRequest):
+    """Run one explicit all/selected request under the approval lock."""
+    if (request.mode == "selected") != bool(request.todoIds):
+        return JSONResponse({"error": "invalid_selection", "msg": "请选择要清理的供应商缓存。"}, 400)
+    with _task_lock:
+        if any(task.get("status") == "running" for task in _task_status.values()):
+            return JSONResponse({"error": "pipeline_running",
+                                 "msg": "当前有审批任务正在运行，请等待任务结束后再清理缓存。"}, 409)
+        try:
+            result = clean_supplier_caches(BASE_DIR, None if request.mode == "all" else request.todoIds)
+        except InvalidTodoId as exc:
+            return JSONResponse({"error": "invalid_selection", "msg": str(exc)}, 400)
+        except (OSError, ValueError, sqlite3.Error, CacheCleanupError) as exc:
+            log.error("批量缓存清理失败: %s", type(exc).__name__)
+            return JSONResponse({"error": "cleanup_failed", "msg": "清理未完成，请检查文件占用或权限后重试。"}, 500)
+        for row in result["deleted"]:
+            _record_supplier_cleanup(row)
+    return {
+        "ok": not result["failed"],
+        **result,
+        "freedBytes": sum(row["sizeBytes"] for row in result["deleted"]),
+    }
 
 
 @app.delete("/api/cache-cleanup/{todo_id}")
@@ -508,20 +563,10 @@ async def api_clean_supplier_cache(todo_id: str):
             result = clean_supplier_cache(BASE_DIR, todo_id)
         except CacheNotExpired as exc:
             return JSONResponse({"error": "not_expired", "msg": str(exc)}, 409)
-        except (OSError, ValueError, json.JSONDecodeError, CacheCleanupError) as exc:
+        except (OSError, ValueError, sqlite3.Error, CacheCleanupError) as exc:
             log.error("缓存清理失败 todo=%s exception=%s", todo_id, type(exc).__name__)
             return JSONResponse({"error": "cleanup_failed", "msg": "清理失败，文件未能全部删除，请检查占用后重试。"}, 500)
-        _task_status.pop(todo_id, None)
-        delete_state(STATE_DB, "tasks", todo_id)
-        try:
-            record_event(BASE_DIR / "audit.sqlite3", "supplier_cache_cleanup", {
-                "todo_id": todo_id,
-                "supplier": result["name"],
-                "deleted_files": result["fileCount"],
-                "freed_bytes": result["sizeBytes"],
-            })
-        except Exception as exc:
-            log.warning("缓存已清理，但审计记录写入失败: %s", type(exc).__name__)
+        _record_supplier_cleanup(result)
     return {"ok": True, "msg": f"已清理 {result['name']} 的缓存",
             "freedBytes": result["sizeBytes"], "deletedFiles": result["fileCount"]}
 

@@ -375,7 +375,11 @@ def render_supplier(tid, s2, textin, cache):
         # material 类 → 显示 OCR 抽取字段
         # auto/skip 类 → 显示规则判定结论（detail）或「无需核验」
         # 9/6：转人工项（manual，如 ISO 传错位置）→ 核验结果列直接显示 detail（人工核验说明）
-        if st == "manual" and check_detail_parts:
+        if c.get("certificate_api_checked") and detail:
+            # 证书已做接口交叉核验，以最终结论替代 OCR 单独的有效期提示。
+            css_class = "ok-mini" if st == "pass" else "issue"
+            check_detail = f"<span class='{css_class}'>{esc(detail)}</span>"
+        elif st == "manual" and check_detail_parts:
             # 9/11：manual 但已有逐项渲染（如 A01 营业执照：已确认一致项 + 需人工项），
             # 用逐项绿色/红色渲染，而非整段 detail 全红色——已确认项按图例显示绿色
             check_detail = "<br>".join(check_detail_parts)

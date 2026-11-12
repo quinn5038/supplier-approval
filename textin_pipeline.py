@@ -1107,23 +1107,63 @@ def _iso_certificate_section(text, iso_code):
     return text[start:end]
 
 
-def _extract_iso_certificate_number(text):
+def _iso_certificate_number_candidates(text):
     """Extract common Chinese/English ISO certificate-number labels."""
     pattern = re.compile(
-        r"(?:证书(?:注册)?(?:编号|号)|注册号|"
-        r"(?:CERTIFICATE|REGISTRATION)\s*(?:NO\.?|NUMBER))"
-        r"\s*[:：#]?\s*([A-Z0-9][A-Z0-9\s./()（）\-]{4,50})",
+        # Decorative Chinese headings are commonly typeset with wide tracking,
+        # and OCR preserves that as spaces or separate lines: ``证 书 号``.
+        r"(?:证\s*书\s*(?:注\s*册\s*)?(?:编\s*号|号)|注\s*册\s*号|"
+        r"(?:CERTIFICATE\s*(?:REGISTRATION\s*)?|REGISTRATION\s*)(?:NO\.?|NUMBER))"
+        r"\s*[:：#.．。]?\s*([A-Z0-9][A-Z0-9 \t./()（）\-]{4,50})",
         re.I,
     )
-    match = pattern.search(text)
-    if not match:
-        return None
-    value = re.sub(r"[*_`]", "", match.group(1)).strip()
-    value = value.strip(":：,，;；.")
-    return value or None
+    values = []
+    for match in pattern.finditer(text):
+        value = re.sub(r"[*_`]", "", match.group(1)).strip()
+        value = re.split(r"\s+(?=Valid\b|Issued\b|ISO\b)", value, flags=re.I)[0]
+        value = value.strip(":：,，;；.")
+        if value:
+            values.append(value)
+    return values
 
 
-def extract_iso_cert(text, supplier, iso_code):
+def _extract_iso_certificate_number(text, detail=None):
+    """Resolve repeated certificate numbers without silently deleting digits."""
+    def normalise(value):
+        return re.sub(r"\s+", "", value).upper()
+
+    candidates = {}
+    for value in _iso_certificate_number_candidates(text):
+        candidates.setdefault(normalise(value), value)
+    if len(candidates) <= 1:
+        return next(iter(candidates.values()), None)
+
+    # Chinese/English pages may disagree by one spurious leading character.
+    # Only accept the shorter, independently recognised number when its labelled
+    # OCR box is highly confident and stronger than every conflicting box.
+    scores = {number: 0.0 for number in candidates}
+    for row in detail or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            confidence = float(row.get("confidence") or 0)
+        except (TypeError, ValueError):
+            continue
+        for value in _iso_certificate_number_candidates(str(row.get("text") or "")):
+            number = normalise(value)
+            if number in scores:
+                scores[number] = max(scores[number], confidence)
+    shortest = min(candidates, key=len)
+    others = [number for number in candidates if number != shortest]
+    if (all(len(number) == len(shortest) + 1 and number.endswith(shortest)
+            for number in others)
+            and scores[shortest] >= .98
+            and scores[shortest] - max(scores[number] for number in others) >= .01):
+        return candidates[shortest]
+    return None
+
+
+def extract_iso_cert(text, supplier, iso_code, detail=None):
     """ISO证书 → 持有人比对+效期（按行结构抽取，兼容md表格/加粗排版）"""
     supplier = supplier or {}
     t = _pre(text)
@@ -1139,13 +1179,16 @@ def extract_iso_cert(text, supplier, iso_code):
     certification_body = _extract_iso_certification_body(t, fields["获证组织"])
     if certification_body:
         fields["认证机构"] = certification_body
-    fields["证书编号"] = _extract_iso_certificate_number(section)
+    fields["证书编号"] = _extract_iso_certificate_number(section, detail)
     exp, longterm = _valid_until(section)
     fields["有效期至"] = str(exp) if exp else ("长期" if longterm else None)
     m = re.search(r"认证?状态\s*[:：]?\s*(有效|暂停|撤销|失效)", section)
     fields["证书状态"] = m.group(1) if m else None
 
     checks, issues = {}, []
+    if (not fields["证书编号"]
+            and len(set(_iso_certificate_number_candidates(section))) > 1):
+        issues.append(f"ISO{iso_code}证书编号存在多个不一致识别结果，需人工核查")
     if _iso_type_matches(section, iso_code):
         checks["材料类型正确"] = True
     else:
@@ -1441,7 +1484,7 @@ def extract(doc_type, text, supplier=None, detail=None):
     if doc_type in ("financial_report",):
         return extract_financial_report(text)
     if doc_type in ("iso9001", "iso14001", "iso45001"):
-        return extract_iso_cert(text, supplier, doc_type[3:])
+        return extract_iso_cert(text, supplier, doc_type[3:], detail)
     if doc_type == "authorization":
         return extract_authorization(text, supplier)
     if doc_type == "production_license":

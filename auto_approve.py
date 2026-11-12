@@ -2132,6 +2132,15 @@ def _find_metric(obj, keyword):
     return None
 
 
+def _a03_material_missing(item):
+    """Return whether A03 failed specifically because no proof was uploaded."""
+    detail = str(item.get("detail") or "")
+    return (item.get("id") == "A03"
+            and item.get("status") == "fail"
+            and "缺少" in detail
+            and "纳税信用" in detail)
+
+
 def enhance_checklist_with_qcc(checklist, supplier, qcc):
     """
     企查查核验结果合并进核查清单（阶段2）。
@@ -2219,6 +2228,11 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
 
         # ---- A03 纳税信用等级：企业信息接口辅助核验 ----
         elif cid == "A03":
+            # A03 is a required uploaded document.  When it is absent, the only
+            # actionable result is the missing-material notice: do not append a
+            # cached/public API result or expose interface status in the report.
+            if _a03_material_missing(c):
+                continue
             tax = qcc.get("tax_credit") or {}
             if tax:
                 state = tax.get("status")
@@ -2394,12 +2408,6 @@ def enhance_checklist_with_qcc(checklist, supplier, qcc):
 # ============================================================
 # TextIn OCR 解析结果 → 核查清单增强（业务 9/2 接入）
 # ============================================================
-_C1_ISO_API_TYPES = {
-    "C1_02": ("iso9001", "ISO 9001"),
-    "C1_03": ("iso14001", "ISO 14001"),
-    "C1_04": ("iso45001", "ISO 45001"),
-}
-
 # doc_type → checklist 项名关键词（按 name 含任意关键词匹配）
 _TEXTIN_DOC_TYPE_KEYWORDS = {
     "business_license":      ["营业执照", "法律主体资格"],
@@ -2441,7 +2449,7 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
         c = _find_checklist_item(checklist, kws)
         if not c:
             continue
-        if c.get("id") in _C1_ISO_API_TYPES and c.get("status") in ("fail", "manual"):
+        if c.get("id") in _ISO_CODE_BY_RULE and c.get("status") in ("fail", "manual"):
             # OCR 缓存不得覆盖本次 ISO 缺件或上传位置冲突的判定。
             continue
 
@@ -2450,6 +2458,11 @@ def enhance_checklist_with_textin(checklist, supplier, textin_for_todo):
         checks = dict(r.get("checks") or {})
         issues = list(r.get("issues") or [])
         fields = r.get("fields") or {}
+        if c.get("id") in _ISO_CODE_BY_RULE:
+            # 实时证书状态由资质接口确认，印在证书上的旧状态不参与判定。
+            checks.pop("证书状态有效", None)
+            status_issue = f"ISO{_ISO_CODE_BY_RULE[c['id']]}证书状态为「{fields.get('证书状态')}」"
+            issues = [issue for issue in issues if issue != status_issue]
 
         if doc_type == "transport_license":
             # E1 的材料存在性由当前 materials_detail 判定。旧 OCR 缓存不能把
@@ -2557,32 +2570,78 @@ def _normalise_certificate_date(value):
         return None
 
 
-def enhance_c1_iso_with_certificate_api(checklist, textin_for_todo, api_result):
-    """Require exact OCR/API certificate-number and expiry matches for C1 ISO rules."""
-    issues = []
-    records = api_result.get("records") or []
-    api_available = api_result.get("status") == "ok" and api_result.get("complete") is True
+def _normalise_certificate_holder(name):
+    return "".join(unicodedata.normalize("NFKC", name).split()).casefold()
 
-    for cid, (doc_type, label) in _C1_ISO_API_TYPES.items():
-        item = next((row for row in checklist if row.get("id") == cid), None)
-        if not item:
+
+def _iso_api_validity_issue(label, matching_records, expiry, today):
+    statuses = {record.get("certificate_status") for record in matching_records}
+    invalid_statuses = statuses - {"有效", None, ""}
+    if invalid_statuses:
+        shown = "、".join(sorted(invalid_statuses))
+        return f"资质证书接口显示{label}证书状态为「{shown}」"
+    if statuses != {"有效"}:
+        return f"资质证书接口未明确确认{label}证书状态为「有效」"
+
+    starts = [_normalise_certificate_date(record.get("start_date")) for record in matching_records]
+    if any(start is None or start > expiry for start in starts):
+        return f"资质证书接口未提供{label}证书完整有效的起止日期"
+    if max(starts) > today:
+        return f"资质证书接口显示{label}证书尚未生效（起始日{max(starts).isoformat()}）"
+    if expiry < today:
+        return f"资质证书接口显示{label}证书已过期（截止日{expiry.isoformat()}）"
+    return ""
+
+
+def enhance_iso_with_certificate_api(checklist, textin_for_todo, supplier_name, fetch_certificates):
+    """Cross-check uploaded manufacturer and trader certificates against public records."""
+    issues = []
+    results_by_company = {}
+    supplier_key = _normalise_certificate_holder(supplier_name)
+    today = datetime.now().date()
+
+    def lookup(company):
+        if company not in results_by_company:
+            try:
+                results_by_company[company] = fetch_certificates(company) if company else {}
+            except Exception as exc:
+                log.warning("[阶段2] 资质证书接口查询异常：%s", type(exc).__name__)
+                results_by_company[company] = {}
+        return results_by_company[company]
+
+    for item in checklist:
+        cid = item.get("id")
+        code = _ISO_CODE_BY_RULE.get(cid)
+        if not code:
             continue
+        doc_type, label = f"iso{code}", f"ISO {code}"
         ocr = textin_for_todo.get(doc_type) or {}
         fields = ocr.get("fields") or {}
+        checks = ocr.get("checks") or {}
         raw_number = fields.get("证书编号")
         raw_expiry = fields.get("有效期至")
         number = _normalise_certificate_number(raw_number)
         expiry = _normalise_certificate_date(raw_expiry)
+        holder = str(fields.get("获证组织") or "").strip()
+        holder_key = _normalise_certificate_holder(holder)
+        # 兼容名称中混入 ISO 标题等噪声，不能把本公司证书转查为另一家公司。
+        agent_certificate = (cid == "D1_03" and supplier_key and holder_key
+                             and supplier_key not in holder_key and holder_key not in supplier_key
+                             and checks.get("材料类型正确") is True)
+        api_result = lookup(holder if agent_certificate else supplier_name)
+        api_available = api_result.get("status") == "ok" and api_result.get("complete") is True
+        item["certificate_api_checked"] = True
 
         reason = ""
-        if not ocr:
-            reason = f"{label}未取得OCR识别结果，无法核验证书编号与有效期"
-        elif not api_available:
+        if not api_available:
             reason = f"{label}资质证书接口查询未完成，无法核验证书编号与有效期"
         else:
-            typed = [record for record in records if record.get("iso_type") == doc_type]
+            typed = [record for record in (api_result.get("records") or [])
+                     if record.get("iso_type") == doc_type]
             if not typed:
                 reason = f"资质证书接口未查询到{label}证书记录"
+            elif not ocr:
+                reason = f"{label}未取得OCR识别结果，无法核验证书编号与有效期"
             elif not number:
                 reason = f"{label} OCR未识别到证书编号，无法与资质证书接口逐项比对"
             elif expiry is None:
@@ -2594,21 +2653,57 @@ def enhance_c1_iso_with_certificate_api(checklist, textin_for_todo, api_result):
                     reason = (f"{label}证书编号不一致：接口未找到与OCR编号"
                               f"「{raw_number}」完全一致的记录")
                 else:
-                    api_dates = [_normalise_certificate_date(record.get("end_date"))
-                                 for record in same_number]
-                    if expiry not in api_dates:
+                    matching_records = [record for record in same_number
+                                        if _normalise_certificate_date(record.get("end_date")) == expiry]
+                    if matching_records:
+                        reason = _iso_api_validity_issue(label, matching_records, expiry, today)
+                    else:
                         shown = next((str(record.get("end_date")) for record in same_number
                                       if record.get("end_date")), "未提供")
                         reason = (f"{label}证书编号一致但有效期不一致："
                                   f"OCR「{raw_expiry}」，接口「{shown}」")
 
-        if not reason and item.get("status") == "pass":
+        if not reason and not holder_key:
+            reason = f"{label} OCR未确认获证组织，无法核验证书归属"
+        if not reason and not agent_certificate and holder_key != supplier_key:
+            reason = f"{label}获证组织与申请供应商不一致，无法核验证书归属"
+        if not reason and (
+                checks.get("材料类型正确") is not True or checks.get("在有效期内") is not True):
+            reason = f"{label} OCR未确认认证类型及当前有效性"
+        ocr_issues = list(ocr.get("issues") or [])
+        renewal_warnings = [issue for issue in ocr_issues
+                            if "90天内" in issue and "提醒续证" in issue]
+        other_ocr_issues = [issue for issue in ocr_issues
+                            if issue not in renewal_warnings]
+        if not reason and renewal_warnings and not other_ocr_issues:
+            # The certificate is valid today and the public API confirmed the
+            # exact number, expiry and status.  A 90-day renewal reminder is a
+            # manual follow-up, not a failed cross-check.
+            reminder = "；".join(renewal_warnings)
+            item["status"] = "manual"
+            item["detail"] = (
+                f"OCR与资质证书接口核验一致：证书编号={raw_number}，"
+                f"接口状态=有效，有效期至={expiry.isoformat()}（当前有效）；"
+                f"{reminder}，请人工确认续证安排")
+            issues.append(f"{item.get('name', label)}：{reminder}，请人工确认续证安排")
+            continue
+        if not reason and agent_certificate:
+            reason = (f"{label}代理厂家证书编号和有效期与资质证书接口一致，接口确认状态有效且在有效期内，"
+                      "请人工核对厂家与贸易商的授权关系")
+            item.update(status="manual", detail=reason)
+            issues.append(reason)
+            continue
+        elif not reason and item.get("status") == "pass":
             item["status"] = "pass"
             item["detail"] = (f"OCR与资质证书接口核验一致：证书编号={raw_number}，"
-                              f"有效期至={expiry.isoformat()}")
+                              f"接口状态=有效，有效期至={expiry.isoformat()}（在有效期内），获证组织={holder}")
+            if fields.get("认证机构"):
+                item["detail"] += f"，认证机构={fields['认证机构']}"
             continue
         if not reason:
-            reason = f"{label} OCR基础核验未通过，不能仅凭接口字段一致判定通过"
+            detail = item.get("detail", "")
+            reason = (detail if detail.startswith("OCR核验") else
+                      f"{label} OCR基础核验未通过，不能仅凭接口字段一致判定通过")
         item["status"] = "fail"
         item["detail"] = "OCR与资质证书接口核验未通过：" + reason
         issues.append(f"{item.get('name', label)}：{reason}")
@@ -2711,17 +2806,19 @@ def run_stage2():
         applicable_rules, type_desc = determine_supplier_rules(supplier, cfg)
         checklist, auto_failed, missing, verify_items = build_checklist(
             supplier, applicable_rules, entry.get("materials_detail", []))
+        query_tax_credit = any(
+            row.get("id") == "A03" and not _a03_material_missing(row)
+            for row in checklist)
         # 先确认本次上传，再对已上传的证书做交叉核验。缺件保留在补件清单。
         certificate_items = [row for row in checklist
-                             if row["id"] in _C1_ISO_API_TYPES
+                             if row["id"] in _ISO_CODE_BY_RULE
                              and row["status"] in ("pending", "pass")]
 
-        # 企业信息生产接口实时查询。客户端自带 24 小时本机缓存；这里只合并
+        # A10 和税务评级客户端自带 24 小时本机缓存；这里只合并
         # 脱敏摘要，不将案件、纳税人识别号或关联路径明细写入报告。
         try:
             from qcc_api_client import (
                 fetch_a10_checks,
-                fetch_qualification_certificates,
                 fetch_tax_credit,
             )
             supplier_name = (_resolve_supplier_name(supplier, todo, textin.get(tid))
@@ -2730,10 +2827,12 @@ def run_stage2():
                            or supplier.get("credit_code", ""))
             q = dict(q)
             q["a10_checks"] = fetch_a10_checks(supplier_name, credit_code)
-            q["tax_credit"] = fetch_tax_credit(supplier_name, credit_code)
-            if certificate_items:
-                q["qualification_certificates"] = fetch_qualification_certificates(
-                    supplier_name)
+            if query_tax_credit:
+                q["tax_credit"] = fetch_tax_credit(supplier_name, credit_code)
+            else:
+                # Discard historical tax data too; otherwise a previous cached
+                # query would still be merged into this missing-material report.
+                q.pop("tax_credit", None)
         except Exception as exc:
             log.warning("[阶段2] 企业信息接口查询异常：%s", type(exc).__name__)
 
@@ -2746,8 +2845,14 @@ def run_stage2():
             checklist, textin_issues = enhance_checklist_with_textin(
                 checklist, supplier, textin[tid])
         if certificate_items:
-            _, certificate_issues = enhance_c1_iso_with_certificate_api(
-                certificate_items, textin.get(tid) or {}, q.get("qualification_certificates") or {})
+            from qcc_api_client import fetch_qualification_certificates
+
+            _, certificate_issues = enhance_iso_with_certificate_api(
+                certificate_items, textin.get(tid) or {}, _resolve_supplier_name(supplier, todo),
+                fetch_qualification_certificates)
+            # 三体系的报告问题由最终交叉核验统一给出，避免旧 OCR 日期抢占接口结论。
+            iso_issue_prefixes = tuple(row["name"] + "：" for row in certificate_items)
+            textin_issues = [issue for issue in textin_issues if not issue.startswith(iso_issue_prefixes)]
             textin_issues.extend(certificate_issues)
 
         # 9/10 修复：OCR 增强可能把「缺材料 fail」降级为「转人工 manual」

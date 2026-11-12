@@ -1,7 +1,7 @@
 """中交企业信息接口客户端。
 
 当前生产流程接入税务评级、失信被执行人、严重违法、经营异常、建筑资质不良行为
-和资质证书查询。资质证书结果用于 C1_02-C1_04 的证书编号、有效期严格交叉核验。
+和资质证书查询。资质证书结果用于境内厂家及贸易商 ISO 证书的编号和有效期交叉核验。
 关联关系查询客户端已预留，但 A14 当前未启用，也不会由审批流水线调用。
 原始响应只保存在本机、被 ``.gitignore`` 排除的 SQLite 缓存中；审批结果
 仅保留类别状态和数量，不落案件编号、证件号码、人员姓名等明细。
@@ -219,10 +219,11 @@ def _throttled_get(path: str, params: dict) -> dict:
     return {"_client_error": "retry_exhausted"}
 
 
-def _post_page(path: str, body: dict, identity: str, cache_key: str) -> dict:
-    cached = _cache_get(identity, cache_key)
-    if cached is not None:
-        return cached
+def _post_page(path: str, body: dict, identity: str, cache_key: str, *, fresh: bool = False) -> dict:
+    if not fresh:
+        cached = _cache_get(identity, cache_key)
+        if cached is not None:
+            return cached
     response = _throttled_post(path, body)
     status = str(response.get("status", ""))
     # 成功和“有效请求无结果”都缓存；鉴权、配额、限流失败不缓存。
@@ -478,8 +479,22 @@ def _certificate_iso_type(item: dict) -> str | None:
     return None
 
 
+def _certificate_status(item: dict) -> str | None:
+    """Read the certificate's status, independently of the issuer and response status."""
+    statuses = set()
+    for field in item.get("detail") or []:
+        if not isinstance(field, dict) or _text(field.get("title")) not in {"证书状态", "认证状态"}:
+            continue
+        value = _text(field.get("content"))
+        if value:
+            statuses.add(value)
+    if len(statuses) > 1:
+        return "状态冲突"
+    return next(iter(statuses), None)
+
+
 def fetch_qualification_certificates(name: str) -> dict:
-    """Fetch public certificate summaries used for C1_02-C1_04 cross-checks."""
+    """Fetch public certificate summaries used for manufacturer and trader ISO checks."""
     identity = name.strip()
     if not _is_configured():
         return {"status": "unavailable", "complete": False, "records": []}
@@ -494,6 +509,8 @@ def fetch_qualification_certificates(name: str) -> dict:
             {"name": identity, "certificateName": "", "pageNum": page, "pageSize": 20},
             identity,
             f"qualification_certificates:v1:page:{page}",
+            # A revocation can precede endDate. Never approve from a stale cached status.
+            fresh=True,
         )
         if response.get("_client_error"):
             return {"status": "unavailable", "complete": False, "records": []}
@@ -529,6 +546,8 @@ def fetch_qualification_certificates(name: str) -> dict:
             records.append({
                 "iso_type": iso_type,
                 "cert_no": str(item.get("certNo") or ""),
+                "certificate_status": _certificate_status(item),
+                "start_date": str(item.get("startDate") or ""),
                 "end_date": str(item.get("endDate") or ""),
             })
     return {"status": "ok", "complete": True, "records": records,

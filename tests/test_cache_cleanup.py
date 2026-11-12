@@ -4,8 +4,13 @@ import os
 import sqlite3
 from datetime import datetime
 
+from fastapi.testclient import TestClient
+
+import storage_cleanup
+from state_store import get_state, put_state
 from storage_cleanup import clean_supplier_cache, list_expired_supplier_caches
 from web import app as webapp
+from web.security import CSRF_COOKIE
 
 DAY = 86400
 
@@ -122,13 +127,77 @@ def test_web_cleanup_rejects_while_pipeline_is_running(tmp_path, monkeypatch):
     assert response.status_code == 409
 
 
+def test_web_selected_cleanup_reports_partial_failure_and_refreshes_inventory(tmp_path, monkeypatch):
+    for todo_id in ("remove-1", "remove-2", "locked", "keep"):
+        folder = tmp_path / "files_cache" / todo_id
+        folder.mkdir(parents=True)
+        (folder / "material.pdf").write_bytes(b"fixture")
+    reports = {tid: {"name": tid} for tid in ("remove-1", "remove-2", "locked", "keep", "report-only")}
+    for mode in ("online", "offline"):
+        _write_json(tmp_path / f"stage2_results.{mode}.json", reports)
+    monkeypatch.setattr(webapp, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(webapp, "STATE_DB", tmp_path / "web_state.sqlite3")
+    monkeypatch.setattr(webapp, "_task_status", {"remove-1": {"status": "done"}})
+    monkeypatch.setenv("WEB_AUTH_MODE", "local")
+    rmtree = storage_cleanup.shutil.rmtree
+
+    def remove_tree(path):
+        if path.name == "locked":
+            raise PermissionError("fixture in use")
+        rmtree(path)
+
+    with TestClient(webapp.app, base_url="http://localhost", client=("127.0.0.1", 12345)) as client:
+        assert client.get("/api/cache-cleanup").json()["items"] == []
+        headers = {"Origin": "http://localhost", "X-CSRF-Token": client.cookies[CSRF_COOKIE]}
+        payload = {"mode": "selected", "todoIds": ["remove-1", "locked", "remove-2", "remove-1"]}
+        assert client.post("/api/cache-cleanup", json=payload).status_code == 403
+        unsafe = {"mode": "selected", "todoIds": ["remove-1", "../keep"]}
+        assert client.post("/api/cache-cleanup", json=unsafe, headers=headers).status_code == 400
+        assert (tmp_path / "files_cache" / "remove-1").exists()
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(storage_cleanup.shutil, "rmtree", remove_tree)
+            response = client.post("/api/cache-cleanup", json=payload, headers=headers)
+        assert response.status_code == 200
+        result = response.json()
+        assert result["ok"] is False
+        assert [row["todoId"] for row in result["deleted"]] == ["remove-1", "remove-2"]
+        assert [row["todoId"] for row in result["failed"]] == ["locked"]
+        assert result["freedBytes"] == 2 * len(b"fixture")
+        refreshed = client.get("/api/cache-cleanup?include_recent=true").json()["items"]
+        assert {row["todoId"] for row in refreshed} == {"locked", "keep", "report-only"}
+        assert "remove-1" not in webapp._task_status
+
+        webapp._task_status["busy"] = {"status": "running"}
+        assert client.post("/api/cache-cleanup", json={"mode": "all"}, headers=headers).status_code == 409
+        assert (tmp_path / "files_cache" / "keep").exists()
+
+        webapp._task_status.clear()
+        qcc_db = tmp_path / "qcc_api_cache.sqlite3"
+        put_state(qcc_db, "qcc", "orphan/path", {})
+        put_state(qcc_db, "other", "keep", {})
+        _write_json(tmp_path / "qcc_results.json", {"external-company-key": {}})
+        _write_json(tmp_path / "qcc_call_count.json", {"total": 1})
+        response = client.post("/api/cache-cleanup", json={"mode": "all"}, headers=headers)
+        assert response.status_code == 200
+        assert {row["todoId"] for row in response.json()["deleted"]} == {"locked", "keep", "report-only"}
+        assert client.get("/api/cache-cleanup?include_recent=true").json()["items"] == []
+        assert get_state(qcc_db, "qcc") == {}
+        assert get_state(qcc_db, "other") == {"keep": {}}
+        assert json.loads((tmp_path / "qcc_results.json").read_text(encoding="utf-8")) == {}
+        assert (tmp_path / "qcc_call_count.json").exists()
+        assert (tmp_path / "audit.sqlite3").exists()
+
+
 def test_homepage_has_cache_cleanup_states():
     html = (webapp.WEB_DIR / "templates" / "index.html").read_text(encoding="utf-8")
     css = (webapp.WEB_DIR / "static" / "style.css").read_text(encoding="utf-8")
     assert "清理供应商缓存" in html
-    assert "没有缓存时间超过 14 天的供应商" in html
+    assert "一键清理全部" in html
+    assert "删除所选" in html
+    assert "cache-select-all" in html
     assert "此操作不可撤销" in html
-    assert "await loadExpiredCaches()" in html
+    assert "await loadSupplierCaches()" in html
     assert "WebUI 后端尚未加载缓存清理功能" in html
     assert "nameById[item.todoId] || item.name" in html
     assert ".cache-row .btn { width: 86px; white-space: nowrap; }" in css

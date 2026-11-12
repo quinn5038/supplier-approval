@@ -91,6 +91,46 @@ def test_non_license_portrait_does_not_trigger_page_rotation():
     ocr.read.assert_called_once_with(image)
 
 
+@pytest.mark.parametrize("kind,title,upright_angle", [
+    ("iso9001", "质量管理体系认证证书", cv2.ROTATE_90_COUNTERCLOCKWISE),
+    ("iso14001", "环境管理体系认证证书", cv2.ROTATE_90_CLOCKWISE),
+    ("iso45001", "职业健康安全管理体系认证证书", cv2.ROTATE_90_COUNTERCLOCKWISE),
+])
+def test_sideways_iso_image_recovers_number_and_expiry(tmp_path, kind, title, upright_angle):
+    image = np.full((220, 320, 3), 255, dtype=np.uint8)
+    source = tmp_path / "certificate.jpg"
+    assert cv2.imwrite(str(source), image)
+    sideways = [vertical_item("有效期至：2099年11月27日", 0, 0),
+                vertical_item("证书编号：SYN-001", 25, 0), vertical_item(title, 50, 0)]
+    upright = [item(title, 10, 20), item("证书编号：SYN-001", 10, 55),
+               item("兹证明", 10, 85), item("合成测试有限公司", 10, 115),
+               item("有效期至：2099年11月27日", 10, 270)]
+    upside_down = [item("有效期至：2099年11月27日", 10, 25),
+                   item("证书编号：SYN-001", 10, 260), item(title, 10, 285)]
+    rotations = [upright, upside_down] if upright_angle == cv2.ROTATE_90_CLOCKWISE else [upside_down, upright]
+    ocr = Mock(read=Mock(side_effect=[sideways, *rotations]))
+
+    markdown, detail = parse_document(source, ocr)
+    result = tp.extract(kind, markdown, {"full_name": "合成测试有限公司"}, detail)
+
+    assert ocr.read.call_count == 3
+    assert result["fields"]["证书编号"] == "SYN-001"
+    assert result["fields"]["有效期至"] == "2099-11-27"
+    assert result["checks"]["持有人一致"] is True
+
+
+def test_upright_iso_with_vertical_mark_is_not_retried():
+    image = np.full((320, 220, 3), 255, dtype=np.uint8)
+    original = [item("质量管理体系认证证书", 10, 20), item("证书编号：SYN-001", 10, 60),
+                vertical_item("标识", 185, 230)]
+    ocr = Mock(read=Mock(return_value=original))
+
+    oriented, result = read_with_orientation_retry(image, ocr)
+
+    assert oriented is image and result is original
+    ocr.read.assert_called_once_with(image)
+
+
 def test_red_seal_retry_is_used_only_when_it_recovers_more_complete_dates():
     image = np.full((120, 240, 3), 255, dtype=np.uint8)
     image[30:90, 80:160] = (0, 0, 255)

@@ -91,6 +91,55 @@ def test_positional_name_recovery_requires_id_number_and_birth_date():
     assert masker.find_name_field(items, 1712, 1080) is None
 
 
+def test_positional_name_recovery_never_uses_gender_or_nation_row():
+    items = [
+        _item("性别男民族汉", (300, 250, 650, 320)),
+        _item("1990年1月1日", (346, 408, 885, 473)),
+        _item("公民身份号码110101199001011234", (155, 856, 1493, 922)),
+    ]
+    assert masker.find_name_field(items, 1712, 1080) is None
+
+
+def test_merged_name_label_does_not_accept_gender_value_as_name():
+    items = [
+        _item("姓名性别男", (149, 151, 580, 237)),
+        _item("民族汉", (400, 284, 737, 365)),
+        _item("公民身份号码110101199001011234", (155, 856, 1493, 922)),
+    ]
+    assert masker.find_name_field(items, 1712, 1080) is None
+
+
+def test_front_name_region_enhancement_recovers_name_above_gender_row():
+    image = np.full((1080, 1712, 3), 255, dtype=np.uint8)
+
+    class RegionOcr:
+        calls = 0
+
+        def read(self, crop):
+            self.calls += 1
+            if self.calls == 1:
+                return [_item("性别男民族汉", (300, 120, 650, 180))]
+            return [
+                _item("姓名", (120, 70, 220, 120)),
+                _item("测试人员", (250, 70, 470, 120)),
+            ]
+
+    field = masker.recover_name_from_front_region(image, RegionOcr())
+    assert field is not None
+    assert field.value == "测试人员"
+    assert field.box[1] < int(image.shape[0] * .29)
+
+
+def test_front_name_region_with_only_gender_text_fails_closed():
+    image = np.full((1080, 1712, 3), 255, dtype=np.uint8)
+
+    class GenderOnlyOcr:
+        def read(self, crop):
+            return [_item("性别男民族汉", (300, 70, 650, 130))]
+
+    assert masker.recover_name_from_front_region(image, GenderOnlyOcr()) is None
+
+
 def test_unrecognised_image_is_black():
     original = np.full((108, 171, 3), 255, dtype=np.uint8)
     masked, result = masker.process_page(original, EmptyOcr(), "single", "synthetic", 1)

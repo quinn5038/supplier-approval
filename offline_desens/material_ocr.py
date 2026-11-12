@@ -19,6 +19,15 @@ _COMPLETE_DATE = re.compile(
     r"(?:19|20)\d{2}\s*[年.\-/]\s*\d{1,2}\s*[月.\-/]\s*\d{1,2}(?!\d)")
 _LICENSE_ORIENTATION_MARKERS = (
     "营业执照", "统一社会信用代码", "法定代表人", "注册资本", "经营范围", "登记机关")
+_ISO_TITLE = re.compile(
+    r"(?:质量|环境|职业健康安全)管理体系(?:认证(?:合格)?证书)?|"
+    r"(?:QUALITY|ENVIRONMENTAL|OCCUPATIONALHEALTHANDSAFETY)MANAGEMENTSYSTEMCERTIFICATE",
+    re.I,
+)
+_ISO_STANDARD = re.compile(r"(?:ISO|IS0|1SO|1S0)(?:9001|14001|45001)(?!\d)", re.I)
+_ISO_NUMBER_LABEL = re.compile(
+    r"证书(?:注册)?(?:编号|号)|注册号|(?:CERTIFICATE|REGISTRATION)(?:NO\.?|NUMBER)", re.I)
+_ISO_EXPIRY_LABEL = re.compile(r"有效期至|证书有效(?:期|日期)|到期日期|VALIDUNTIL|EXPIRYDATE", re.I)
 
 
 def _complete_date_count(items):
@@ -64,21 +73,57 @@ def _orientation_score(image, items):
             horizontal_ratio, confidence_chars / max(1.0, total_chars))
 
 
-def read_with_orientation_retry(image, ocr):
-    """Correct a landscape business licence stored as a 90-degree portrait image."""
+def _iso_orientation_score(image, items):
+    """Prefer horizontal text with the certificate heading above its field rows."""
+    horizontal_chars = total_chars = confidence_chars = 0
+    titles, fields = [], []
+    for item in items:
+        text = "".join(str(item.text).split())
+        polygon = np.asarray(item.polygon)
+        width, height = polygon.max(axis=0) - polygon.min(axis=0)
+        chars = len(text)
+        total_chars += chars
+        confidence_chars += chars * float(item.confidence)
+        if width >= height:
+            horizontal_chars += chars
+        y = float(polygon[:, 1].mean())
+        if _ISO_TITLE.search(text):
+            titles.append(y)
+        if _ISO_NUMBER_LABEL.search(text) or _ISO_EXPIRY_LABEL.search(text):
+            fields.append(y)
+    ratio = horizontal_chars / max(1, total_chars)
+    title_above_fields = bool(titles and fields and min(titles) < min(fields))
+    title_near_top = bool(titles and min(titles) < image.shape[0] * .5)
+    return (ratio >= .65, title_above_fields, title_near_top, bool(titles), len(fields),
+            _complete_date_count(items), total_chars, confidence_chars / max(1, total_chars))
+
+
+def read_with_orientation_retry(image, ocr, *, iso_hint=False):
+    """Rotate sideways licences and ISO certificates before arranging OCR lines."""
     original = ocr.read(image)
-    compact = "".join(str(item.text).replace(" ", "") for item in original)
+    compact = "".join("".join(str(item.text).split()) for item in original)
+    looks_like_iso = iso_hint or _ISO_TITLE.search(compact) or _ISO_STANDARD.search(compact)
     looks_like_sideways_license = (
         image.shape[0] > image.shape[1] * 1.15
-        and any(marker in compact for marker in ("营业执照", "统一社会信用代码"))
+        and ("营业执照" in compact or ("统一社会信用代码" in compact and not looks_like_iso))
     )
-    if not looks_like_sideways_license:
+    if looks_like_sideways_license:
+        score = _orientation_score
+    elif looks_like_iso:
+        score = _iso_orientation_score
+        if score(image, original)[0]:
+            return image, original
+    else:
         return image, original
+
     candidates = [(image, original)]
     for code in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
         rotated = cv2.rotate(image, code)
         candidates.append((rotated, ocr.read(rotated)))
-    return max(candidates, key=lambda candidate: _orientation_score(*candidate))
+    oriented, result = max(candidates, key=lambda candidate: score(*candidate))
+    if score is _iso_orientation_score and original and not score(oriented, result)[0]:
+        return image, original
+    return oriented, result
 
 
 def read_with_red_seal_retry(image, ocr, original=None):
@@ -100,8 +145,8 @@ def read_with_red_seal_retry(image, ocr, original=None):
     return original
 
 
-def read_material_image(image, ocr):
-    oriented, original = read_with_orientation_retry(image, ocr)
+def read_material_image(image, ocr, *, iso_hint=False):
+    oriented, original = read_with_orientation_retry(image, ocr, iso_hint=iso_hint)
     return read_with_red_seal_retry(oriented, ocr, original)
 
 
@@ -136,6 +181,7 @@ def ordered_lines(items, page_id):
 
 def parse_document(path, ocr, dpi=200, metrics=None):
     path = Path(path)
+    iso_hint = bool(_ISO_TITLE.search(path.stem) or re.search(r"(?<!\d)(?:9001|14001|45001)(?!\d)", path.stem))
     pages, details = [], []
     metrics = metrics if metrics is not None else {}
     metrics.setdefault("pages", 0)
@@ -152,7 +198,7 @@ def parse_document(path, ocr, dpi=200, metrics=None):
                 metrics["pages"] += 1
                 metrics["max_pixels"] = max(
                     metrics["max_pixels"], image.shape[0] * image.shape[1])
-                text, detail = ordered_lines(read_material_image(image, ocr), number)
+                text, detail = ordered_lines(read_material_image(image, ocr, iso_hint=iso_hint), number)
                 if not detail:
                     raise ValueError(f"第{number}页未识别到文字，转人工")
                 pages.append(text)
@@ -163,7 +209,7 @@ def parse_document(path, ocr, dpi=200, metrics=None):
             raise ValueError("无法读取材料图片")
         metrics["pages"] += 1
         metrics["max_pixels"] = image.shape[0] * image.shape[1]
-        text, details = ordered_lines(read_material_image(image, ocr), 1)
+        text, details = ordered_lines(read_material_image(image, ocr, iso_hint=iso_hint), 1)
         pages.append(text)
     else:
         raise ValueError("第一阶段仅支持 PDF、PNG、JPEG、BMP；其他格式转人工")
